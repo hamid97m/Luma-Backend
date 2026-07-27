@@ -19,6 +19,10 @@ export function verifyInitData(initData: string, botToken: string): TelegramUser
   if (hash.length !== 64) return null
   if (!timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(hash, 'hex'))) return null
 
+  // Reject tokens older than 24 hours
+  const authDate = params.get('auth_date')
+  if (!authDate || Date.now() / 1000 - Number(authDate) > 86400) return null
+
   const userStr = params.get('user')
   if (!userStr) return null
 

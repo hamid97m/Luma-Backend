@@ -13,6 +13,8 @@ export async function swipesRoutes(app: FastifyInstance) {
       direction: 'like' | 'pass'
     }
 
+    if (targetUserId === req.userId) return reply.status(400).send({ error: 'cannot_swipe_self' })
+
     // Insert swipe; UNIQUE constraint prevents duplicates
     const { error: swipeErr } = await db.from('swipes').insert({
       swiper_id: req.userId,
@@ -49,13 +51,18 @@ export async function swipesRoutes(app: FastifyInstance) {
     if (matchErr) return reply.status(500).send({ error: 'match_failed' })
 
     // Fetch both users for notification
-    const { data: users } = await db
+    const { data: users, error: usersErr } = await db
       .from('users')
       .select('id, name, telegram_id')
       .in('id', [req.userId, targetUserId])
 
-    const me = users!.find((u: { id: string }) => u.id === req.userId)!
-    const them = users!.find((u: { id: string }) => u.id === targetUserId)!
+    if (usersErr || !users || users.length < 2) {
+      // Match was created, but we can't build the response — return minimal success
+      return { matched: true, match: { id: match!.id, user: { id: targetUserId, name: '', telegramId: 0 } } }
+    }
+
+    const me = users.find((u: { id: string }) => u.id === req.userId)!
+    const them = users.find((u: { id: string }) => u.id === targetUserId)!
 
     // Fire-and-forget
     notifyMatch(me.telegram_id, me.name, them.telegram_id, them.name).catch(console.error)

@@ -2,7 +2,9 @@ import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 
 export async function matchesRoutes(app: FastifyInstance) {
-  app.get('/matches', async (req) => {
+  app.get('/matches', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+
     const { data: rows } = await db
       .from('matches')
       .select(`

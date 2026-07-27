@@ -33,4 +33,19 @@ describe('verifyInitData', () => {
   it('returns null when hash is missing', () => {
     expect(verifyInitData('user=%7B%7D&auth_date=0', BOT_TOKEN)).toBeNull()
   })
+
+  it('returns null for expired auth_date', () => {
+    const user = { id: 1, first_name: 'Old' }
+    // auth_date 48 hours ago
+    const expiredTs = Math.floor(Date.now() / 1000) - 48 * 3600
+    const params = new URLSearchParams({ user: JSON.stringify(user), auth_date: String(expiredTs) })
+    const dataCheckString = Array.from(params.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, v]) => `${k}=${v}`)
+      .join('\n')
+    const secretKey = createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest()
+    const hash = createHmac('sha256', secretKey).update(dataCheckString).digest('hex')
+    params.set('hash', hash)
+    expect(verifyInitData(params.toString(), BOT_TOKEN)).toBeNull()
+  })
 })

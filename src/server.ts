@@ -21,6 +21,10 @@ declare module 'fastify' {
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: process.env.NODE_ENV !== 'test' })
 
+  if (!process.env.WEB_URL && process.env.NODE_ENV === 'production') {
+    throw new Error('WEB_URL environment variable is required in production')
+  }
+
   await app.register(cors, {
     origin: process.env.WEB_URL ?? '*',
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],

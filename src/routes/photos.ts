@@ -37,12 +37,13 @@ export async function photosRoutes(app: FastifyInstance) {
     const nextPosition = existing?.length ?? 0
 
     // Pre-register the photo row; the upload-url path is the key
-    await db.from('user_photos').insert({
+    const { error: insertErr } = await db.from('user_photos').insert({
       id: photoId,
       user_id: req.userId,
       url: publicUrl,
       position: nextPosition,
     })
+    if (insertErr) return reply.status(500).send({ error: 'photo_register_failed' })
 
     return {
       uploadUrl: signedData.signedUrl,

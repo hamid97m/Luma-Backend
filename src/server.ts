@@ -29,7 +29,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(rateLimit, {
     max: 300,
     timeWindow: '1 hour',
-    keyGenerator: (req: FastifyRequest) => req.headers.authorization?.slice(0, 32) ?? req.ip ?? 'anon',
+    keyGenerator: (req: FastifyRequest) => req.headers.authorization?.slice(0, 32) ?? req.ip,
     errorResponseBuilder: () => ({ error: 'rate_limited' }),
   })
 

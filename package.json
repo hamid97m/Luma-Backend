@@ -9,9 +9,10 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.0",
     "@fastify/cors": "^9.0.0",
     "@fastify/rate-limit": "^9.0.0",
+    "@supabase/supabase-js": "^2.45.0",
+    "dotenv": "^17.4.2",
     "fastify": "^4.28.0",
     "grammy": "^1.31.0"
   },

@@ -3,7 +3,9 @@ import { db } from '../db.js'
 import { notifyMatch } from '../bot.js'
 
 export async function swipesRoutes(app: FastifyInstance) {
-  app.post('/swipes', async (req, reply) => {
+  app.post('/swipes', {
+    config: { rateLimit: { max: 200, timeWindow: '1 hour' } },
+  }, async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
     const { targetUserId, direction } = req.body as {

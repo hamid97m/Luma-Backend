@@ -6,7 +6,9 @@ const MAX_PHOTOS = 6
 
 export async function photosRoutes(app: FastifyInstance) {
   // Get a signed upload URL
-  app.post('/profile/me/photos/upload-url', async (req, reply) => {
+  app.post('/profile/me/photos/upload-url', {
+    config: { rateLimit: { max: 10, timeWindow: '1 hour' } },
+  }, async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
     const { contentType } = req.body as { contentType: string }

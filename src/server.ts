@@ -1,5 +1,6 @@
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import cors from '@fastify/cors'
+import rateLimit from '@fastify/rate-limit'
 import { verifyInitData } from './auth.js'
 import { db } from './db.js'
 import type { TelegramUser } from './types.js'
@@ -23,6 +24,13 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(cors, {
     origin: process.env.WEB_URL ?? '*',
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  })
+
+  await app.register(rateLimit, {
+    max: 300,
+    timeWindow: '1 hour',
+    keyGenerator: (req: FastifyRequest) => req.headers.authorization?.slice(0, 32) ?? req.ip ?? 'anon',
+    errorResponseBuilder: () => ({ error: 'rate_limited' }),
   })
 
   // Auth middleware — skips /auth/verify and /health

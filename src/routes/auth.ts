@@ -4,7 +4,11 @@ import { verifyInitData } from '../auth.js'
 
 export async function authRoutes(app: FastifyInstance) {
   app.post('/auth/verify', async (req, reply) => {
-    const { initData } = req.body as { initData: string }
+    const body = req.body as { initData?: string }
+    const { initData } = body
+    if (typeof initData !== 'string' || !initData) {
+      return reply.status(400).send({ error: 'missing_init_data' })
+    }
 
     const tgUser = verifyInitData(initData, process.env.BOT_TOKEN ?? '')
     if (!tgUser) return reply.status(401).send({ error: 'invalid_init_data' })

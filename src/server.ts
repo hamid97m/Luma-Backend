@@ -12,7 +12,7 @@ import { matchesRoutes } from './routes/matches.js'
 
 declare module 'fastify' {
   interface FastifyRequest {
-    userId: string
+    userId: string | undefined
     telegramUser: TelegramUser
   }
 }
@@ -43,7 +43,8 @@ export async function buildApp(): Promise<FastifyInstance> {
       .eq('telegram_id', tgUser.id)
       .single()
 
-    if (data) req.userId = data.id
+    if (!data) return reply.status(401).send({ error: 'user_not_found' })
+    req.userId = data.id
   })
 
   app.get('/health', async () => ({ ok: true }))

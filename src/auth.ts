@@ -2,6 +2,11 @@ import { createHmac, timingSafeEqual } from 'crypto'
 import type { TelegramUser } from './types.js'
 
 export function verifyInitData(initData: string, botToken: string): TelegramUser | null {
+  // Dev bypass — lets you test in a regular browser without Telegram
+  if (process.env.NODE_ENV !== 'production' && initData === 'dev_mode') {
+    return { id: 999999, first_name: 'Dev', username: 'devuser' }
+  }
+
   const params = new URLSearchParams(initData)
   const hash = params.get('hash')
   if (!hash) return null

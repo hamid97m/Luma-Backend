@@ -1,0 +1,59 @@
+import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
+import cors from '@fastify/cors'
+import { verifyInitData } from './auth.js'
+import { db } from './db.js'
+import type { TelegramUser } from './types.js'
+import { authRoutes } from './routes/auth.js'
+import { profileRoutes } from './routes/profile.js'
+import { photosRoutes } from './routes/photos.js'
+import { discoveryRoutes } from './routes/discovery.js'
+import { swipesRoutes } from './routes/swipes.js'
+import { matchesRoutes } from './routes/matches.js'
+
+declare module 'fastify' {
+  interface FastifyRequest {
+    userId: string
+    telegramUser: TelegramUser
+  }
+}
+
+export async function buildApp(): Promise<FastifyInstance> {
+  const app = Fastify({ logger: process.env.NODE_ENV !== 'test' })
+
+  await app.register(cors, {
+    origin: process.env.WEB_URL ?? '*',
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  })
+
+  // Auth middleware — skips /auth/verify and /health
+  app.addHook('preHandler', async (req: FastifyRequest, reply: FastifyReply) => {
+    if (req.url === '/auth/verify' || req.url === '/health') return
+
+    const initData = req.headers.authorization
+    if (!initData) return reply.status(401).send({ error: 'missing_auth' })
+
+    const tgUser = verifyInitData(initData, process.env.BOT_TOKEN ?? '')
+    if (!tgUser) return reply.status(401).send({ error: 'invalid_init_data' })
+
+    req.telegramUser = tgUser
+
+    const { data } = await db
+      .from('users')
+      .select('id')
+      .eq('telegram_id', tgUser.id)
+      .single()
+
+    if (data) req.userId = data.id
+  })
+
+  app.get('/health', async () => ({ ok: true }))
+
+  await app.register(authRoutes)
+  await app.register(profileRoutes)
+  await app.register(photosRoutes)
+  await app.register(discoveryRoutes)
+  await app.register(swipesRoutes)
+  await app.register(matchesRoutes)
+
+  return app
+}

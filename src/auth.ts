@@ -1,4 +1,4 @@
-import { createHmac } from 'crypto'
+import { createHmac, timingSafeEqual } from 'crypto'
 import type { TelegramUser } from './types.js'
 
 export function verifyInitData(initData: string, botToken: string): TelegramUser | null {
@@ -16,10 +16,15 @@ export function verifyInitData(initData: string, botToken: string): TelegramUser
   const secretKey = createHmac('sha256', 'WebAppData').update(botToken).digest()
   const expected = createHmac('sha256', secretKey).update(dataCheckString).digest('hex')
 
-  if (expected !== hash) return null
+  if (hash.length !== 64) return null
+  if (!timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(hash, 'hex'))) return null
 
   const userStr = params.get('user')
   if (!userStr) return null
 
-  return JSON.parse(userStr) as TelegramUser
+  try {
+    return JSON.parse(userStr) as TelegramUser
+  } catch {
+    return null
+  }
 }

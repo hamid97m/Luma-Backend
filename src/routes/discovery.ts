@@ -20,21 +20,29 @@ export async function discoveryRoutes(app: FastifyInstance) {
     const recycleTime = new Date(Date.now() - PASS_RECYCLE_MS).toISOString()
 
     // Swipes to exclude: all likes + recent passes (passes older than 24h are recycled)
-    const { data: recentSwipes } = await db
+    const { data: recentSwipes, error: swipesErr } = await db
       .from('swipes')
       .select('swiped_id')
       .eq('swiper_id', req.userId)
       .or(`direction.eq.like,and(direction.eq.pass,created_at.gt.${recycleTime})`)
 
-    const { data: blocks } = await db
+    if (swipesErr) return reply.status(500).send({ error: 'discovery_failed' })
+
+    const { data: blocks, error: blocksErr } = await db
       .from('blocks')
-      .select('blocked_id')
-      .eq('blocker_id', req.userId)
+      .select('blocker_id, blocked_id')
+      .or(`blocker_id.eq.${req.userId},blocked_id.eq.${req.userId}`)
+
+    if (blocksErr) return reply.status(500).send({ error: 'discovery_failed' })
+
+    const blockedIds = (blocks ?? []).map((b: { blocker_id: string; blocked_id: string }) =>
+      b.blocker_id === req.userId ? b.blocked_id : b.blocker_id
+    )
 
     const excludeIds = [
       req.userId,
       ...(recentSwipes?.map((s: { swiped_id: string }) => s.swiped_id) ?? []),
-      ...(blocks?.map((b: { blocked_id: string }) => b.blocked_id) ?? []),
+      ...blockedIds,
     ]
 
     // Map looking_for to gender filter — 'both' means no gender filter
@@ -54,7 +62,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
       : baseQuery
 
     const { data: profiles, error } = await (filteredQuery as any)
-      .not('id', 'in', `(${excludeIds.map((id: string) => `'${id}'`).join(',')})`)
+      .not('id', 'in', `(${excludeIds.join(',')})`)
       .order('last_active', { ascending: false })
       .limit(BATCH_SIZE)
 

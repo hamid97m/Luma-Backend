@@ -32,9 +32,9 @@ describe('GET /discovery', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
     } as any)
-    // blocks
+    // blocks (both directions via .or())
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ data: [], error: null }) }),
+      select: () => ({ or: () => ({ data: [], error: null }) }),
     } as any)
     // profiles query: eq(is_active) → eq(gender) → not(id) → order → limit
     vi.mocked(db.from).mockReturnValueOnce({
@@ -68,9 +68,9 @@ describe('GET /discovery', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ eq: () => ({ or: () => ({ data: [{ swiped_id: 'user-uuid-3' }], error: null }) }) }),
     } as any)
-    // blocks — empty
+    // blocks — empty (both directions via .or())
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ data: [], error: null }) }),
+      select: () => ({ or: () => ({ data: [], error: null }) }),
     } as any)
     // profiles query: eq(is_active) → eq(gender) → not(id) → order → limit
     vi.mocked(db.from).mockReturnValueOnce({
@@ -147,9 +147,9 @@ describe('GET /discovery', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
     } as any)
-    // blocks — empty
+    // blocks — empty (both directions via .or())
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ data: [], error: null }) }),
+      select: () => ({ or: () => ({ data: [], error: null }) }),
     } as any)
     // profiles query: eq(is_active) → not(id) → order → limit  (NO gender eq)
     vi.mocked(db.from).mockReturnValueOnce({

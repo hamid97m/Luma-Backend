@@ -15,7 +15,7 @@ export async function matchesRoutes(app: FastifyInstance) {
 
     const matches = await Promise.all(
       (rows ?? []).map(async (row: any) => {
-        const other = (row.user1_id === req.userId ? row.user2 : row.user1) ?? row.users
+        const other = row.user1_id === req.userId ? row.user2 : row.user1
 
         const { data: photos } = await db
           .from('user_photos')

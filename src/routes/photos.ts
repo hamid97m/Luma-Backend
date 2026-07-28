@@ -33,23 +33,7 @@ export async function photosRoutes(app: FastifyInstance) {
       return reply.status(500).send({ error: 'upload_url_failed' })
     }
 
-    const publicUrl = db.storage.from('profile-photos').getPublicUrl(path).data.publicUrl
-    const nextPosition = existing?.length ?? 0
-
-    // Pre-register the photo row; the upload-url path is the key
-    const { error: insertErr } = await db.from('user_photos').insert({
-      id: photoId,
-      user_id: req.userId,
-      url: publicUrl,
-      position: nextPosition,
-    })
-    if (insertErr) return reply.status(500).send({ error: 'photo_register_failed' })
-
-    return {
-      uploadUrl: signedData.signedUrl,
-      publicUrl,
-      photoId,
-    }
+    return { uploadUrl: signedData.signedUrl, photoId }
   })
 
   // Delete a single photo and compact remaining positions
@@ -68,8 +52,8 @@ export async function photosRoutes(app: FastifyInstance) {
     if (error || !photo) return reply.status(404).send({ error: 'photo_not_found' })
 
     await db.from('user_photos').delete().eq('id', photoId)
+    await db.storage.from('profile-photos').remove([`${req.userId}/${photoId}`])
 
-    // Compact positions: shift photos above deleted photo down by 1
     const { data: remaining } = await db
       .from('user_photos')
       .select('id, position')
@@ -98,5 +82,45 @@ export async function photosRoutes(app: FastifyInstance) {
     }
 
     return { ok: true }
+  })
+
+  // Confirm a photo upload (insert DB row after client uploads to storage)
+  app.post('/profile/me/photos/confirm', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+
+    const { photoId } = req.body as { photoId: string }
+
+    if (!photoId || typeof photoId !== 'string') {
+      return reply.status(400).send({ error: 'invalid_photo_id' })
+    }
+
+    const { data: existing } = await db
+      .from('user_photos')
+      .select('id')
+      .eq('user_id', req.userId)
+
+    if ((existing?.length ?? 0) >= MAX_PHOTOS) {
+      return reply.status(400).send({ error: 'max_photos_reached' })
+    }
+
+    const alreadyExists = existing?.some((p) => p.id === photoId)
+    if (alreadyExists) {
+      return reply.status(409).send({ error: 'photo_already_confirmed' })
+    }
+
+    const nextPosition = existing?.length ?? 0
+    const path = `${req.userId}/${photoId}`
+    const publicUrl = db.storage.from('profile-photos').getPublicUrl(path).data.publicUrl
+
+    const { error: insertErr } = await db.from('user_photos').insert({
+      id: photoId,
+      user_id: req.userId,
+      url: publicUrl,
+      position: nextPosition,
+    })
+
+    if (insertErr) return reply.status(500).send({ error: 'photo_confirm_failed' })
+
+    return { photo: { id: photoId, url: publicUrl, position: nextPosition } }
   })
 }

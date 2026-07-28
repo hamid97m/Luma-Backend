@@ -48,14 +48,8 @@ export async function authRoutes(app: FastifyInstance) {
       userName = created.name
     }
 
-    // Check if setup is complete (has age > 0 and at least one photo)
     const profile = existing ?? { age: 0 }
-    const { data: photos } = await db
-      .from('user_photos')
-      .select('id')
-      .eq('user_id', userId)
-
-    const setupComplete = profile.age > 0 && (photos?.length ?? 0) > 0
+    const setupComplete = profile.age > 0
 
     return {
       user: {

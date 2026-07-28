@@ -15,7 +15,7 @@ async function getProfileWithPhotos(userId: string) {
     .eq('user_id', userId)
     .order('position', { ascending: true })
 
-  const setupComplete = user.age > 0 && (photos?.length ?? 0) > 0
+  const setupComplete = user.age > 0
 
   return { ...user, photos: photos ?? [], setupComplete }
 }
@@ -60,7 +60,7 @@ export async function profileRoutes(app: FastifyInstance) {
     return {
       ...user,
       photos: photos ?? [],
-      setupComplete: user.age > 0 && (photos?.length ?? 0) > 0,
+      setupComplete: user.age > 0,
     }
   })
 }

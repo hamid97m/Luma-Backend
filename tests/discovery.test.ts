@@ -114,6 +114,8 @@ describe('GET /discovery', () => {
       age: 27,
       bio: 'سلام',
       telegramId: 999,
+      interests: [],
+      location: null,
       photos: ['https://img1.jpg', 'https://img2.jpg'],
     })
   })

@@ -4,9 +4,13 @@ export interface DBUser {
   username: string | null
   name: string
   age: number
-  gender: 'man' | 'woman'
-  looking_for: 'men' | 'women' | 'both'
+  gender: 'man' | 'woman' | 'nonbinary'
+  looking_for: 'men' | 'women' | 'both' | 'everyone'
   bio: string | null
+  interests: string[]
+  location: string | null
+  icebreaker_prompt: string | null
+  icebreaker_answer: string | null
   is_active: boolean
   created_at: string
   last_active: string

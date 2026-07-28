@@ -45,7 +45,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
       ...blockedIds,
     ]
 
-    // Map looking_for to gender filter — 'both' means no gender filter
+    // Map looking_for to gender filter — 'both'/'everyone' means no gender filter
     const genderFilter =
       viewer.looking_for === 'men' ? 'man' :
       viewer.looking_for === 'women' ? 'woman' : null
@@ -53,7 +53,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
     // Build base query up to is_active filter
     const baseQuery = db
       .from('users')
-      .select('id, name, age, bio, telegram_id, user_photos(id, url, position)')
+      .select('id, name, age, bio, telegram_id, interests, location, user_photos(id, url, position)')
       .eq('is_active', true)
 
     // Apply gender filter before exclude and ordering
@@ -74,6 +74,8 @@ export async function discoveryRoutes(app: FastifyInstance) {
       age: p.age,
       bio: p.bio,
       telegramId: p.telegram_id,
+      interests: p.interests ?? [],
+      location: p.location ?? null,
       photos: (p.user_photos as any[])
         .sort((a, b) => a.position - b.position)
         .map((ph: any) => ph.url),

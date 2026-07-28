@@ -39,13 +39,12 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   // Auth middleware — skips /auth/verify and /health
   app.addHook('preHandler', async (req: FastifyRequest, reply: FastifyReply) => {
-    if (req.url === '/auth/verify' || req.url === '/health' || req.url === '/dbg') return
+    if (req.url === '/auth/verify' || req.url === '/health') return
 
     const initData = req.headers.authorization
-    const dbg = { botTokenSet: !!process.env.BOT_TOKEN, initDataLen: initData?.length ?? 0, hasHash: initData?.includes('hash=') ?? false }
-    if (!initData) return reply.status(401).send({ error: 'missing_auth', dbg })
+    if (!initData) return reply.status(401).send({ error: 'missing_auth' })
     const tgUser = verifyInitData(initData, process.env.BOT_TOKEN ?? '')
-    if (!tgUser) return reply.status(401).send({ error: 'invalid_init_data', dbg })
+    if (!tgUser) return reply.status(401).send({ error: 'invalid_init_data' })
 
     req.telegramUser = tgUser
 
@@ -60,12 +59,6 @@ export async function buildApp(): Promise<FastifyInstance> {
   })
 
   app.get('/health', async () => ({ ok: true }))
-  app.get('/dbg', async (req) => ({
-    v: '2',
-    botTokenSet: !!process.env.BOT_TOKEN,
-    nodeEnv: process.env.NODE_ENV,
-    authHeader: (req.headers.authorization ?? 'MISSING').slice(0, 40),
-  }))
 
   await app.register(authRoutes)
   await app.register(profileRoutes)

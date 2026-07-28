@@ -44,6 +44,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     const initData = req.headers.authorization
     if (!initData) return reply.status(401).send({ error: 'missing_auth' })
 
+    req.log.info({ initDataLen: initData.length, hasHash: initData.includes('hash='), botTokenSet: !!process.env.BOT_TOKEN }, 'auth check')
     const tgUser = verifyInitData(initData, process.env.BOT_TOKEN ?? '')
     if (!tgUser) return reply.status(401).send({ error: 'invalid_init_data' })
 

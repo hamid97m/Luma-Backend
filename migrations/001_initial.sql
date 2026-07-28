@@ -53,3 +53,11 @@ CREATE TABLE blocks (
 CREATE INDEX idx_swipes_match_check ON swipes (swiped_id, direction);
 CREATE INDEX idx_users_last_active  ON users (last_active DESC);
 CREATE INDEX idx_photos_user_pos    ON user_photos (user_id, position);
+
+-- Grants for Supabase roles
+GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO authenticated;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO authenticated;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO anon;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon;

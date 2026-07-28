@@ -20,7 +20,13 @@ export function startBot(): void {
     })
   })
 
-  bot.start()
+  bot.start({
+    onStart: () => console.log('[bot] polling started'),
+  }).catch((err) => {
+    // 409 happens during rolling restarts — log and exit so Render restarts cleanly
+    console.error('[bot] fatal:', err.message)
+    process.exit(1)
+  })
 }
 
 export async function notifyMatch(

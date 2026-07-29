@@ -73,12 +73,27 @@ export async function photosRoutes(app: FastifyInstance) {
 
     const { order } = req.body as { order: string[] }
 
+    // UNIQUE(user_id, position) means writing final positions directly can collide
+    // with whatever photo currently holds that slot, so stage through negative
+    // positions first to clear all slots before assigning the real ones.
     for (let i = 0; i < order.length; i++) {
-      await db
+      const { error } = await db
+        .from('user_photos')
+        .update({ position: -(i + 1) })
+        .eq('id', order[i])
+        .eq('user_id', req.userId)
+
+      if (error) return reply.status(500).send({ error: 'reorder_failed' })
+    }
+
+    for (let i = 0; i < order.length; i++) {
+      const { error } = await db
         .from('user_photos')
         .update({ position: i })
         .eq('id', order[i])
         .eq('user_id', req.userId)
+
+      if (error) return reply.status(500).send({ error: 'reorder_failed' })
     }
 
     return { ok: true }

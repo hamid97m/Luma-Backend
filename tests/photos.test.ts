@@ -177,7 +177,8 @@ describe('PATCH /profile/me/photos/reorder', () => {
     setupAuth()
     const photoIds = ['photo-b', 'photo-a', 'photo-c']
 
-    for (let i = 0; i < photoIds.length; i++) {
+    // Two passes over the ids: stage to negative positions, then to final ones.
+    for (let i = 0; i < photoIds.length * 2; i++) {
       vi.mocked(db.from).mockReturnValueOnce({
         update: () => ({ eq: () => ({ eq: () => ({ data: null, error: null }) }) }),
       } as any)
@@ -190,6 +191,24 @@ describe('PATCH /profile/me/photos/reorder', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ ok: true })
+  })
+
+  it('returns 500 instead of silently swallowing a failed position update', async () => {
+    setupAuth()
+    const photoIds = ['photo-b', 'photo-a', 'photo-c']
+
+    // First staging update hits the UNIQUE(user_id, position) constraint.
+    vi.mocked(db.from).mockReturnValueOnce({
+      update: () => ({ eq: () => ({ eq: () => ({ data: null, error: { code: '23505' } }) }) }),
+    } as any)
+
+    const res = await app.inject({
+      method: 'PATCH', url: '/profile/me/photos/reorder',
+      headers: AUTH, payload: { order: photoIds },
+    })
+
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toEqual({ error: 'reorder_failed' })
   })
 
   it('returns 401 when not authenticated', async () => {

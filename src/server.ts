@@ -19,7 +19,11 @@ declare module 'fastify' {
 }
 
 export async function buildApp(): Promise<FastifyInstance> {
-  const app = Fastify({ logger: process.env.NODE_ENV !== 'test' })
+  const app = Fastify({
+    logger: process.env.NODE_ENV === 'test'
+      ? false
+      : { level: process.env.LOG_LEVEL ?? 'warn' },
+  })
 
   if (!process.env.WEB_URL && process.env.NODE_ENV === 'production') {
     throw new Error('WEB_URL environment variable is required in production')
@@ -58,7 +62,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     req.userId = data.id
   })
 
-  app.get('/health', async () => ({ ok: true }))
+  app.get('/health', { logLevel: 'silent' }, async () => ({ ok: true }))
 
   await app.register(authRoutes)
   await app.register(profileRoutes)

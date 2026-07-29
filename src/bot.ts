@@ -12,10 +12,10 @@ export function startBot(): void {
 
   bot.command('start', async (ctx) => {
     const keyboard = new InlineKeyboard().webApp(
-      '💘 باز کن',
+      'Open Luma ❤️',
       process.env.WEB_URL!
     )
-    await ctx.reply('به دیتگرام خوش آمدید! 💝\nهمین الان شروع کن:', {
+    await ctx.reply('Come to the app → catch matches 💫', {
       reply_markup: keyboard,
     })
   })
@@ -32,22 +32,21 @@ export function startBot(): void {
 export async function notifyMatch(
   tgId1: number,
   name1: string,
+  photo1: string | null,
   tgId2: number,
-  name2: string
+  name2: string,
+  photo2: string | null
 ): Promise<void> {
   const bot = getBot()
 
-  const send = (toId: number, matchName: string, matchTgId: number) =>
-    bot.api.sendMessage(
-      toId,
-      `💘 شما با ${matchName} match شدید!`,
-      {
-        reply_markup: new InlineKeyboard().url(
-          `💬 پیام بده به ${matchName}`,
-          `tg://user?id=${matchTgId}`
-        ),
-      }
-    )
+  const send = (toId: number, matchName: string, matchPhoto: string | null) => {
+    const keyboard = new InlineKeyboard().webApp('Open Luma ❤️', process.env.WEB_URL!)
+    const caption = `${matchName} just liked you! Open Luma ❤️`
 
-  await Promise.all([send(tgId1, name2, tgId2), send(tgId2, name1, tgId1)])
+    return matchPhoto
+      ? bot.api.sendPhoto(toId, matchPhoto, { caption, reply_markup: keyboard })
+      : bot.api.sendMessage(toId, caption, { reply_markup: keyboard })
+  }
+
+  await Promise.all([send(tgId1, name2, photo2), send(tgId2, name1, photo1)])
 }

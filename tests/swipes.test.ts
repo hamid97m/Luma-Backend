@@ -100,6 +100,13 @@ describe('POST /swipes — mutual like', () => {
         { id: TARGET_ID, name: 'Sara', telegram_id: 2 },
       ], error: null }) }),
     } as any)
+    // fetch primary photos
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ in: () => ({ order: () => ({ data: [
+        { user_id: USER_ID, url: 'https://example.com/ali.jpg' },
+        { user_id: TARGET_ID, url: 'https://example.com/sara.jpg' },
+      ] }) }) }),
+    } as any)
 
     const res = await app.inject({
       method: 'POST',
@@ -111,6 +118,9 @@ describe('POST /swipes — mutual like', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json().matched).toBe(true)
     expect(res.json().match.id).toBe('match-uuid')
-    expect(notifyMatch).toHaveBeenCalledWith(1, 'Ali', 2, 'Sara')
+    expect(notifyMatch).toHaveBeenCalledWith(
+      1, 'Ali', 'https://example.com/ali.jpg',
+      2, 'Sara', 'https://example.com/sara.jpg'
+    )
   })
 })

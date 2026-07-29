@@ -64,8 +64,20 @@ export async function swipesRoutes(app: FastifyInstance) {
     const me = users.find((u: { id: string }) => u.id === req.userId)!
     const them = users.find((u: { id: string }) => u.id === targetUserId)!
 
+    const { data: photos } = await db
+      .from('user_photos')
+      .select('user_id, url')
+      .in('user_id', [req.userId, targetUserId])
+      .order('position', { ascending: true })
+
+    const primaryPhoto = (userId: string) =>
+      photos?.find((p: { user_id: string; url: string }) => p.user_id === userId)?.url ?? null
+
     // Fire-and-forget
-    notifyMatch(me.telegram_id, me.name, them.telegram_id, them.name).catch(console.error)
+    notifyMatch(
+      me.telegram_id, me.name, primaryPhoto(me.id),
+      them.telegram_id, them.name, primaryPhoto(them.id)
+    ).catch(console.error)
 
     return {
       matched: true,

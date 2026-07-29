@@ -9,8 +9,8 @@ export async function matchesRoutes(app: FastifyInstance) {
       .from('matches')
       .select(`
         id, created_at, user1_id, user2_id,
-        user1:users!matches_user1_id_fkey(id, name, telegram_id),
-        user2:users!matches_user2_id_fkey(id, name, telegram_id)
+        user1:users!matches_user1_id_fkey(id, name, telegram_id, username),
+        user2:users!matches_user2_id_fkey(id, name, telegram_id, username)
       `)
       .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
       .order('created_at', { ascending: false })
@@ -32,6 +32,7 @@ export async function matchesRoutes(app: FastifyInstance) {
             id: other.id,
             name: other.name,
             telegramId: other.telegram_id,
+            username: other.username,
             photos: (photos ?? []).map((p: { url: string }) => p.url),
           },
         }

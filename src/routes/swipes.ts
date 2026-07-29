@@ -53,12 +53,12 @@ export async function swipesRoutes(app: FastifyInstance) {
     // Fetch both users for notification
     const { data: users, error: usersErr } = await db
       .from('users')
-      .select('id, name, telegram_id')
+      .select('id, name, telegram_id, username')
       .in('id', [req.userId, targetUserId])
 
     if (usersErr || !users || users.length < 2) {
       // Match was created, but we can't build the response — return minimal success
-      return { matched: true, match: { id: match!.id, user: { id: targetUserId, name: '', telegramId: 0 } } }
+      return { matched: true, match: { id: match!.id, user: { id: targetUserId, name: '', telegramId: 0, username: null } } }
     }
 
     const me = users.find((u: { id: string }) => u.id === req.userId)!
@@ -71,7 +71,7 @@ export async function swipesRoutes(app: FastifyInstance) {
       matched: true,
       match: {
         id: match!.id,
-        user: { id: them.id, name: them.name, telegramId: them.telegram_id },
+        user: { id: them.id, name: them.name, telegramId: them.telegram_id, username: them.username },
       },
     }
   })

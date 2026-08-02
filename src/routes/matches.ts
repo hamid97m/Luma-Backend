@@ -30,6 +30,22 @@ export async function matchesRoutes(app: FastifyInstance) {
           .eq('user_id', other.id)
           .order('position', { ascending: true })
 
+        const { data: lastMsgRows } = await db
+          .from('messages')
+          .select('body, created_at, sender_id')
+          .eq('match_id', row.id)
+          .order('created_at', { ascending: false })
+          .limit(1)
+
+        const { count: unreadCount } = await db
+          .from('messages')
+          .select('id', { count: 'exact', head: true })
+          .eq('match_id', row.id)
+          .neq('sender_id', req.userId)
+          .is('read_at', null)
+
+        const lastMsg = lastMsgRows?.[0]
+
         return {
           id: row.id,
           matchedAt: row.created_at,
@@ -40,6 +56,10 @@ export async function matchesRoutes(app: FastifyInstance) {
             username: other.username,
             photos: (photos ?? []).map((p: { url: string }) => p.url),
           },
+          lastMessage: lastMsg
+            ? { body: lastMsg.body, createdAt: lastMsg.created_at, senderId: lastMsg.sender_id }
+            : null,
+          unreadCount: unreadCount ?? 0,
         }
       })
     )

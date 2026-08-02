@@ -18,36 +18,68 @@ function setupAuth() {
   } as any)
 }
 
+function mockMatchesRow() {
+  vi.mocked(db.from).mockReturnValueOnce({
+    select: () => ({
+      or: () => ({
+        order: () => ({
+          data: [{
+            id: 'match-1',
+            created_at: '2026-01-01T00:00:00Z',
+            user1_id: USER_ID,
+            user2_id: 'other-user',
+            user1: { id: USER_ID, name: 'Ali', telegram_id: 1, deleted_at: null },
+            user2: { id: 'other-user', name: 'Sara', telegram_id: 99, deleted_at: null },
+          }],
+          error: null,
+        }),
+      }),
+    }),
+  } as any)
+}
+
+function mockPhotos() {
+  vi.mocked(db.from).mockReturnValueOnce({
+    select: () => ({
+      eq: () => ({ order: () => ({ data: [{ url: 'https://img', position: 0 }], error: null }) }),
+    }),
+  } as any)
+}
+
+function mockLastMessage(row: { body: string; created_at: string; sender_id: string } | null) {
+  vi.mocked(db.from).mockReturnValueOnce({
+    select: () => ({
+      eq: () => ({
+        order: () => ({
+          limit: () => ({ data: row ? [row] : [], error: null }),
+        }),
+      }),
+    }),
+  } as any)
+}
+
+function mockUnreadCount(count: number) {
+  vi.mocked(db.from).mockReturnValueOnce({
+    select: () => ({
+      eq: () => ({
+        neq: () => ({
+          is: () => ({ count, error: null }),
+        }),
+      }),
+    }),
+  } as any)
+}
+
 describe('GET /matches', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
   beforeEach(async () => { app = await buildApp() })
 
-  it('returns list of matches with other user info', async () => {
+  it('returns list of matches with other user info, last message, and unread count', async () => {
     setupAuth()
-
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({
-        or: () => ({
-          order: () => ({
-            data: [{
-              id: 'match-1',
-              created_at: '2026-01-01T00:00:00Z',
-              user1_id: USER_ID,
-              user2_id: 'other-user',
-              user1: { id: USER_ID, name: 'Ali', telegram_id: 1 },
-              user2: { id: 'other-user', name: 'Sara', telegram_id: 99 },
-            }],
-            error: null,
-          }),
-        }),
-      }),
-    } as any)
-
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({
-        eq: () => ({ order: () => ({ data: [{ url: 'https://img', position: 0 }], error: null }) }),
-      }),
-    } as any)
+    mockMatchesRow()
+    mockPhotos()
+    mockLastMessage({ body: 'hey there', created_at: '2026-01-02T00:00:00Z', sender_id: 'other-user' })
+    mockUnreadCount(2)
 
     const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
 
@@ -56,6 +88,24 @@ describe('GET /matches', () => {
     expect(body.matches).toHaveLength(1)
     expect(body.matches[0].user.name).toBe('Sara')
     expect(body.matches[0].user.telegramId).toBe(99)
+    expect(body.matches[0].lastMessage).toEqual({
+      body: 'hey there', createdAt: '2026-01-02T00:00:00Z', senderId: 'other-user',
+    })
+    expect(body.matches[0].unreadCount).toBe(2)
+  })
+
+  it('returns null lastMessage and 0 unreadCount when there are no messages yet', async () => {
+    setupAuth()
+    mockMatchesRow()
+    mockPhotos()
+    mockLastMessage(null)
+    mockUnreadCount(0)
+
+    const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
+
+    const body = res.json()
+    expect(body.matches[0].lastMessage).toBeNull()
+    expect(body.matches[0].unreadCount).toBe(0)
   })
 
   it('excludes a match whose counterpart has deleted their account', async () => {

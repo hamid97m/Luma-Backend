@@ -16,7 +16,7 @@ export async function authRoutes(app: FastifyInstance) {
     // Find or create user
     const { data: existing } = await db
       .from('users')
-      .select('id, name, age, gender, looking_for, bio')
+      .select('id, name, age, gender, looking_for, bio, deleted_at')
       .eq('telegram_id', tgUser.id)
       .single()
 
@@ -26,8 +26,11 @@ export async function authRoutes(app: FastifyInstance) {
     if (existing) {
       userId = existing.id
       userName = existing.name
-      // Update last_active
-      await db.from('users').update({ last_active: new Date().toISOString() }).eq('id', userId)
+      const reactivating = Boolean(existing.deleted_at)
+      await db.from('users').update({
+        last_active: new Date().toISOString(),
+        ...(reactivating ? { deleted_at: null, is_active: true } : {}),
+      }).eq('id', userId)
     } else {
       const { data: created, error } = await db
         .from('users')

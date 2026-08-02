@@ -15,6 +15,7 @@ describe('POST /auth/verify', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
 
   beforeEach(async () => {
+    vi.clearAllMocks()
     app = await buildApp()
   })
 
@@ -41,17 +42,13 @@ describe('POST /auth/verify', () => {
     const mockFrom = vi.mocked(db.from)
     // First call: select existing user → not found
     mockFrom.mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: null, error: null }) }) }),
+      select: () => ({ eq: () => ({ single: () => Promise.resolve({ data: null, error: null }) }) }),
     } as any)
     // Second call: insert new user
     mockFrom.mockReturnValueOnce({
       insert: () => ({
-        select: () => ({ single: () => ({ data: { id: 'uuid-1', name: 'Hamid' }, error: null }) }),
+        select: () => ({ single: () => Promise.resolve({ data: { id: 'uuid-1', name: 'Hamid' }, error: null }) }),
       }),
-    } as any)
-    // Third call: count photos → 0
-    mockFrom.mockReturnValueOnce({
-      select: () => ({ eq: () => ({ data: [], error: null }) }),
     } as any)
 
     const res = await app.inject({
@@ -62,5 +59,29 @@ describe('POST /auth/verify', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json().user.setupComplete).toBe(false)
+  })
+
+  it('reactivates a soft-deleted user by clearing deleted_at and setting is_active true', async () => {
+    vi.mocked(verifyInitData).mockReturnValue({ id: 42, first_name: 'Hamid', username: 'hamid' })
+
+    const updateMock = vi.fn().mockReturnValue({ eq: () => Promise.resolve({ data: null, error: null }) })
+    const mockFrom = vi.mocked(db.from)
+    mockFrom.mockReturnValueOnce({
+      select: () => ({ eq: () => ({ single: () => Promise.resolve({
+        data: { id: 'uuid-1', name: '', age: 0, gender: 'man', looking_for: 'women', bio: null, deleted_at: '2026-08-01T00:00:00Z' },
+        error: null,
+      }) }) }),
+    } as any)
+    mockFrom.mockReturnValueOnce({ update: updateMock } as any)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/verify',
+      payload: { initData: 'valid_init_data' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().user.setupComplete).toBe(false)
+    expect(updateMock).toHaveBeenCalledWith(expect.objectContaining({ deleted_at: null, is_active: true }))
   })
 })

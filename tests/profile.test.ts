@@ -173,3 +173,20 @@ describe('DELETE /profile/me', () => {
     expect(res.json()).toEqual({ error: 'delete_failed' })
   })
 })
+
+describe('preHandler — deleted account gate', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  beforeEach(async () => { app = await buildApp() })
+
+  it('returns 401 account_deleted for a soft-deleted user on a protected route', async () => {
+    vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ single: () => ({ data: { id: USER_ID, deleted_at: '2026-08-01T00:00:00Z' } }) }) }),
+    } as any)
+
+    const res = await app.inject({ method: 'GET', url: '/profile/me', headers: AUTH })
+
+    expect(res.statusCode).toBe(401)
+    expect(res.json()).toEqual({ error: 'account_deleted' })
+  })
+})

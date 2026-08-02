@@ -54,11 +54,12 @@ export async function buildApp(): Promise<FastifyInstance> {
 
     const { data } = await db
       .from('users')
-      .select('id')
+      .select('id, deleted_at')
       .eq('telegram_id', tgUser.id)
       .single()
 
     if (!data) return reply.status(401).send({ error: 'user_not_found' })
+    if (data.deleted_at) return reply.status(401).send({ error: 'account_deleted' })
     req.userId = data.id
   })
 

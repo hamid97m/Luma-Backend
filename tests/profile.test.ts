@@ -74,4 +74,26 @@ describe('PUT /profile/me', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json().bio).toBe('سلام')
   })
+
+  it('pauses the account by setting is_active to false', async () => {
+    setupAuth()
+
+    vi.mocked(db.from)
+      .mockReturnValueOnce({
+        update: () => ({ eq: () => ({ select: () => ({ single: () => ({ data: { id: USER_ID, name: 'Ali', age: 25, gender: 'man', looking_for: 'women', bio: null, is_active: false }, error: null }) }) }) }),
+      } as any)
+      .mockReturnValueOnce({
+        select: () => ({ eq: () => ({ order: () => ({ data: [], error: null }) }) }),
+      } as any)
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/profile/me',
+      headers: AUTH,
+      payload: { is_active: false },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().is_active).toBe(false)
+  })
 })

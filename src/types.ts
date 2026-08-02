@@ -12,6 +12,7 @@ export interface DBUser {
   icebreaker_prompt: string | null
   icebreaker_answer: string | null
   is_active: boolean
+  deleted_at: string | null
   created_at: string
   last_active: string
 }

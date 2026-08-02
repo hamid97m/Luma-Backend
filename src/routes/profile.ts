@@ -63,4 +63,33 @@ export async function profileRoutes(app: FastifyInstance) {
       setupComplete: user.age > 0,
     }
   })
+
+  app.delete('/profile/me', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+
+    const { data: photos } = await db
+      .from('user_photos')
+      .select('id')
+      .eq('user_id', req.userId)
+
+    if (photos?.length) {
+      await db.storage.from('profile-photos').remove(photos.map((p) => `${req.userId}/${p.id}`))
+      await db.from('user_photos').delete().eq('user_id', req.userId)
+    }
+
+    const { error } = await db.from('users').update({
+      name: '',
+      bio: null,
+      interests: [],
+      location: null,
+      icebreaker_prompt: null,
+      icebreaker_answer: null,
+      age: 0,
+      is_active: false,
+      deleted_at: new Date().toISOString(),
+    }).eq('id', req.userId)
+
+    if (error) return reply.status(500).send({ error: 'delete_failed' })
+    return { ok: true }
+  })
 }

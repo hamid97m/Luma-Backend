@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
+vi.mock('../src/db.js', () => ({ db: { from: vi.fn(), storage: { from: vi.fn() } } }))
 
 import { buildApp } from '../src/server.js'
 import { verifyInitData } from '../src/auth.js'
@@ -95,5 +95,61 @@ describe('PUT /profile/me', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json().is_active).toBe(false)
+  })
+})
+
+describe('DELETE /profile/me', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  beforeEach(async () => { app = await buildApp() })
+
+  it('removes photos from storage and wipes the profile', async () => {
+    setupAuth()
+
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ data: [{ id: 'photo-1' }, { id: 'photo-2' }], error: null }) }),
+    } as any)
+
+    const storageMock = { remove: vi.fn().mockResolvedValue({ error: null }) }
+    vi.mocked(db.storage.from).mockReturnValue(storageMock as any)
+
+    vi.mocked(db.from).mockReturnValueOnce({
+      delete: () => ({ eq: () => ({ data: null, error: null }) }),
+    } as any)
+
+    const updateMock = vi.fn().mockReturnValue({ eq: () => ({ data: null, error: null }) })
+    vi.mocked(db.from).mockReturnValueOnce({ update: updateMock } as any)
+
+    const res = await app.inject({ method: 'DELETE', url: '/profile/me', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ ok: true })
+    expect(storageMock.remove).toHaveBeenCalledWith([`${USER_ID}/photo-1`, `${USER_ID}/photo-2`])
+    expect(updateMock).toHaveBeenCalledWith(expect.objectContaining({
+      name: '', bio: null, interests: [], location: null,
+      icebreaker_prompt: null, icebreaker_answer: null,
+      age: 0, is_active: false,
+    }))
+    expect(updateMock.mock.calls[0][0].deleted_at).toEqual(expect.any(String))
+  })
+
+  it('skips storage cleanup when the user has no photos', async () => {
+    setupAuth()
+
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ data: [], error: null }) }),
+    } as any)
+
+    const updateMock = vi.fn().mockReturnValue({ eq: () => ({ data: null, error: null }) })
+    vi.mocked(db.from).mockReturnValueOnce({ update: updateMock } as any)
+
+    const res = await app.inject({ method: 'DELETE', url: '/profile/me', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    expect(db.storage.from).not.toHaveBeenCalled()
+  })
+
+  it('returns 401 when not authenticated', async () => {
+    const res = await app.inject({ method: 'DELETE', url: '/profile/me' })
+    expect(res.statusCode).toBe(401)
   })
 })

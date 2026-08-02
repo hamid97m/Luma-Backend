@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard } from 'grammy'
+import { Bot, Context, InlineKeyboard } from 'grammy'
 
 let _bot: Bot | null = null
 
@@ -7,18 +7,24 @@ function getBot(): Bot {
   return _bot
 }
 
+async function sendStart(ctx: Context): Promise<void> {
+  const keyboard = new InlineKeyboard().webApp(
+    'Open Luma ❤️',
+    process.env.WEB_URL!
+  )
+  await ctx.reply('Come to the app → catch matches 💫 You can pause or delete your account anytime.', {
+    reply_markup: keyboard,
+  })
+}
+
 export function startBot(): void {
   const bot = getBot()
 
-  bot.command('start', async (ctx) => {
-    const keyboard = new InlineKeyboard().webApp(
-      'Open Luma ❤️',
-      process.env.WEB_URL!
-    )
-    await ctx.reply('Come to the app → catch matches 💫 You can pause or delete your account anytime.', {
-      reply_markup: keyboard,
-    })
-  })
+  bot.command('start', sendStart)
+
+  // Any other command or message we don't explicitly support falls through
+  // to here and is treated the same as /start.
+  bot.on('message', sendStart)
 
   bot.start({
     onStart: () => console.log('[bot] polling started'),

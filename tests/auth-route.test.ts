@@ -111,4 +111,27 @@ describe('POST /auth/verify', () => {
     expect(updateMock.mock.calls[0][0]).not.toHaveProperty('deleted_at')
     expect(updateMock.mock.calls[0][0]).not.toHaveProperty('is_active')
   })
+
+  it('returns 500 if reactivation update fails', async () => {
+    vi.mocked(verifyInitData).mockReturnValue({ id: 42, first_name: 'Hamid', username: 'hamid' })
+
+    const updateMock = vi.fn().mockReturnValue({ eq: () => Promise.resolve({ data: null, error: { message: 'update failed' } }) })
+    const mockFrom = vi.mocked(db.from)
+    mockFrom.mockReturnValueOnce({
+      select: () => ({ eq: () => ({ single: () => Promise.resolve({
+        data: { id: 'uuid-1', name: '', age: 0, gender: 'man', looking_for: 'women', bio: null, deleted_at: '2026-08-01T00:00:00Z' },
+        error: null,
+      }) }) }),
+    } as any)
+    mockFrom.mockReturnValueOnce({ update: updateMock } as any)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/verify',
+      payload: { initData: 'valid_init_data' },
+    })
+
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toEqual({ error: 'auth_update_failed' })
+  })
 })

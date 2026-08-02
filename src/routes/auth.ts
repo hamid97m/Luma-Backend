@@ -27,10 +27,11 @@ export async function authRoutes(app: FastifyInstance) {
       userId = existing.id
       userName = existing.name
       const reactivating = Boolean(existing.deleted_at)
-      await db.from('users').update({
+      const { error: updateError } = await db.from('users').update({
         last_active: new Date().toISOString(),
         ...(reactivating ? { deleted_at: null, is_active: true } : {}),
       }).eq('id', userId)
+      if (updateError) return reply.status(500).send({ error: 'auth_update_failed' })
     } else {
       const { data: created, error } = await db
         .from('users')

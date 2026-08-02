@@ -15,7 +15,7 @@ export function startBot(): void {
       'Open Luma ❤️',
       process.env.WEB_URL!
     )
-    await ctx.reply('Come to the app → catch matches 💫', {
+    await ctx.reply('Come to the app → catch matches 💫 You can pause or delete your account anytime.', {
       reply_markup: keyboard,
     })
   })

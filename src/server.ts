@@ -10,6 +10,7 @@ import { photosRoutes } from './routes/photos.js'
 import { discoveryRoutes } from './routes/discovery.js'
 import { swipesRoutes } from './routes/swipes.js'
 import { matchesRoutes } from './routes/matches.js'
+import { messagesRoutes } from './routes/messages.js'
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -71,6 +72,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(discoveryRoutes)
   await app.register(swipesRoutes)
   await app.register(matchesRoutes)
+  await app.register(messagesRoutes)
 
   return app
 }

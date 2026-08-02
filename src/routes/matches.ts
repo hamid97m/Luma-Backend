@@ -9,14 +9,19 @@ export async function matchesRoutes(app: FastifyInstance) {
       .from('matches')
       .select(`
         id, created_at, user1_id, user2_id,
-        user1:users!matches_user1_id_fkey(id, name, telegram_id, username),
-        user2:users!matches_user2_id_fkey(id, name, telegram_id, username)
+        user1:users!matches_user1_id_fkey(id, name, telegram_id, username, deleted_at),
+        user2:users!matches_user2_id_fkey(id, name, telegram_id, username, deleted_at)
       `)
       .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
       .order('created_at', { ascending: false })
 
+    const activeRows = (rows ?? []).filter((row: any) => {
+      const other = row.user1_id === req.userId ? row.user2 : row.user1
+      return !other.deleted_at
+    })
+
     const matches = await Promise.all(
-      (rows ?? []).map(async (row: any) => {
+      activeRows.map(async (row: any) => {
         const other = row.user1_id === req.userId ? row.user2 : row.user1
 
         const { data: photos } = await db

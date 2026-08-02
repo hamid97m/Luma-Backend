@@ -57,4 +57,31 @@ describe('GET /matches', () => {
     expect(body.matches[0].user.name).toBe('Sara')
     expect(body.matches[0].user.telegramId).toBe(99)
   })
+
+  it('excludes a match whose counterpart has deleted their account', async () => {
+    setupAuth()
+
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({
+        or: () => ({
+          order: () => ({
+            data: [{
+              id: 'match-1',
+              created_at: '2026-01-01T00:00:00Z',
+              user1_id: USER_ID,
+              user2_id: 'deleted-user',
+              user1: { id: USER_ID, name: 'Ali', telegram_id: 1, deleted_at: null },
+              user2: { id: 'deleted-user', name: '', telegram_id: 99, deleted_at: '2026-07-30T00:00:00Z' },
+            }],
+            error: null,
+          }),
+        }),
+      }),
+    } as any)
+
+    const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().matches).toHaveLength(0)
+  })
 })

@@ -152,4 +152,24 @@ describe('DELETE /profile/me', () => {
     const res = await app.inject({ method: 'DELETE', url: '/profile/me' })
     expect(res.statusCode).toBe(401)
   })
+
+  it('returns 500 when photo deletion fails', async () => {
+    setupAuth()
+
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ data: [{ id: 'photo-1' }], error: null }) }),
+    } as any)
+
+    const storageMock = { remove: vi.fn().mockResolvedValue({ error: null }) }
+    vi.mocked(db.storage.from).mockReturnValue(storageMock as any)
+
+    vi.mocked(db.from).mockReturnValueOnce({
+      delete: () => ({ eq: () => ({ data: null, error: { message: 'DB error' } }) }),
+    } as any)
+
+    const res = await app.inject({ method: 'DELETE', url: '/profile/me', headers: AUTH })
+
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toEqual({ error: 'delete_failed' })
+  })
 })

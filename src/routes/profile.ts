@@ -74,7 +74,8 @@ export async function profileRoutes(app: FastifyInstance) {
 
     if (photos?.length) {
       await db.storage.from('profile-photos').remove(photos.map((p) => `${req.userId}/${p.id}`))
-      await db.from('user_photos').delete().eq('user_id', req.userId)
+      const { error: deleteError } = await db.from('user_photos').delete().eq('user_id', req.userId)
+      if (deleteError) return reply.status(500).send({ error: 'delete_failed' })
     }
 
     const { error } = await db.from('users').update({

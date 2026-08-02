@@ -19,7 +19,7 @@ async function getUsableMatch(matchId: string, userId: string) {
   if (!match) return null
   if (match.user1_id !== userId && match.user2_id !== userId) return null
 
-  const other = match.user1_id === userId ? match.user2 : match.user1
+  const other: any = match.user1_id === userId ? match.user2 : match.user1
   if (other?.deleted_at) return null
 
   return match

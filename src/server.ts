@@ -19,6 +19,8 @@ declare module 'fastify' {
   }
 }
 
+const LAST_ACTIVE_THROTTLE_MS = 60_000
+
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
     logger: process.env.NODE_ENV === 'test'
@@ -55,13 +57,25 @@ export async function buildApp(): Promise<FastifyInstance> {
 
     const { data } = await db
       .from('users')
-      .select('id, deleted_at')
+      .select('id, deleted_at, last_active')
       .eq('telegram_id', tgUser.id)
       .single()
 
     if (!data) return reply.status(401).send({ error: 'user_not_found' })
     if (data.deleted_at) return reply.status(401).send({ error: 'account_deleted' })
     req.userId = data.id
+
+    if (data.last_active && Date.now() - new Date(data.last_active).getTime() > LAST_ACTIVE_THROTTLE_MS) {
+      // Clearing notified_offline_at here means the very first request after
+      // a period of inactivity is what "coming back online" resets against —
+      // no separate heartbeat/reset job needed for the offline-notification throttle.
+      db.from('users')
+        .update({ last_active: new Date().toISOString(), notified_offline_at: null })
+        .eq('id', data.id)
+        .then(({ error }) => {
+          if (error) req.log.warn({ err: error }, 'failed to update last_active')
+        })
+    }
   })
 
   app.get('/health', { logLevel: 'silent' }, async () => ({ ok: true }))

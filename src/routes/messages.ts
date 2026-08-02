@@ -1,15 +1,17 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
+import { notifyNewMessage } from '../bot.js'
 
 const MAX_MESSAGE_LENGTH = 2000
+const OFFLINE_THRESHOLD_MS = 10 * 60 * 1000
 
 async function getUsableMatch(matchId: string, userId: string) {
   const { data: match } = await db
     .from('matches')
     .select(`
       id, user1_id, user2_id,
-      user1:users!matches_user1_id_fkey(id, deleted_at),
-      user2:users!matches_user2_id_fkey(id, deleted_at)
+      user1:users!matches_user1_id_fkey(id, name, telegram_id, deleted_at, last_active, notified_offline_at),
+      user2:users!matches_user2_id_fkey(id, name, telegram_id, deleted_at, last_active, notified_offline_at)
     `)
     .eq('id', matchId)
     .single()
@@ -76,6 +78,21 @@ export async function messagesRoutes(app: FastifyInstance) {
       .single()
 
     if (error || !message) return reply.status(500).send({ error: 'send_failed' })
+
+    const other: any = match.user1_id === req.userId ? match.user2 : match.user1
+    const me: any = match.user1_id === req.userId ? match.user1 : match.user2
+
+    const isOffline = !other.last_active || Date.now() - new Date(other.last_active).getTime() > OFFLINE_THRESHOLD_MS
+    if (isOffline && !other.notified_offline_at) {
+      // Mark notified_offline_at only after the Telegram send succeeds — a
+      // blocked bot or API hiccup shouldn't silently consume this offline
+      // stretch's one-notification allowance.
+      notifyNewMessage(other.telegram_id, me.name, trimmed)
+        .then(() =>
+          db.from('users').update({ notified_offline_at: new Date().toISOString() }).eq('id', other.id)
+        )
+        .catch((err) => req.log.warn({ err }, 'failed to send offline notification'))
+    }
 
     return {
       message: {

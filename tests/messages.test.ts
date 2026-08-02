@@ -2,16 +2,20 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
 vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
-vi.mock('../src/bot.js', () => ({ notifyMatch: vi.fn() }))
+vi.mock('../src/bot.js', () => ({ notifyMatch: vi.fn(), notifyNewMessage: vi.fn().mockResolvedValue(undefined) }))
 
 import { buildApp } from '../src/server.js'
 import { verifyInitData } from '../src/auth.js'
 import { db } from '../src/db.js'
+import { notifyNewMessage } from '../src/bot.js'
 
 const AUTH = { authorization: 'valid_init_data' }
 const USER_ID = 'user-uuid-1'
 const OTHER_ID = 'user-uuid-2'
+const OTHER_TELEGRAM_ID = 999
 const MATCH_ID = 'match-uuid-1'
+const RECENT = new Date().toISOString()
+const STALE = new Date(Date.now() - 20 * 60 * 1000).toISOString() // 20 minutes ago
 
 function setupAuth() {
   vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
@@ -20,8 +24,20 @@ function setupAuth() {
   } as any)
 }
 
-function mockMatchLookup(overrides: Partial<{ user1_id: string; user2_id: string; otherDeletedAt: string | null }> = {}) {
-  const { user1_id = USER_ID, user2_id = OTHER_ID, otherDeletedAt = null } = overrides
+function mockMatchLookup(overrides: Partial<{
+  user1_id: string
+  user2_id: string
+  otherDeletedAt: string | null
+  otherLastActive: string | null
+  otherNotifiedOfflineAt: string | null
+}> = {}) {
+  const {
+    user1_id = USER_ID,
+    user2_id = OTHER_ID,
+    otherDeletedAt = null,
+    otherLastActive = RECENT,
+    otherNotifiedOfflineAt = null,
+  } = overrides
   vi.mocked(db.from).mockReturnValueOnce({
     select: () => ({
       eq: () => ({
@@ -30,8 +46,18 @@ function mockMatchLookup(overrides: Partial<{ user1_id: string; user2_id: string
             id: MATCH_ID,
             user1_id,
             user2_id,
-            user1: { id: user1_id, deleted_at: user1_id === USER_ID ? null : otherDeletedAt },
-            user2: { id: user2_id, deleted_at: user2_id === OTHER_ID ? otherDeletedAt : null },
+            user1: {
+              id: user1_id, name: 'Ali', telegram_id: 1,
+              deleted_at: user1_id === USER_ID ? null : otherDeletedAt,
+              last_active: user1_id === USER_ID ? RECENT : otherLastActive,
+              notified_offline_at: user1_id === USER_ID ? null : otherNotifiedOfflineAt,
+            },
+            user2: {
+              id: user2_id, name: 'Sara', telegram_id: OTHER_TELEGRAM_ID,
+              deleted_at: user2_id === OTHER_ID ? otherDeletedAt : null,
+              last_active: user2_id === OTHER_ID ? otherLastActive : RECENT,
+              notified_offline_at: user2_id === OTHER_ID ? otherNotifiedOfflineAt : null,
+            },
           },
         }),
       }),
@@ -103,7 +129,10 @@ describe('GET /matches/:matchId/messages', () => {
 
 describe('POST /matches/:matchId/messages', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
-  beforeEach(async () => { app = await buildApp() })
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    app = await buildApp()
+  })
 
   it('returns 401 when unauthenticated', async () => {
     const res = await app.inject({ method: 'POST', url: `/matches/${MATCH_ID}/messages`, payload: { body: 'hi' } })
@@ -161,5 +190,83 @@ describe('POST /matches/:matchId/messages', () => {
     expect(res.json()).toEqual({
       message: { id: 'm3', senderId: USER_ID, body: 'hi', createdAt: '2026-01-01T10:02:00Z' },
     })
+  })
+
+  it('sends an offline notification and marks notified_offline_at when the recipient is inactive and not yet notified', async () => {
+    setupAuth()
+    mockMatchLookup({ otherLastActive: STALE, otherNotifiedOfflineAt: null })
+
+    vi.mocked(db.from).mockReturnValueOnce({
+      insert: () => ({
+        select: () => ({
+          single: () => ({
+            data: { id: 'm4', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z' },
+            error: null,
+          }),
+        }),
+      }),
+    } as any)
+
+    const markUpdateEq = vi.fn().mockResolvedValue({ error: null })
+    vi.mocked(db.from).mockReturnValueOnce({ update: () => ({ eq: markUpdateEq }) } as any)
+
+    const res = await app.inject({
+      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi' },
+    })
+    expect(res.statusCode).toBe(200)
+
+    // Flush the fire-and-forget notify chain before asserting on it.
+    await new Promise((resolve) => setImmediate(resolve))
+
+    expect(notifyNewMessage).toHaveBeenCalledWith(OTHER_TELEGRAM_ID, 'Ali', 'hi')
+    expect(markUpdateEq).toHaveBeenCalledWith('id', OTHER_ID)
+  })
+
+  it('does not send an offline notification when the recipient is online', async () => {
+    setupAuth()
+    mockMatchLookup({ otherLastActive: RECENT, otherNotifiedOfflineAt: null })
+
+    vi.mocked(db.from).mockReturnValueOnce({
+      insert: () => ({
+        select: () => ({
+          single: () => ({
+            data: { id: 'm5', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z' },
+            error: null,
+          }),
+        }),
+      }),
+    } as any)
+
+    const res = await app.inject({
+      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi' },
+    })
+    expect(res.statusCode).toBe(200)
+
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(notifyNewMessage).not.toHaveBeenCalled()
+  })
+
+  it('does not notify again when the recipient was already notified during this offline stretch', async () => {
+    setupAuth()
+    mockMatchLookup({ otherLastActive: STALE, otherNotifiedOfflineAt: STALE })
+
+    vi.mocked(db.from).mockReturnValueOnce({
+      insert: () => ({
+        select: () => ({
+          single: () => ({
+            data: { id: 'm6', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z' },
+            error: null,
+          }),
+        }),
+      }),
+    } as any)
+
+    const res = await app.inject({
+      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi' },
+    })
+    expect(res.statusCode).toBe(200)
+
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(notifyNewMessage).not.toHaveBeenCalled()
   })
 })

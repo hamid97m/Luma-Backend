@@ -56,3 +56,15 @@ export async function notifyMatch(
 
   await Promise.all([send(tgId1, name2, photo2), send(tgId2, name1, photo1)])
 }
+
+export async function notifyNewMessage(
+  toTelegramId: number,
+  senderName: string,
+  messageBody: string
+): Promise<void> {
+  const bot = getBot()
+  const keyboard = new InlineKeyboard().webApp('Open Luma ❤️', process.env.WEB_URL!)
+  await bot.api.sendMessage(toTelegramId, `New message from ${senderName}\n${messageBody}`, {
+    reply_markup: keyboard,
+  })
+}

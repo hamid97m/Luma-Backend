@@ -135,3 +135,72 @@ describe('GET /matches', () => {
     expect(res.json().matches).toHaveLength(0)
   })
 })
+
+describe('GET /matches/unread-count', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  beforeEach(async () => { app = await buildApp() })
+
+  it('returns 401 when unauthenticated', async () => {
+    const res = await app.inject({ method: 'GET', url: '/matches/unread-count' })
+    expect(res.statusCode).toBe(401)
+  })
+
+  it('returns the aggregate unread count across active matches', async () => {
+    setupAuth()
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({
+        or: () => ({
+          data: [{
+            id: 'match-1', user1_id: USER_ID, user2_id: 'other-user',
+            user1: { deleted_at: null }, user2: { deleted_at: null },
+          }],
+          error: null,
+        }),
+      }),
+    } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ in: () => ({ neq: () => ({ is: () => ({ count: 3, error: null }) }) }) }),
+    } as any)
+
+    const res = await app.inject({ method: 'GET', url: '/matches/unread-count', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ count: 3 })
+  })
+
+  it('excludes deleted-counterpart matches from the count query', async () => {
+    setupAuth()
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({
+        or: () => ({
+          data: [
+            { id: 'match-1', user1_id: USER_ID, user2_id: 'other-1', user1: { deleted_at: null }, user2: { deleted_at: null } },
+            { id: 'match-2', user1_id: USER_ID, user2_id: 'other-2', user1: { deleted_at: null }, user2: { deleted_at: '2026-07-30T00:00:00Z' } },
+          ],
+          error: null,
+        }),
+      }),
+    } as any)
+
+    const inSpy = vi.fn(() => ({ neq: () => ({ is: () => ({ count: 1, error: null }) }) }))
+    vi.mocked(db.from).mockReturnValueOnce({ select: () => ({ in: inSpy }) } as any)
+
+    const res = await app.inject({ method: 'GET', url: '/matches/unread-count', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ count: 1 })
+    expect(inSpy).toHaveBeenCalledWith('match_id', ['match-1'])
+  })
+
+  it('returns 0 without querying messages when there are no active matches', async () => {
+    setupAuth()
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ or: () => ({ data: [], error: null }) }),
+    } as any)
+
+    const res = await app.inject({ method: 'GET', url: '/matches/unread-count', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ count: 0 })
+  })
+})

@@ -66,4 +66,35 @@ export async function matchesRoutes(app: FastifyInstance) {
 
     return { matches }
   })
+
+  app.get('/matches/unread-count', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+
+    const { data: rows } = await db
+      .from('matches')
+      .select(`
+        id, user1_id, user2_id,
+        user1:users!matches_user1_id_fkey(deleted_at),
+        user2:users!matches_user2_id_fkey(deleted_at)
+      `)
+      .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
+
+    const activeMatchIds = (rows ?? [])
+      .filter((row: any) => {
+        const other = row.user1_id === req.userId ? row.user2 : row.user1
+        return !other.deleted_at
+      })
+      .map((row: any) => row.id)
+
+    if (activeMatchIds.length === 0) return { count: 0 }
+
+    const { count } = await db
+      .from('messages')
+      .select('id', { count: 'exact', head: true })
+      .in('match_id', activeMatchIds)
+      .neq('sender_id', req.userId)
+      .is('read_at', null)
+
+    return { count: count ?? 0 }
+  })
 }

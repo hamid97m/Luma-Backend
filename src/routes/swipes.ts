@@ -15,14 +15,16 @@ export async function swipesRoutes(app: FastifyInstance) {
 
     if (targetUserId === req.userId) return reply.status(400).send({ error: 'cannot_swipe_self' })
 
-    // Insert swipe; UNIQUE constraint prevents duplicates
-    const { error: swipeErr } = await db.from('swipes').insert({
+    // Upsert swipe — a later swipe on the same pair (e.g. liking someone you
+    // previously passed on, once the pass recycles back into the feed) must
+    // overwrite the stored direction rather than silently no-op on conflict.
+    const { error: swipeErr } = await db.from('swipes').upsert({
       swiper_id: req.userId,
       swiped_id: targetUserId,
       direction,
-    })
+      created_at: new Date().toISOString(),
+    }, { onConflict: 'swiper_id,swiped_id' })
 
-    if (swipeErr?.code === '23505') return { matched: false } // already swiped
     if (swipeErr) return reply.status(500).send({ error: 'swipe_failed' })
 
     if (direction === 'pass') return { matched: false }

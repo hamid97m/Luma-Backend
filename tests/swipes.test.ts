@@ -28,7 +28,7 @@ describe('POST /swipes — pass', () => {
     setupAuth()
 
     vi.mocked(db.from).mockReturnValueOnce({
-      insert: vi.fn().mockReturnValue({ error: null }),
+      upsert: vi.fn().mockReturnValue({ error: null }),
     } as any)
 
     const res = await app.inject({
@@ -51,9 +51,9 @@ describe('POST /swipes — like with no reverse', () => {
   it('returns matched: false', async () => {
     setupAuth()
 
-    // insert swipe OK
+    // upsert swipe OK
     vi.mocked(db.from).mockReturnValueOnce({
-      insert: vi.fn().mockReturnValue({ error: null }),
+      upsert: vi.fn().mockReturnValue({ error: null }),
     } as any)
     // no reverse swipe
     vi.mocked(db.from).mockReturnValueOnce({
@@ -72,6 +72,38 @@ describe('POST /swipes — like with no reverse', () => {
   })
 })
 
+describe('POST /swipes — liking someone previously passed on', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  beforeEach(async () => { app = await buildApp() })
+
+  it('upserts on the (swiper_id, swiped_id) pair instead of no-op-ing on conflict', async () => {
+    setupAuth()
+
+    const upsert = vi.fn().mockReturnValue({ error: null })
+    vi.mocked(db.from).mockReturnValueOnce({ upsert } as any)
+    // no reverse swipe
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: null, error: null }) }) }) }) }),
+    } as any)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/swipes',
+      headers: AUTH,
+      payload: { targetUserId: TARGET_ID, direction: 'like' },
+    })
+
+    // A prior pass on this same pair must not cause the like to be silently
+    // dropped — it has to overwrite the stored row so /discovery excludes them.
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ swiper_id: USER_ID, swiped_id: TARGET_ID, direction: 'like' }),
+      { onConflict: 'swiper_id,swiped_id' }
+    )
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ matched: false })
+  })
+})
+
 describe('POST /swipes — mutual like', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
   beforeEach(async () => { app = await buildApp() })
@@ -79,9 +111,9 @@ describe('POST /swipes — mutual like', () => {
   it('creates match and calls notifyMatch', async () => {
     setupAuth()
 
-    // insert swipe
+    // upsert swipe
     vi.mocked(db.from).mockReturnValueOnce({
-      insert: vi.fn().mockReturnValue({ error: null }),
+      upsert: vi.fn().mockReturnValue({ error: null }),
     } as any)
     // reverse swipe found
     vi.mocked(db.from).mockReturnValueOnce({

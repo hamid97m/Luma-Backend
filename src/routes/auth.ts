@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 import { verifyInitData } from '../auth.js'
+import { getProfileWithPhotos } from './profile.js'
 
 export async function authRoutes(app: FastifyInstance) {
   app.post('/auth/verify', async (req, reply) => {
@@ -54,6 +55,11 @@ export async function authRoutes(app: FastifyInstance) {
 
     const profile = existing ?? { age: 0 }
     const setupComplete = profile.age > 0
+
+    if (setupComplete) {
+      const fullProfile = await getProfileWithPhotos(userId)
+      if (fullProfile) return { user: fullProfile }
+    }
 
     return {
       user: {

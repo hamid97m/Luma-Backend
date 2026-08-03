@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 
-async function getProfileWithPhotos(userId: string) {
+export async function getProfileWithPhotos(userId: string) {
   const { data: user, error } = await db
     .from('users')
     .select('id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt, icebreaker_answer, is_active')

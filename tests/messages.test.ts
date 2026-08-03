@@ -365,3 +365,56 @@ describe('PATCH /matches/:matchId/messages/:messageId', () => {
     expect(notifyNewMessage).not.toHaveBeenCalled()
   })
 })
+
+describe('DELETE /matches/:matchId/messages/:messageId', () => {
+  const MSG_ID = 'msg-uuid-1'
+  let app: Awaited<ReturnType<typeof buildApp>>
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    app = await buildApp()
+  })
+
+  function mockDeleteChain(result: { data: any; error: any }) {
+    const eqCalls: Array<[string, string]> = []
+    const chain: any = {
+      eq: (col: string, val: string) => { eqCalls.push([col, val]); return chain },
+      select: () => result,
+    }
+    vi.mocked(db.from).mockReturnValueOnce({ delete: () => chain } as any)
+    return { eqCalls }
+  }
+
+  it('returns 401 when unauthenticated', async () => {
+    const res = await app.inject({ method: 'DELETE', url: `/matches/${MATCH_ID}/messages/${MSG_ID}` })
+    expect(res.statusCode).toBe(401)
+  })
+
+  it('returns 404 when the match is not usable', async () => {
+    setupAuth()
+    mockMatchLookup({ otherDeletedAt: '2026-07-30T00:00:00Z' })
+    const res = await app.inject({ method: 'DELETE', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'match_not_found' })
+  })
+
+  it('returns 404 when nothing was deleted (missing message or not the sender)', async () => {
+    setupAuth()
+    mockMatchLookup()
+    mockDeleteChain({ data: [], error: null })
+    const res = await app.inject({ method: 'DELETE', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'message_not_found' })
+  })
+
+  it('hard-deletes the row scoped to id+match+sender and returns ok', async () => {
+    setupAuth()
+    mockMatchLookup()
+    const { eqCalls } = mockDeleteChain({ data: [{ id: MSG_ID }], error: null })
+
+    const res = await app.inject({ method: 'DELETE', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ ok: true })
+    expect(eqCalls).toEqual([['id', MSG_ID], ['match_id', MATCH_ID], ['sender_id', USER_ID]])
+  })
+})

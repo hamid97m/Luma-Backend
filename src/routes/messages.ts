@@ -146,4 +146,25 @@ export async function messagesRoutes(app: FastifyInstance) {
       },
     }
   })
+
+  app.delete('/matches/:matchId/messages/:messageId', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+
+    const { matchId, messageId } = req.params as { matchId: string; messageId: string }
+    const match = await getUsableMatch(matchId, req.userId)
+    if (!match) return reply.status(404).send({ error: 'match_not_found' })
+
+    const { data: deleted, error } = await db
+      .from('messages')
+      .delete()
+      .eq('id', messageId)
+      .eq('match_id', matchId)
+      .eq('sender_id', req.userId)
+      .select('id')
+
+    if (error) return reply.status(500).send({ error: 'delete_failed' })
+    if (!deleted || deleted.length === 0) return reply.status(404).send({ error: 'message_not_found' })
+
+    return { ok: true }
+  })
 }

@@ -270,3 +270,98 @@ describe('POST /matches/:matchId/messages', () => {
     expect(notifyNewMessage).not.toHaveBeenCalled()
   })
 })
+
+describe('PATCH /matches/:matchId/messages/:messageId', () => {
+  const MSG_ID = 'msg-uuid-1'
+  let app: Awaited<ReturnType<typeof buildApp>>
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    app = await buildApp()
+  })
+
+  function mockUpdateChain(result: { data: any; error: any }) {
+    const eqCalls: Array<[string, string]> = []
+    const chain: any = {
+      eq: (col: string, val: string) => { eqCalls.push([col, val]); return chain },
+      select: () => ({ maybeSingle: () => result }),
+    }
+    const update = vi.fn(() => chain)
+    vi.mocked(db.from).mockReturnValueOnce({ update } as any)
+    return { eqCalls, update }
+  }
+
+  it('returns 401 when unauthenticated', async () => {
+    const res = await app.inject({
+      method: 'PATCH', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, payload: { body: 'hi' },
+    })
+    expect(res.statusCode).toBe(401)
+  })
+
+  it('returns 400 for an empty/whitespace body', async () => {
+    setupAuth()
+    const res = await app.inject({
+      method: 'PATCH', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH, payload: { body: '   ' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'empty_message' })
+  })
+
+  it('returns 400 for a body over 2000 characters', async () => {
+    setupAuth()
+    const res = await app.inject({
+      method: 'PATCH', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH, payload: { body: 'x'.repeat(2001) },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'message_too_long' })
+  })
+
+  it('returns 404 when the match is not usable', async () => {
+    setupAuth()
+    mockMatchLookup({ otherDeletedAt: '2026-07-30T00:00:00Z' })
+    const res = await app.inject({
+      method: 'PATCH', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH, payload: { body: 'hi' },
+    })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'match_not_found' })
+  })
+
+  it('returns 404 when no row matches (missing message or not the sender)', async () => {
+    setupAuth()
+    mockMatchLookup()
+    mockUpdateChain({ data: null, error: null })
+    const res = await app.inject({
+      method: 'PATCH', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH, payload: { body: 'hi' },
+    })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'message_not_found' })
+  })
+
+  it('updates the body, stamps edited_at, and scopes the update to id+match+sender', async () => {
+    setupAuth()
+    mockMatchLookup()
+    const { eqCalls, update } = mockUpdateChain({
+      data: {
+        id: MSG_ID, sender_id: USER_ID, body: 'fixed', created_at: '2026-01-01T10:00:00Z',
+        read_at: '2026-01-01T10:05:00Z', edited_at: '2026-01-02T09:00:00Z',
+      },
+      error: null,
+    })
+
+    const res = await app.inject({
+      method: 'PATCH', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH, payload: { body: '  fixed  ' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({
+      message: {
+        id: MSG_ID, senderId: USER_ID, body: 'fixed', createdAt: '2026-01-01T10:00:00Z',
+        readAt: '2026-01-01T10:05:00Z', editedAt: '2026-01-02T09:00:00Z',
+      },
+    })
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ body: 'fixed', edited_at: expect.any(String) }))
+    // read_at must never be part of the update payload
+    expect(update.mock.calls[0][0]).not.toHaveProperty('read_at')
+    expect(eqCalls).toEqual([['id', MSG_ID], ['match_id', MATCH_ID], ['sender_id', USER_ID]])
+    expect(notifyNewMessage).not.toHaveBeenCalled()
+  })
+})

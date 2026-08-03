@@ -107,4 +107,43 @@ export async function messagesRoutes(app: FastifyInstance) {
       },
     }
   })
+
+  app.patch('/matches/:matchId/messages/:messageId', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+
+    const { matchId, messageId } = req.params as { matchId: string; messageId: string }
+    const { body } = req.body as { body?: string }
+    const trimmed = (body ?? '').trim()
+
+    if (!trimmed) return reply.status(400).send({ error: 'empty_message' })
+    if (trimmed.length > MAX_MESSAGE_LENGTH) return reply.status(400).send({ error: 'message_too_long' })
+
+    const match = await getUsableMatch(matchId, req.userId)
+    if (!match) return reply.status(404).send({ error: 'match_not_found' })
+
+    // Ownership is enforced atomically by the filter — a non-sender can never
+    // match a row, so there is no fetch-then-check race.
+    const { data: message, error } = await db
+      .from('messages')
+      .update({ body: trimmed, edited_at: new Date().toISOString() })
+      .eq('id', messageId)
+      .eq('match_id', matchId)
+      .eq('sender_id', req.userId)
+      .select('id, sender_id, body, created_at, read_at, edited_at')
+      .maybeSingle()
+
+    if (error) return reply.status(500).send({ error: 'edit_failed' })
+    if (!message) return reply.status(404).send({ error: 'message_not_found' })
+
+    return {
+      message: {
+        id: message.id,
+        senderId: message.sender_id,
+        body: message.body,
+        createdAt: message.created_at,
+        readAt: message.read_at,
+        editedAt: message.edited_at,
+      },
+    }
+  })
 }

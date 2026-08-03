@@ -28,8 +28,8 @@ function mockMatchesRow() {
             created_at: '2026-01-01T00:00:00Z',
             user1_id: USER_ID,
             user2_id: 'other-user',
-            user1: { id: USER_ID, name: 'Ali', telegram_id: 1, deleted_at: null },
-            user2: { id: 'other-user', name: 'Sara', telegram_id: 99, deleted_at: null },
+            user1: { id: USER_ID, name: 'Ali', telegram_id: 1, deleted_at: null, age: 30, bio: null, icebreaker_prompt: null, icebreaker_answer: null },
+            user2: { id: 'other-user', name: 'Sara', telegram_id: 99, deleted_at: null, age: 24, bio: 'Coffee person', icebreaker_prompt: 'My perfect Sunday', icebreaker_answer: 'Hiking then pancakes' },
           }],
           error: null,
         }),
@@ -88,6 +88,10 @@ describe('GET /matches', () => {
     expect(body.matches).toHaveLength(1)
     expect(body.matches[0].user.name).toBe('Sara')
     expect(body.matches[0].user.telegramId).toBe(99)
+    expect(body.matches[0].user.age).toBe(24)
+    expect(body.matches[0].user.bio).toBe('Coffee person')
+    expect(body.matches[0].user.icebreakerPrompt).toBe('My perfect Sunday')
+    expect(body.matches[0].user.icebreakerAnswer).toBe('Hiking then pancakes')
     expect(body.matches[0].lastMessage).toEqual({
       body: 'hey there', createdAt: '2026-01-02T00:00:00Z', senderId: 'other-user',
     })

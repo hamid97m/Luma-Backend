@@ -9,8 +9,8 @@ export async function matchesRoutes(app: FastifyInstance) {
       .from('matches')
       .select(`
         id, created_at, user1_id, user2_id,
-        user1:users!matches_user1_id_fkey(id, name, telegram_id, username, deleted_at),
-        user2:users!matches_user2_id_fkey(id, name, telegram_id, username, deleted_at)
+        user1:users!matches_user1_id_fkey(id, name, telegram_id, username, deleted_at, age, bio, icebreaker_prompt, icebreaker_answer),
+        user2:users!matches_user2_id_fkey(id, name, telegram_id, username, deleted_at, age, bio, icebreaker_prompt, icebreaker_answer)
       `)
       .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
       .order('created_at', { ascending: false })
@@ -54,6 +54,10 @@ export async function matchesRoutes(app: FastifyInstance) {
             name: other.name,
             telegramId: other.telegram_id,
             username: other.username,
+            age: other.age ?? null,
+            bio: other.bio ?? null,
+            icebreakerPrompt: other.icebreaker_prompt ?? null,
+            icebreakerAnswer: other.icebreaker_answer ?? null,
             photos: (photos ?? []).map((p: { url: string }) => p.url),
           },
           lastMessage: lastMsg

@@ -100,8 +100,8 @@ describe('GET /matches/:matchId/messages', () => {
         eq: () => ({
           order: () => ({
             data: [
-              { id: 'm1', sender_id: USER_ID, body: 'hey', created_at: '2026-01-01T10:00:00Z', read_at: null },
-              { id: 'm2', sender_id: OTHER_ID, body: 'hi', created_at: '2026-01-01T10:01:00Z', read_at: '2026-01-01T10:05:00Z' },
+              { id: 'm1', sender_id: USER_ID, body: 'hey', created_at: '2026-01-01T10:00:00Z', read_at: null, edited_at: null },
+              { id: 'm2', sender_id: OTHER_ID, body: 'hi', created_at: '2026-01-01T10:01:00Z', read_at: '2026-01-01T10:05:00Z', edited_at: '2026-01-01T10:03:00Z' },
             ],
             error: null,
           }),
@@ -119,8 +119,8 @@ describe('GET /matches/:matchId/messages', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({
       messages: [
-        { id: 'm1', senderId: USER_ID, body: 'hey', createdAt: '2026-01-01T10:00:00Z', readAt: null },
-        { id: 'm2', senderId: OTHER_ID, body: 'hi', createdAt: '2026-01-01T10:01:00Z', readAt: '2026-01-01T10:05:00Z' },
+        { id: 'm1', senderId: USER_ID, body: 'hey', createdAt: '2026-01-01T10:00:00Z', readAt: null, editedAt: null },
+        { id: 'm2', senderId: OTHER_ID, body: 'hi', createdAt: '2026-01-01T10:01:00Z', readAt: '2026-01-01T10:05:00Z', editedAt: '2026-01-01T10:03:00Z' },
       ],
     })
     expect(updateEq).toHaveBeenCalledWith('match_id', MATCH_ID)
@@ -188,7 +188,7 @@ describe('POST /matches/:matchId/messages', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({
-      message: { id: 'm3', senderId: USER_ID, body: 'hi', createdAt: '2026-01-01T10:02:00Z', readAt: null },
+      message: { id: 'm3', senderId: USER_ID, body: 'hi', createdAt: '2026-01-01T10:02:00Z', readAt: null, editedAt: null },
     })
   })
 

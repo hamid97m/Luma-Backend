@@ -64,6 +64,20 @@ export async function profileRoutes(app: FastifyInstance) {
     }
   })
 
+  // Recorded when the user answers the in-app requestWriteAccess() popup —
+  // initData only refreshes on the next launch, so without this a mid-session
+  // grant would stay invisible until the app is reopened.
+  app.post('/profile/me/write-access', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+
+    const { granted } = req.body as { granted?: boolean }
+    if (typeof granted !== 'boolean') return reply.status(400).send({ error: 'invalid_granted' })
+
+    const { error } = await db.from('users').update({ allows_write_to_pm: granted }).eq('id', req.userId)
+    if (error) return reply.status(500).send({ error: 'update_failed' })
+    return { ok: true }
+  })
+
   app.delete('/profile/me', async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 

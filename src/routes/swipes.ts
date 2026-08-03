@@ -55,7 +55,7 @@ export async function swipesRoutes(app: FastifyInstance) {
     // Fetch both users for notification
     const { data: users, error: usersErr } = await db
       .from('users')
-      .select('id, name, telegram_id, username')
+      .select('id, name, telegram_id, username, allows_write_to_pm')
       .in('id', [req.userId, targetUserId])
 
     if (usersErr || !users || users.length < 2) {
@@ -75,11 +75,17 @@ export async function swipesRoutes(app: FastifyInstance) {
     const primaryPhoto = (userId: string) =>
       photos?.find((p: { user_id: string; url: string }) => p.user_id === userId)?.url ?? null
 
-    // Fire-and-forget
-    notifyMatch(
-      me.telegram_id, me.name, primaryPhoto(me.id),
-      them.telegram_id, them.name, primaryPhoto(them.id)
-    ).catch(console.error)
+    // Fire-and-forget. Telegram rejects DMs from bots the user hasn't granted
+    // write access to (never pressed Start / declined the popup), so skip
+    // anyone with an explicit false — null means unknown, still worth trying.
+    const recipients = [
+      { user: me, matchName: them.name, matchPhoto: primaryPhoto(them.id) },
+      { user: them, matchName: me.name, matchPhoto: primaryPhoto(me.id) },
+    ]
+      .filter((r) => r.user.allows_write_to_pm !== false)
+      .map((r) => ({ telegramId: r.user.telegram_id, matchName: r.matchName, matchPhoto: r.matchPhoto }))
+
+    if (recipients.length > 0) notifyMatch(recipients).catch(console.error)
 
     return {
       matched: true,

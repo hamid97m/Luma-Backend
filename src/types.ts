@@ -15,6 +15,7 @@ export interface DBUser {
   deleted_at: string | null
   created_at: string
   last_active: string
+  allows_write_to_pm: boolean | null
 }
 
 export interface DBPhoto {
@@ -30,4 +31,5 @@ export interface TelegramUser {
   first_name: string
   last_name?: string
   username?: string
+  allows_write_to_pm?: boolean
 }

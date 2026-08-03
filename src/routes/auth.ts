@@ -14,6 +14,13 @@ export async function authRoutes(app: FastifyInstance) {
     const tgUser = verifyInitData(initData, process.env.BOT_TOKEN ?? '')
     if (!tgUser) return reply.status(401).send({ error: 'invalid_init_data' })
 
+    // Only write the flag when Telegram actually sent it — old clients omit
+    // the field entirely, and that absence must not wipe a known value.
+    const writeAccess =
+      typeof tgUser.allows_write_to_pm === 'boolean'
+        ? { allows_write_to_pm: tgUser.allows_write_to_pm }
+        : {}
+
     // Find or create user
     const { data: existing } = await db
       .from('users')
@@ -30,6 +37,7 @@ export async function authRoutes(app: FastifyInstance) {
       const reactivating = Boolean(existing.deleted_at)
       const { error: updateError } = await db.from('users').update({
         last_active: new Date().toISOString(),
+        ...writeAccess,
         ...(reactivating ? { deleted_at: null, is_active: true } : {}),
       }).eq('id', userId)
       if (updateError) return reply.status(500).send({ error: 'auth_update_failed' })
@@ -40,6 +48,7 @@ export async function authRoutes(app: FastifyInstance) {
           telegram_id: tgUser.id,
           username: tgUser.username ?? null,
           name: tgUser.first_name,
+          ...writeAccess,
           // age, gender, looking_for will be set during profile setup
           age: 0,
           gender: 'man',

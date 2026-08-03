@@ -10,8 +10,8 @@ async function getUsableMatch(matchId: string, userId: string) {
     .from('matches')
     .select(`
       id, user1_id, user2_id,
-      user1:users!matches_user1_id_fkey(id, name, telegram_id, deleted_at, last_active, notified_offline_at),
-      user2:users!matches_user2_id_fkey(id, name, telegram_id, deleted_at, last_active, notified_offline_at)
+      user1:users!matches_user1_id_fkey(id, name, telegram_id, deleted_at, last_active, notified_offline_at, allows_write_to_pm),
+      user2:users!matches_user2_id_fkey(id, name, telegram_id, deleted_at, last_active, notified_offline_at, allows_write_to_pm)
     `)
     .eq('id', matchId)
     .single()
@@ -84,7 +84,7 @@ export async function messagesRoutes(app: FastifyInstance) {
     const me: any = match.user1_id === req.userId ? match.user1 : match.user2
 
     const isOffline = !other.last_active || Date.now() - new Date(other.last_active).getTime() > OFFLINE_THRESHOLD_MS
-    if (isOffline && !other.notified_offline_at) {
+    if (isOffline && !other.notified_offline_at && other.allows_write_to_pm !== false) {
       // Mark notified_offline_at only after the Telegram send succeeds — a
       // blocked bot or API hiccup shouldn't silently consume this offline
       // stretch's one-notification allowance.

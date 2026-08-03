@@ -97,6 +97,24 @@ describe('POST /auth/verify', () => {
       }) }) }),
     } as any)
     mockFrom.mockReturnValueOnce({ update: updateMock } as any)
+    // setupComplete → the route responds with the full profile (getProfileWithPhotos):
+    // one users select, one user_photos select.
+    mockFrom.mockReturnValueOnce({
+      select: () => ({ eq: () => ({ single: () => Promise.resolve({
+        data: {
+          id: 'uuid-1', name: 'Hamid', age: 25, gender: 'man', looking_for: 'women',
+          bio: null, interests: [], location: null,
+          icebreaker_prompt: null, icebreaker_answer: null, is_active: true,
+        },
+        error: null,
+      }) }) }),
+    } as any)
+    mockFrom.mockReturnValueOnce({
+      select: () => ({ eq: () => ({ order: () => Promise.resolve({
+        data: [{ id: 'photo-1', url: 'https://example.com/hamid.jpg', position: 0 }],
+        error: null,
+      }) }) }),
+    } as any)
 
     const res = await app.inject({
       method: 'POST',
@@ -106,6 +124,8 @@ describe('POST /auth/verify', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json().user.setupComplete).toBe(true)
+    // Full profile comes back so the splash screen can skip a /profile/me round trip.
+    expect(res.json().user.photos).toEqual([{ id: 'photo-1', url: 'https://example.com/hamid.jpg', position: 0 }])
     expect(updateMock).toHaveBeenCalled()
     expect(updateMock.mock.calls[0][0]).toHaveProperty('last_active')
     expect(updateMock.mock.calls[0][0]).not.toHaveProperty('deleted_at')

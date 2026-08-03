@@ -150,9 +150,10 @@ describe('POST /swipes — mutual like', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json().matched).toBe(true)
     expect(res.json().match.id).toBe('match-uuid')
-    expect(notifyMatch).toHaveBeenCalledWith(
-      1, 'Ali', 'https://example.com/ali.jpg',
-      2, 'Sara', 'https://example.com/sara.jpg'
-    )
+    // Each participant is notified about the OTHER person.
+    expect(notifyMatch).toHaveBeenCalledWith([
+      { telegramId: 1, matchName: 'Sara', matchPhoto: 'https://example.com/sara.jpg' },
+      { telegramId: 2, matchName: 'Ali', matchPhoto: 'https://example.com/ali.jpg' },
+    ])
   })
 })

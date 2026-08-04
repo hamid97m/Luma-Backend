@@ -100,8 +100,8 @@ describe('GET /matches/:matchId/messages', () => {
         eq: () => ({
           order: () => ({
             data: [
-              { id: 'm1', sender_id: USER_ID, body: 'hey', created_at: '2026-01-01T10:00:00Z', read_at: null, edited_at: null },
-              { id: 'm2', sender_id: OTHER_ID, body: 'hi', created_at: '2026-01-01T10:01:00Z', read_at: '2026-01-01T10:05:00Z', edited_at: '2026-01-01T10:03:00Z' },
+              { id: 'm1', sender_id: USER_ID, body: 'hey', created_at: '2026-01-01T10:00:00Z', read_at: null, edited_at: null, reply_to_message_id: null },
+              { id: 'm2', sender_id: OTHER_ID, body: 'hi', created_at: '2026-01-01T10:01:00Z', read_at: '2026-01-01T10:05:00Z', edited_at: '2026-01-01T10:03:00Z', reply_to_message_id: 'm1' },
             ],
             error: null,
           }),
@@ -119,8 +119,8 @@ describe('GET /matches/:matchId/messages', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({
       messages: [
-        { id: 'm1', senderId: USER_ID, body: 'hey', createdAt: '2026-01-01T10:00:00Z', readAt: null, editedAt: null },
-        { id: 'm2', senderId: OTHER_ID, body: 'hi', createdAt: '2026-01-01T10:01:00Z', readAt: '2026-01-01T10:05:00Z', editedAt: '2026-01-01T10:03:00Z' },
+        { id: 'm1', senderId: USER_ID, body: 'hey', createdAt: '2026-01-01T10:00:00Z', readAt: null, editedAt: null, replyToMessageId: null },
+        { id: 'm2', senderId: OTHER_ID, body: 'hi', createdAt: '2026-01-01T10:01:00Z', readAt: '2026-01-01T10:05:00Z', editedAt: '2026-01-01T10:03:00Z', replyToMessageId: 'm1' },
       ],
     })
     expect(updateEq).toHaveBeenCalledWith('match_id', MATCH_ID)
@@ -175,7 +175,7 @@ describe('POST /matches/:matchId/messages', () => {
       insert: () => ({
         select: () => ({
           single: () => ({
-            data: { id: 'm3', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z' },
+            data: { id: 'm3', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z', reply_to_message_id: null },
             error: null,
           }),
         }),
@@ -188,7 +188,7 @@ describe('POST /matches/:matchId/messages', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({
-      message: { id: 'm3', senderId: USER_ID, body: 'hi', createdAt: '2026-01-01T10:02:00Z', readAt: null, editedAt: null },
+      message: { id: 'm3', senderId: USER_ID, body: 'hi', createdAt: '2026-01-01T10:02:00Z', readAt: null, editedAt: null, replyToMessageId: null },
     })
   })
 
@@ -200,7 +200,7 @@ describe('POST /matches/:matchId/messages', () => {
       insert: () => ({
         select: () => ({
           single: () => ({
-            data: { id: 'm4', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z' },
+            data: { id: 'm4', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z', reply_to_message_id: null },
             error: null,
           }),
         }),
@@ -230,7 +230,7 @@ describe('POST /matches/:matchId/messages', () => {
       insert: () => ({
         select: () => ({
           single: () => ({
-            data: { id: 'm5', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z' },
+            data: { id: 'm5', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z', reply_to_message_id: null },
             error: null,
           }),
         }),
@@ -246,6 +246,53 @@ describe('POST /matches/:matchId/messages', () => {
     expect(notifyNewMessage).not.toHaveBeenCalled()
   })
 
+  it('inserts a reply and returns replyToMessageId when the parent is in the same match', async () => {
+    setupAuth()
+    mockMatchLookup()
+
+    // parent-message validation lookup: .select('id').eq().eq().maybeSingle()
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: () => ({ data: { id: 'parent-1' }, error: null }) }) }) }),
+    } as any)
+
+    vi.mocked(db.from).mockReturnValueOnce({
+      insert: () => ({
+        select: () => ({
+          single: () => ({
+            data: { id: 'm7', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z', reply_to_message_id: 'parent-1' },
+            error: null,
+          }),
+        }),
+      }),
+    } as any)
+
+    const res = await app.inject({
+      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi', replyToMessageId: 'parent-1' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({
+      message: { id: 'm7', senderId: USER_ID, body: 'hi', createdAt: '2026-01-01T10:02:00Z', readAt: null, editedAt: null, replyToMessageId: 'parent-1' },
+    })
+  })
+
+  it('returns 400 when the reply target does not belong to this match', async () => {
+    setupAuth()
+    mockMatchLookup()
+
+    // parent lookup finds nothing (wrong match or nonexistent)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: () => ({ data: null, error: null }) }) }) }),
+    } as any)
+
+    const res = await app.inject({
+      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi', replyToMessageId: 'parent-x' },
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_reply_target' })
+  })
+
   it('does not notify again when the recipient was already notified during this offline stretch', async () => {
     setupAuth()
     mockMatchLookup({ otherLastActive: STALE, otherNotifiedOfflineAt: STALE })
@@ -254,7 +301,7 @@ describe('POST /matches/:matchId/messages', () => {
       insert: () => ({
         select: () => ({
           single: () => ({
-            data: { id: 'm6', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z' },
+            data: { id: 'm6', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z', reply_to_message_id: null },
             error: null,
           }),
         }),

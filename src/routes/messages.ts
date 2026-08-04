@@ -35,7 +35,7 @@ export async function messagesRoutes(app: FastifyInstance) {
 
     const { data: rows, error } = await db
       .from('messages')
-      .select('id, sender_id, body, created_at, read_at, edited_at')
+      .select('id, sender_id, body, created_at, read_at, edited_at, reply_to_message_id')
       .eq('match_id', matchId)
       .order('created_at', { ascending: true })
 
@@ -56,6 +56,7 @@ export async function messagesRoutes(app: FastifyInstance) {
         createdAt: m.created_at,
         readAt: m.read_at,
         editedAt: m.edited_at ?? null,
+        replyToMessageId: m.reply_to_message_id ?? null,
       })),
     }
   })
@@ -64,7 +65,7 @@ export async function messagesRoutes(app: FastifyInstance) {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
     const { matchId } = req.params as { matchId: string }
-    const { body } = req.body as { body?: string }
+    const { body, replyToMessageId } = req.body as { body?: string; replyToMessageId?: string }
     const trimmed = (body ?? '').trim()
 
     if (!trimmed) return reply.status(400).send({ error: 'empty_message' })
@@ -73,10 +74,20 @@ export async function messagesRoutes(app: FastifyInstance) {
     const match = await getUsableMatch(matchId, req.userId)
     if (!match) return reply.status(404).send({ error: 'match_not_found' })
 
+    if (replyToMessageId) {
+      const { data: parent } = await db
+        .from('messages')
+        .select('id')
+        .eq('id', replyToMessageId)
+        .eq('match_id', matchId)
+        .maybeSingle()
+      if (!parent) return reply.status(400).send({ error: 'invalid_reply_target' })
+    }
+
     const { data: message, error } = await db
       .from('messages')
-      .insert({ match_id: matchId, sender_id: req.userId, body: trimmed })
-      .select('id, sender_id, body, created_at')
+      .insert({ match_id: matchId, sender_id: req.userId, body: trimmed, reply_to_message_id: replyToMessageId ?? null })
+      .select('id, sender_id, body, created_at, reply_to_message_id')
       .single()
 
     if (error || !message) return reply.status(500).send({ error: 'send_failed' })
@@ -104,6 +115,7 @@ export async function messagesRoutes(app: FastifyInstance) {
         createdAt: message.created_at,
         readAt: null,
         editedAt: null,
+        replyToMessageId: message.reply_to_message_id ?? null,
       },
     }
   })

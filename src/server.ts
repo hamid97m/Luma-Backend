@@ -13,6 +13,7 @@ import { swipesRoutes } from './routes/swipes.js'
 import { matchesRoutes } from './routes/matches.js'
 import { messagesRoutes } from './routes/messages.js'
 import { reportsRoutes } from './routes/reports.js'
+import { supportRoutes } from './routes/support.js'
 import { adminRoutes } from './routes/admin/index.js'
 
 declare module 'fastify' {
@@ -100,6 +101,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(matchesRoutes)
   await app.register(messagesRoutes)
   await app.register(reportsRoutes)
+  await app.register(supportRoutes)
   await app.register(adminRoutes, { prefix: '/admin' })
 
   return app

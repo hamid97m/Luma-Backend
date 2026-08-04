@@ -12,8 +12,11 @@ async function loadRawCatalog() {
   if (catalogCache && Date.now() - catalogCache.at < CATALOG_TTL_MS) return catalogCache.gifts
   const gifts = await getGiftCatalog()
   const mapped = gifts
-    // Drop sold-out limited gifts (regular gifts have no remaining_count).
-    .filter((g) => g.remaining_count === undefined || g.remaining_count > 0)
+    // Drop sold-out limited gifts (regular gifts have neither field) — both the global
+    // remaining stock and the bot's own allocation must be non-zero, since sendGift draws
+    // from personal_remaining_count and a global-only check can pass a gift the bot can't send.
+    .filter((g) => (g.remaining_count === undefined || g.remaining_count > 0)
+      && (g.personal_remaining_count === undefined || g.personal_remaining_count > 0))
     .map((g) => ({ id: g.id, emoji: g.sticker?.emoji ?? null, starCost: g.star_count }))
   catalogCache = { at: Date.now(), gifts: mapped }
   return mapped

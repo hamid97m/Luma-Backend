@@ -114,4 +114,27 @@ describe('admin auth', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ adminId: 'admin-1', username: 'root' })
   })
+
+  it('rate limits repeated login attempts from the same IP regardless of Authorization header', async () => {
+    vi.mocked(db.from).mockImplementation(() =>
+      chainable({ data: null, error: { message: 'not found' } })
+    )
+
+    // app.inject uses the same default remoteAddress for every call against
+    // this single app instance, so the IP-keyed bucket accumulates across requests.
+    for (let i = 0; i < 10; i++) {
+      const res = await app.inject({
+        method: 'POST', url: '/admin/auth/login',
+        payload: { username: 'ghost', password: 'x' },
+      })
+      expect(res.statusCode).toBe(401)
+    }
+
+    const res = await app.inject({
+      method: 'POST', url: '/admin/auth/login',
+      payload: { username: 'ghost', password: 'x' },
+    })
+    expect(res.statusCode).toBe(429)
+    expect(res.json()).toEqual({ error: 'rate_limited' })
+  })
 })

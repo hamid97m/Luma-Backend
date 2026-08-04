@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
@@ -44,7 +45,12 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(rateLimit, {
     max: 300,
     timeWindow: '1 hour',
-    keyGenerator: (req: FastifyRequest) => req.headers.authorization?.slice(0, 32) ?? req.ip,
+    keyGenerator: (req: FastifyRequest) => {
+      const auth = req.headers.authorization
+      // Hash the full header: raw slicing gave all Bearer JWTs one shared bucket
+      // (constant "Bearer eyJ..." prefix) and let attackers mint fresh buckets.
+      return auth ? createHash('sha256').update(auth).digest('hex') : req.ip
+    },
     errorResponseBuilder: () => ({ error: 'rate_limited' }),
   })
 

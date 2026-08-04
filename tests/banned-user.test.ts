@@ -31,4 +31,29 @@ describe('banned user enforcement', () => {
     expect(res.statusCode).toBe(401)
     expect(res.json()).toEqual({ error: 'account_banned' })
   })
+
+  it('rejects a banned user on POST /auth/verify with account_banned', async () => {
+    vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({
+        eq: () => ({
+          single: () => Promise.resolve({
+            data: {
+              id: 'u1', name: 'Ali', age: 25, gender: 'man', looking_for: 'women',
+              bio: null, deleted_at: null, banned_at: '2026-08-04T00:00:00Z',
+            },
+            error: null,
+          }),
+        }),
+      }),
+    } as any)
+
+    const res = await app.inject({
+      method: 'POST', url: '/auth/verify',
+      payload: { initData: 'valid_init_data' },
+    })
+
+    expect(res.statusCode).toBe(401)
+    expect(res.json()).toEqual({ error: 'account_banned' })
+  })
 })

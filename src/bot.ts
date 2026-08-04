@@ -80,3 +80,7 @@ export async function notifyNewMessage(
     await bot.api.sendMessage(toTelegramId, caption, { reply_markup: keyboard })
   }
 }
+
+export async function notifyTicketReply(_toTelegramId: number, _issuePreview: string, _answer: string): Promise<void> {
+  // Replaced with the real implementation in Task 5.
+}

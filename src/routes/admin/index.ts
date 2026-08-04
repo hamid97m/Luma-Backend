@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import { verifyAdminToken } from './auth-utils.js'
 import { adminAuthRoutes } from './auth.js'
 import { adminStatsRoutes } from './stats.js'
+import { adminUsersRoutes } from './users.js'
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -30,4 +31,5 @@ export async function adminRoutes(app: FastifyInstance) {
 
   await app.register(adminAuthRoutes)
   await app.register(adminStatsRoutes)
+  await app.register(adminUsersRoutes)
 }

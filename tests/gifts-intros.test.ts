@@ -129,14 +129,31 @@ describe('acceptIntro', () => {
     expect(result).toEqual({ matchId: 'existing-match' })
   })
 
-  it('returns match_failed if the 23505 re-select finds nothing', async () => {
+  it('returns match_failed and reverts the claim if the 23505 re-select finds nothing', async () => {
+    const revertUpdates: any[] = []
     scriptDb([
       claimStep({ id: 'tx1', buyer_id: 'buyer1', recipient_id: 'rec1' }), // 1. atomic claim
       matchesInsertStep(null, { code: '23505' }),                        // 2. matches insert (conflict)
       matchesLookupStep(null),                                           // 3. re-select finds nothing
+      updateSpyStep((p) => revertUpdates.push(p)),                       // 4. revert claim back to pending
     ])
     const result = await acceptIntro('tx1', 'rec1')
     expect(result).toEqual({ error: 'match_failed' })
+    expect(revertUpdates).toHaveLength(1)
+    expect(revertUpdates[0]).toEqual({ intro_status: 'pending' })
+  })
+
+  it('returns match_failed and reverts the claim on a non-23505 matches insert error', async () => {
+    const revertUpdates: any[] = []
+    scriptDb([
+      claimStep({ id: 'tx1', buyer_id: 'buyer1', recipient_id: 'rec1' }), // 1. atomic claim
+      matchesInsertStep(null, { code: '23000', message: 'boom' }),        // 2. matches insert (unrelated failure)
+      updateSpyStep((p) => revertUpdates.push(p)),                        // 3. revert claim back to pending
+    ])
+    const result = await acceptIntro('tx1', 'rec1')
+    expect(result).toEqual({ error: 'match_failed' })
+    expect(revertUpdates).toHaveLength(1)
+    expect(revertUpdates[0]).toEqual({ intro_status: 'pending' })
   })
 })
 

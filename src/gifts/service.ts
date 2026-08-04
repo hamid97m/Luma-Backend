@@ -189,6 +189,15 @@ async function resolveClaimMiss(introId: string, userId: string): Promise<{ erro
   return { error: 'already_handled' }
 }
 
+/**
+ * Compensate a won claim when match creation fails: revert intro_status back to 'pending'
+ * so the intro stays retryable instead of getting stuck 'accepted' with no match_id.
+ */
+async function revertClaim(introId: string): Promise<{ error: string }> {
+  await db.from('gift_transactions').update({ intro_status: 'pending' }).eq('id', introId)
+  return { error: 'match_failed' }
+}
+
 export async function acceptIntro(introId: string, userId: string) {
   // Atomic claim: only a still-pending row owned by this recipient flips to 'accepted'.
   // This guards against a double-tap/retry racing two concurrent accepts, which would
@@ -210,10 +219,10 @@ export async function acceptIntro(introId: string, userId: string) {
   } else if (insErr?.code === '23505') {
     const { data: existing } = await db
       .from('matches').select('id').eq('user1_id', u1).eq('user2_id', u2).single()
-    if (!existing) return { error: 'match_failed' }
+    if (!existing) return revertClaim(introId)
     matchId = existing.id
   } else {
-    return { error: 'match_failed' }
+    return revertClaim(introId)
   }
 
   await db.from('gift_transactions').update({ match_id: matchId }).eq('id', claimed.id)

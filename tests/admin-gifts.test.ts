@@ -103,10 +103,11 @@ describe('admin gifts', () => {
             status: 'sent', context: 'chat', intro_status: null, created_at: 'now',
             buyer: { name: 'Alice' }, recipient: { name: 'Bob' },
           }],
+          count: 1,
           error: null,
         })
       }
-      return chainable({ data: [], error: null })
+      return chainable({ data: [], count: 0, error: null })
     })
 
     const res = await app.inject({ method: 'GET', url: '/admin/gifts/transactions', headers })
@@ -117,6 +118,106 @@ describe('admin gifts', () => {
         giftStarCost: 15, chargedStars: 20, markupStars: 5,
         status: 'sent', context: 'chat', introStatus: null, createdAt: 'now',
       }],
+      total: 1, page: 1, pageCount: 1,
     })
+  })
+
+  it('applies a status filter as .eq("status", ...)', async () => {
+    const log: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'gift_transactions') return chainable({ data: [], count: 0, error: null }, log)
+      return chainable({ data: [], count: 0, error: null })
+    })
+
+    const res = await app.inject({
+      method: 'GET', url: '/admin/gifts/transactions?status=paid', headers,
+    })
+    expect(res.statusCode).toBe(200)
+    expect(log.some((c) => c.method === 'eq' && c.args[0] === 'status' && c.args[1] === 'paid')).toBe(true)
+    expect(log.some((c) => c.method === 'eq' && c.args[0] === 'context')).toBe(false)
+  })
+
+  it('applies a context filter as .eq("context", ...)', async () => {
+    const log: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'gift_transactions') return chainable({ data: [], count: 0, error: null }, log)
+      return chainable({ data: [], count: 0, error: null })
+    })
+
+    const res = await app.inject({
+      method: 'GET', url: '/admin/gifts/transactions?context=discovery', headers,
+    })
+    expect(res.statusCode).toBe(200)
+    expect(log.some((c) => c.method === 'eq' && c.args[0] === 'context' && c.args[1] === 'discovery')).toBe(true)
+    expect(log.some((c) => c.method === 'eq' && c.args[0] === 'status')).toBe(false)
+  })
+
+  it('ignores invalid status/context values instead of filtering or erroring', async () => {
+    const log: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'gift_transactions') return chainable({ data: [], count: 0, error: null }, log)
+      return chainable({ data: [], count: 0, error: null })
+    })
+
+    const res = await app.inject({
+      method: 'GET', url: '/admin/gifts/transactions?status=bogus&context=nowhere', headers,
+    })
+    expect(res.statusCode).toBe(200)
+    expect(log.some((c) => c.method === 'eq')).toBe(false)
+  })
+
+  it('applies status=all/context=all as no filter', async () => {
+    const log: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'gift_transactions') return chainable({ data: [], count: 0, error: null }, log)
+      return chainable({ data: [], count: 0, error: null })
+    })
+
+    const res = await app.inject({
+      method: 'GET', url: '/admin/gifts/transactions?status=all&context=all', headers,
+    })
+    expect(res.statusCode).toBe(200)
+    expect(log.some((c) => c.method === 'eq')).toBe(false)
+  })
+
+  it('paginates: computes pageCount from count and echoes the requested page', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'gift_transactions') return chainable({ data: [], count: 53, error: null })
+      return chainable({ data: [], count: 0, error: null })
+    })
+
+    const res = await app.inject({
+      method: 'GET', url: '/admin/gifts/transactions?page=3', headers,
+    })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.total).toBe(53)
+    expect(body.page).toBe(3)
+    expect(body.pageCount).toBe(3) // ceil(53 / 25)
+  })
+
+  it('uses .range(from, from + PAGE_SIZE - 1) for the requested page', async () => {
+    const log: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'gift_transactions') return chainable({ data: [], count: 0, error: null }, log)
+      return chainable({ data: [], count: 0, error: null })
+    })
+
+    const res = await app.inject({
+      method: 'GET', url: '/admin/gifts/transactions?page=2', headers,
+    })
+    expect(res.statusCode).toBe(200)
+    expect(log.some((c) => c.method === 'range' && c.args[0] === 25 && c.args[1] === 49)).toBe(true)
+  })
+
+  it('defaults to page 1 with no total when the query errors', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'gift_transactions') return chainable({ data: null, count: null, error: { message: 'boom' } })
+      return chainable({ data: [], count: 0, error: null })
+    })
+
+    const res = await app.inject({ method: 'GET', url: '/admin/gifts/transactions', headers })
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toEqual({ error: 'transactions_fetch_failed' })
   })
 })

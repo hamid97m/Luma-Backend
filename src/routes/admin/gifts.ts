@@ -2,8 +2,9 @@ import { FastifyInstance } from 'fastify'
 import { db } from '../../db.js'
 import { getBotStarBalance } from '../../bot.js'
 
-const DEFAULT_TX_LIMIT = 50
-const MAX_TX_LIMIT = 200
+const PAGE_SIZE = 25
+const TX_STATUSES = ['pending_payment', 'paid', 'sent', 'send_failed', 'refunded']
+const TX_CONTEXTS = ['chat', 'discovery']
 
 function isNonNegativeInt(n: unknown): n is number {
   return typeof n === 'number' && Number.isInteger(n) && n >= 0
@@ -69,20 +70,26 @@ export async function adminGiftsRoutes(app: FastifyInstance) {
   })
 
   app.get('/gifts/transactions', async (req, reply) => {
-    const { limit = String(DEFAULT_TX_LIMIT) } = req.query as Record<string, string>
-    const parsed = parseInt(limit, 10)
-    const n = Math.min(MAX_TX_LIMIT, Math.max(1, Number.isFinite(parsed) ? parsed : DEFAULT_TX_LIMIT))
+    const { page = '1', status, context } = req.query as Record<string, string>
+    const pageNum = Math.max(1, parseInt(page, 10) || 1)
+    const from = (pageNum - 1) * PAGE_SIZE
 
-    const { data, error } = await db
+    let q = db
       .from('gift_transactions')
       .select(
         'id, gift_emoji, gift_star_cost, charged_stars, markup_stars, status, context, intro_status, created_at, ' +
         'buyer:users!gift_transactions_buyer_id_fkey(name), recipient:users!gift_transactions_recipient_id_fkey(name)',
+        { count: 'exact' },
       )
+    if (status && TX_STATUSES.includes(status)) q = q.eq('status', status)
+    if (context && TX_CONTEXTS.includes(context)) q = q.eq('context', context)
+
+    const { data, count, error } = await q
       .order('created_at', { ascending: false })
-      .limit(n)
+      .range(from, from + PAGE_SIZE - 1)
     if (error) return reply.status(500).send({ error: 'transactions_fetch_failed' })
 
+    const total = count ?? 0
     return {
       items: (data ?? []).map((r: any) => ({
         id: r.id,
@@ -97,6 +104,7 @@ export async function adminGiftsRoutes(app: FastifyInstance) {
         introStatus: r.intro_status,
         createdAt: r.created_at,
       })),
+      total, page: pageNum, pageCount: Math.max(1, Math.ceil(total / PAGE_SIZE)),
     }
   })
 }

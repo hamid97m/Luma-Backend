@@ -161,3 +161,61 @@ export async function getTransactionStatus(txId: string, userId: string) {
   if (!data || data.buyer_id !== userId) return null
   return { status: data.status, introStatus: data.intro_status ?? null }
 }
+
+export async function listPendingIntros(userId: string) {
+  const { data } = await db
+    .from('gift_transactions')
+    .select('id, note, gift_emoji, created_at, buyer:users!gift_transactions_buyer_id_fkey(id, name, user_photos(url, position))')
+    .eq('recipient_id', userId).eq('context', 'discovery').eq('intro_status', 'pending')
+    .order('created_at', { ascending: false })
+  return (data ?? []).map((r: any) => ({
+    id: r.id,
+    buyer: {
+      id: r.buyer?.id,
+      name: r.buyer?.name ?? '',
+      photo: (r.buyer?.user_photos ?? []).sort((a: any, b: any) => a.position - b.position)[0]?.url ?? null,
+    },
+    emoji: r.gift_emoji ?? null,
+    note: r.note ?? null,
+    createdAt: r.created_at,
+  }))
+}
+
+export async function acceptIntro(introId: string, userId: string) {
+  const { data: tx } = await db
+    .from('gift_transactions')
+    .select('id, buyer_id, recipient_id, intro_status').eq('id', introId).maybeSingle()
+  if (!tx || tx.recipient_id !== userId) return { error: 'not_found' }
+  if (tx.intro_status !== 'pending') return { error: 'already_handled' }
+
+  // Normalise pair order to satisfy UNIQUE(user1_id, user2_id).
+  const [u1, u2] = [tx.buyer_id, tx.recipient_id].sort()
+  let matchId: string
+  const { data: created, error: insErr } = await db
+    .from('matches').insert({ user1_id: u1, user2_id: u2 }).select('id').maybeSingle()
+  if (created) {
+    matchId = created.id
+  } else if (insErr?.code === '23505') {
+    const { data: existing } = await db
+      .from('matches').select('id').eq('user1_id', u1).eq('user2_id', u2).single()
+    matchId = existing!.id
+  } else {
+    return { error: 'match_failed' }
+  }
+
+  await db.from('gift_transactions').update({ intro_status: 'accepted', match_id: matchId }).eq('id', tx.id)
+  // Seed the gift as the first message so the new chat opens with it.
+  await db.from('messages').insert({
+    match_id: matchId, sender_id: tx.buyer_id, type: 'gift', gift_transaction_id: tx.id, body: null,
+  })
+  return { matchId }
+}
+
+export async function dismissIntro(introId: string, userId: string) {
+  const { data: tx } = await db
+    .from('gift_transactions').select('recipient_id, intro_status').eq('id', introId).maybeSingle()
+  if (!tx || tx.recipient_id !== userId) return { error: 'not_found' }
+  if (tx.intro_status !== 'pending') return { error: 'already_handled' }
+  await db.from('gift_transactions').update({ intro_status: 'dismissed' }).eq('id', introId)
+  return { ok: true as const }
+}

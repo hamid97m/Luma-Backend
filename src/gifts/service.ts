@@ -181,15 +181,27 @@ export async function listPendingIntros(userId: string) {
   }))
 }
 
-export async function acceptIntro(introId: string, userId: string) {
+/** Determine why a claim update matched nothing: unknown/foreign tx vs. already-handled. */
+async function resolveClaimMiss(introId: string, userId: string): Promise<{ error: string }> {
   const { data: tx } = await db
-    .from('gift_transactions')
-    .select('id, buyer_id, recipient_id, intro_status').eq('id', introId).maybeSingle()
+    .from('gift_transactions').select('recipient_id, intro_status').eq('id', introId).maybeSingle()
   if (!tx || tx.recipient_id !== userId) return { error: 'not_found' }
-  if (tx.intro_status !== 'pending') return { error: 'already_handled' }
+  return { error: 'already_handled' }
+}
+
+export async function acceptIntro(introId: string, userId: string) {
+  // Atomic claim: only a still-pending row owned by this recipient flips to 'accepted'.
+  // This guards against a double-tap/retry racing two concurrent accepts, which would
+  // otherwise both pass a SELECT-then-UPDATE guard and seed two gift messages.
+  const { data: claimed } = await db
+    .from('gift_transactions')
+    .update({ intro_status: 'accepted' })
+    .eq('id', introId).eq('recipient_id', userId).eq('intro_status', 'pending')
+    .select('id, buyer_id, recipient_id').maybeSingle()
+  if (!claimed) return resolveClaimMiss(introId, userId)
 
   // Normalise pair order to satisfy UNIQUE(user1_id, user2_id).
-  const [u1, u2] = [tx.buyer_id, tx.recipient_id].sort()
+  const [u1, u2] = [claimed.buyer_id, claimed.recipient_id].sort()
   let matchId: string
   const { data: created, error: insErr } = await db
     .from('matches').insert({ user1_id: u1, user2_id: u2 }).select('id').maybeSingle()
@@ -198,24 +210,27 @@ export async function acceptIntro(introId: string, userId: string) {
   } else if (insErr?.code === '23505') {
     const { data: existing } = await db
       .from('matches').select('id').eq('user1_id', u1).eq('user2_id', u2).single()
-    matchId = existing!.id
+    if (!existing) return { error: 'match_failed' }
+    matchId = existing.id
   } else {
     return { error: 'match_failed' }
   }
 
-  await db.from('gift_transactions').update({ intro_status: 'accepted', match_id: matchId }).eq('id', tx.id)
+  await db.from('gift_transactions').update({ match_id: matchId }).eq('id', claimed.id)
   // Seed the gift as the first message so the new chat opens with it.
   await db.from('messages').insert({
-    match_id: matchId, sender_id: tx.buyer_id, type: 'gift', gift_transaction_id: tx.id, body: null,
+    match_id: matchId, sender_id: claimed.buyer_id, type: 'gift', gift_transaction_id: claimed.id, body: null,
   })
   return { matchId }
 }
 
 export async function dismissIntro(introId: string, userId: string) {
-  const { data: tx } = await db
-    .from('gift_transactions').select('recipient_id, intro_status').eq('id', introId).maybeSingle()
-  if (!tx || tx.recipient_id !== userId) return { error: 'not_found' }
-  if (tx.intro_status !== 'pending') return { error: 'already_handled' }
-  await db.from('gift_transactions').update({ intro_status: 'dismissed' }).eq('id', introId)
+  // Atomic claim, same rationale as acceptIntro: avoids a SELECT-then-UPDATE race.
+  const { data: claimed } = await db
+    .from('gift_transactions')
+    .update({ intro_status: 'dismissed' })
+    .eq('id', introId).eq('recipient_id', userId).eq('intro_status', 'pending')
+    .select('id').maybeSingle()
+  if (!claimed) return resolveClaimMiss(introId, userId)
   return { ok: true as const }
 }

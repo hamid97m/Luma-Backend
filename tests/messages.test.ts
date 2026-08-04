@@ -389,7 +389,7 @@ describe('PATCH /matches/:matchId/messages/:messageId', () => {
     const { eqCalls, update } = mockUpdateChain({
       data: {
         id: MSG_ID, sender_id: USER_ID, body: 'fixed', created_at: '2026-01-01T10:00:00Z',
-        read_at: '2026-01-01T10:05:00Z', edited_at: '2026-01-02T09:00:00Z',
+        read_at: '2026-01-01T10:05:00Z', edited_at: '2026-01-02T09:00:00Z', reply_to_message_id: 'parent-9',
       },
       error: null,
     })
@@ -402,7 +402,7 @@ describe('PATCH /matches/:matchId/messages/:messageId', () => {
     expect(res.json()).toEqual({
       message: {
         id: MSG_ID, senderId: USER_ID, body: 'fixed', createdAt: '2026-01-01T10:00:00Z',
-        readAt: '2026-01-01T10:05:00Z', editedAt: '2026-01-02T09:00:00Z',
+        readAt: '2026-01-01T10:05:00Z', editedAt: '2026-01-02T09:00:00Z', replyToMessageId: 'parent-9',
       },
     })
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ body: 'fixed', edited_at: expect.any(String) }))

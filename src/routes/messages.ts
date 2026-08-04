@@ -141,7 +141,7 @@ export async function messagesRoutes(app: FastifyInstance) {
       .eq('id', messageId)
       .eq('match_id', matchId)
       .eq('sender_id', req.userId)
-      .select('id, sender_id, body, created_at, read_at, edited_at')
+      .select('id, sender_id, body, created_at, read_at, edited_at, reply_to_message_id')
       .maybeSingle()
 
     if (error) return reply.status(500).send({ error: 'edit_failed' })
@@ -155,6 +155,7 @@ export async function messagesRoutes(app: FastifyInstance) {
         createdAt: message.created_at,
         readAt: message.read_at,
         editedAt: message.edited_at,
+        replyToMessageId: message.reply_to_message_id ?? null,
       },
     }
   })

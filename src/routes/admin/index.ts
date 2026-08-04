@@ -6,6 +6,7 @@ import { adminUsersRoutes } from './users.js'
 import { adminChatsRoutes } from './chats.js'
 import { adminReportsRoutes } from './reports.js'
 import { adminSupportRoutes } from './support.js'
+import { adminGiftsRoutes } from './gifts.js'
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -38,4 +39,5 @@ export async function adminRoutes(app: FastifyInstance) {
   await app.register(adminChatsRoutes)
   await app.register(adminReportsRoutes)
   await app.register(adminSupportRoutes)
+  await app.register(adminGiftsRoutes)
 }

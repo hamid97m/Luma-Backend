@@ -46,4 +46,24 @@ describe('GET /admin/stats', () => {
     expect(body.signupsPerDay[29].count).toBe(1)
     expect(body.signupsPerDay[29].date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
   })
+
+  it('returns 500 when a query fails', async () => {
+    vi.mocked(db.from).mockImplementation(() => chainable({ count: null, data: null, error: { message: 'boom' } }))
+    const res = await app.inject({ method: 'GET', url: '/admin/stats', headers })
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toEqual({ error: 'stats_fetch_failed' })
+  })
+
+  it('issues distinctly filtered queries (dau/wau windows, gender split, like rate)', async () => {
+    const log: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation(() =>
+      chainable({ count: 5, data: [{ created_at: new Date().toISOString() }], error: null }, log)
+    )
+    await app.inject({ method: 'GET', url: '/admin/stats', headers })
+    const genderEqs = log.filter((c) => c.method === 'eq' && c.args[0] === 'gender').map((c) => c.args[1])
+    expect(genderEqs).toEqual(expect.arrayContaining(['man', 'woman', 'nonbinary']))
+    const lastActiveCutoffs = log.filter((c) => c.method === 'gte' && c.args[0] === 'last_active').map((c) => c.args[1])
+    expect(new Set(lastActiveCutoffs).size).toBe(2)
+    expect(log.some((c) => c.method === 'eq' && c.args[0] === 'direction' && c.args[1] === 'like')).toBe(true)
+  })
 })

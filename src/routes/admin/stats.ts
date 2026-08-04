@@ -1,4 +1,4 @@
-import { FastifyInstance } from 'fastify'
+import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import { db } from '../../db.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -16,7 +16,8 @@ function startOfTodayIso(): string {
 async function count(table: string, refine?: (q: any) => any): Promise<number> {
   let q: any = db.from(table).select('id', { count: 'exact', head: true })
   if (refine) q = refine(q)
-  const { count: n } = await q
+  const { count: n, error } = await q
+  if (error) throw new Error(`stats count failed: ${table}`)
   return n ?? 0
 }
 
@@ -33,53 +34,58 @@ function bucketPerDay(rows: { created_at: string }[], days: number): { date: str
 }
 
 export async function adminStatsRoutes(app: FastifyInstance) {
-  app.get('/stats', async () => {
-    const today = startOfTodayIso()
-    const monthAgo = daysAgoIso(30)
+  app.get('/stats', async (req: FastifyRequest, reply: FastifyReply) => {
+    try {
+      const today = startOfTodayIso()
+      const monthAgo = daysAgoIso(30)
 
-    const [
-      users, banned, deleted, seed,
-      newToday, newWeek, dau, wau,
-      men, women, nonbinary,
-      matches, matchesToday, messages, messagesToday,
-      swipes, likes,
-      signupRows, matchRows,
-    ] = await Promise.all([
-      count('users', (q) => q.is('deleted_at', null)),
-      count('users', (q) => q.not('banned_at', 'is', null)),
-      count('users', (q) => q.not('deleted_at', 'is', null)),
-      count('users', (q) => q.eq('is_seed', true)),
-      count('users', (q) => q.gte('created_at', today)),
-      count('users', (q) => q.gte('created_at', daysAgoIso(7))),
-      count('users', (q) => q.is('deleted_at', null).gte('last_active', daysAgoIso(1))),
-      count('users', (q) => q.is('deleted_at', null).gte('last_active', daysAgoIso(7))),
-      count('users', (q) => q.is('deleted_at', null).eq('gender', 'man')),
-      count('users', (q) => q.is('deleted_at', null).eq('gender', 'woman')),
-      count('users', (q) => q.is('deleted_at', null).eq('gender', 'nonbinary')),
-      count('matches'),
-      count('matches', (q) => q.gte('created_at', today)),
-      count('messages'),
-      count('messages', (q) => q.gte('created_at', today)),
-      count('swipes'),
-      count('swipes', (q) => q.eq('direction', 'like')),
-      db.from('users').select('created_at').gte('created_at', monthAgo)
-        .then(({ data }: any) => data ?? []),
-      db.from('matches').select('created_at').gte('created_at', monthAgo)
-        .then(({ data }: any) => data ?? []),
-    ])
+      const [
+        users, banned, deleted, seed,
+        newToday, newWeek, dau, wau,
+        men, women, nonbinary,
+        matches, matchesToday, messages, messagesToday,
+        swipes, likes,
+        signupRows, matchRows,
+      ] = await Promise.all([
+        count('users', (q) => q.is('deleted_at', null)),
+        count('users', (q) => q.not('banned_at', 'is', null)),
+        count('users', (q) => q.not('deleted_at', 'is', null)),
+        count('users', (q) => q.eq('is_seed', true)),
+        count('users', (q) => q.gte('created_at', today)),
+        count('users', (q) => q.gte('created_at', daysAgoIso(7))),
+        count('users', (q) => q.is('deleted_at', null).gte('last_active', daysAgoIso(1))),
+        count('users', (q) => q.is('deleted_at', null).gte('last_active', daysAgoIso(7))),
+        count('users', (q) => q.is('deleted_at', null).eq('gender', 'man')),
+        count('users', (q) => q.is('deleted_at', null).eq('gender', 'woman')),
+        count('users', (q) => q.is('deleted_at', null).eq('gender', 'nonbinary')),
+        count('matches'),
+        count('matches', (q) => q.gte('created_at', today)),
+        count('messages'),
+        count('messages', (q) => q.gte('created_at', today)),
+        count('swipes'),
+        count('swipes', (q) => q.eq('direction', 'like')),
+        db.from('users').select('created_at').gte('created_at', monthAgo)
+          .then(({ data, error }: any) => { if (error) throw new Error('stats rows failed'); return data ?? [] }),
+        db.from('matches').select('created_at').gte('created_at', monthAgo)
+          .then(({ data, error }: any) => { if (error) throw new Error('stats rows failed'); return data ?? [] }),
+      ])
 
-    return {
-      totals: {
-        users, matches, messages, swipes,
-        likeRate: swipes > 0 ? likes / swipes : 0,
-        banned, deleted, seed,
-      },
-      today: { newUsers: newToday, matches: matchesToday, messages: messagesToday },
-      week: { newUsers: newWeek },
-      dau, wau,
-      genders: { man: men, woman: women, nonbinary },
-      signupsPerDay: bucketPerDay(signupRows, 30),
-      matchesPerDay: bucketPerDay(matchRows, 30),
+      return {
+        totals: {
+          users, matches, messages, swipes,
+          likeRate: swipes > 0 ? likes / swipes : 0,
+          banned, deleted, seed,
+        },
+        today: { newUsers: newToday, matches: matchesToday, messages: messagesToday },
+        week: { newUsers: newWeek },
+        dau, wau,
+        genders: { man: men, woman: women, nonbinary },
+        signupsPerDay: bucketPerDay(signupRows, 30),
+        matchesPerDay: bucketPerDay(matchRows, 30),
+      }
+    } catch (err) {
+      req.log.error({ err }, 'stats fetch failed')
+      return reply.status(500).send({ error: 'stats_fetch_failed' })
     }
   })
 }

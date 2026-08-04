@@ -1,5 +1,4 @@
 import { Bot, Context, InlineKeyboard } from 'grammy'
-import type { Gift } from '@grammyjs/types'
 import { db } from './db.js'
 import { createTicket, shouldCaptureSupport } from './support/service.js'
 import { validatePreCheckout, handleGiftPaid } from './gifts/service.js'
@@ -162,8 +161,10 @@ export async function notifyTicketReply(
   await bot.api.sendMessage(toTelegramId, safe, { reply_markup: keyboard })
 }
 
-/** Telegram's catalog of gifts the bot can send. */
-export async function getGiftCatalog(): Promise<Gift[]> {
+/** Telegram's catalog of gifts the bot can send. Return type is inferred from
+ * grammy's own API types (Gift[]), avoiding a bare `@grammyjs/types` import that
+ * isn't a declared backend dependency and fails to resolve in the deploy build. */
+export async function getGiftCatalog() {
   const { gifts } = await getBot().api.getAvailableGifts()
   return gifts
 }

@@ -67,4 +67,22 @@ describe('GET /admin/users', () => {
     const res = await app.inject({ method: 'GET', url: '/admin/users', headers })
     expect(res.statusCode).toBe(500)
   })
+
+  it('sanitizes PostgREST-structural characters out of the search term', async () => {
+    const log: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation(() => chainable({ data: [], count: 0, error: null }, log))
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/admin/users?query=' + encodeURIComponent('a,id.neq.123(x)'),
+      headers,
+    })
+
+    expect(res.statusCode).toBe(200)
+    const orCalls = log.filter((c) => c.method === 'or')
+    expect(orCalls).toHaveLength(1)
+    expect(String(orCalls[0].args[0])).toBe(
+      'name.ilike.%a id.neq.123 x%,username.ilike.%a id.neq.123 x%'
+    )
+  })
 })

@@ -41,7 +41,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     else if (status === 'deleted') q = q.not('deleted_at', 'is', null)
     else if (status === 'seed') q = q.eq('is_seed', true)
 
-    const search = query.trim()
+    const search = query.trim().replace(/[,()"\\]/g, ' ').replace(/\s+/g, ' ').trim()
     if (search) {
       const ors = [`name.ilike.%${search}%`, `username.ilike.%${search}%`]
       if (/^-?\d+$/.test(search)) ors.push(`telegram_id.eq.${search}`)

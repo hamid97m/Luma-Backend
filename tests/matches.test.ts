@@ -160,6 +160,7 @@ describe('GET /matches/unread-count', () => {
 
   it('returns the aggregate unread count across active matches', async () => {
     setupAuth()
+    mockNoBlocks()
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({
         or: () => ({
@@ -183,6 +184,7 @@ describe('GET /matches/unread-count', () => {
 
   it('excludes deleted-counterpart matches from the count query', async () => {
     setupAuth()
+    mockNoBlocks()
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({
         or: () => ({
@@ -205,8 +207,41 @@ describe('GET /matches/unread-count', () => {
     expect(inSpy).toHaveBeenCalledWith('match_id', ['match-1'])
   })
 
+  it('excludes matches whose counterpart is blocked from the count query', async () => {
+    setupAuth()
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({
+        or: () => ({
+          data: [{ blocker_id: USER_ID, blocked_id: 'blocked-user' }],
+          error: null,
+        }),
+      }),
+    } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({
+        or: () => ({
+          data: [
+            { id: 'match-1', user1_id: USER_ID, user2_id: 'other-1', user1: { deleted_at: null }, user2: { deleted_at: null } },
+            { id: 'match-2', user1_id: USER_ID, user2_id: 'blocked-user', user1: { deleted_at: null }, user2: { deleted_at: null } },
+          ],
+          error: null,
+        }),
+      }),
+    } as any)
+
+    const inSpy = vi.fn(() => ({ neq: () => ({ is: () => ({ count: 5, error: null }) }) }))
+    vi.mocked(db.from).mockReturnValueOnce({ select: () => ({ in: inSpy }) } as any)
+
+    const res = await app.inject({ method: 'GET', url: '/matches/unread-count', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ count: 5 })
+    expect(inSpy).toHaveBeenCalledWith('match_id', ['match-1'])
+  })
+
   it('returns 0 without querying messages when there are no active matches', async () => {
     setupAuth()
+    mockNoBlocks()
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ or: () => ({ data: [], error: null }) }),
     } as any)

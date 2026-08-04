@@ -35,7 +35,7 @@ export async function messagesRoutes(app: FastifyInstance) {
 
     const { data: rows, error } = await db
       .from('messages')
-      .select('id, sender_id, body, created_at, read_at, edited_at, reply_to_message_id')
+      .select('id, sender_id, body, created_at, read_at, edited_at, reply_to_message_id, type, gift_transaction_id, gift:gift_transactions!messages_gift_transaction_id_fkey(gift_emoji, gift_star_cost)')
       .eq('match_id', matchId)
       .order('created_at', { ascending: true })
 
@@ -53,6 +53,8 @@ export async function messagesRoutes(app: FastifyInstance) {
         id: m.id,
         senderId: m.sender_id,
         body: m.body,
+        type: m.type ?? 'text',
+        gift: m.gift ? { emoji: m.gift.gift_emoji ?? null, starCost: m.gift.gift_star_cost } : null,
         createdAt: m.created_at,
         readAt: m.read_at,
         editedAt: m.edited_at ?? null,

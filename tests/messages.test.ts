@@ -100,8 +100,9 @@ describe('GET /matches/:matchId/messages', () => {
         eq: () => ({
           order: () => ({
             data: [
-              { id: 'm1', sender_id: USER_ID, body: 'hey', created_at: '2026-01-01T10:00:00Z', read_at: null, edited_at: null, reply_to_message_id: null },
-              { id: 'm2', sender_id: OTHER_ID, body: 'hi', created_at: '2026-01-01T10:01:00Z', read_at: '2026-01-01T10:05:00Z', edited_at: '2026-01-01T10:03:00Z', reply_to_message_id: 'm1' },
+              { id: 'm1', sender_id: USER_ID, body: 'hey', created_at: '2026-01-01T10:00:00Z', read_at: null, edited_at: null, reply_to_message_id: null, type: 'text', gift_transaction_id: null, gift: null },
+              { id: 'm2', sender_id: OTHER_ID, body: 'hi', created_at: '2026-01-01T10:01:00Z', read_at: '2026-01-01T10:05:00Z', edited_at: '2026-01-01T10:03:00Z', reply_to_message_id: 'm1', type: 'text', gift_transaction_id: null, gift: null },
+              { id: 'm3', sender_id: OTHER_ID, body: null, created_at: '2026-01-01T10:02:00Z', read_at: null, edited_at: null, reply_to_message_id: null, type: 'gift', gift_transaction_id: 'txn-1', gift: { gift_emoji: '🌹', gift_star_cost: 25 } },
             ],
             error: null,
           }),
@@ -119,10 +120,14 @@ describe('GET /matches/:matchId/messages', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({
       messages: [
-        { id: 'm1', senderId: USER_ID, body: 'hey', createdAt: '2026-01-01T10:00:00Z', readAt: null, editedAt: null, replyToMessageId: null },
-        { id: 'm2', senderId: OTHER_ID, body: 'hi', createdAt: '2026-01-01T10:01:00Z', readAt: '2026-01-01T10:05:00Z', editedAt: '2026-01-01T10:03:00Z', replyToMessageId: 'm1' },
+        { id: 'm1', senderId: USER_ID, body: 'hey', type: 'text', gift: null, createdAt: '2026-01-01T10:00:00Z', readAt: null, editedAt: null, replyToMessageId: null },
+        { id: 'm2', senderId: OTHER_ID, body: 'hi', type: 'text', gift: null, createdAt: '2026-01-01T10:01:00Z', readAt: '2026-01-01T10:05:00Z', editedAt: '2026-01-01T10:03:00Z', replyToMessageId: 'm1' },
+        { id: 'm3', senderId: OTHER_ID, body: null, type: 'gift', gift: { emoji: '🌹', starCost: 25 }, createdAt: '2026-01-01T10:02:00Z', readAt: null, editedAt: null, replyToMessageId: null },
       ],
     })
+    const giftMessage = res.json().messages.find((m: any) => m.id === 'm3')
+    expect(giftMessage.type).toBe('gift')
+    expect(giftMessage.gift.emoji).toBe('🌹')
     expect(updateEq).toHaveBeenCalledWith('match_id', MATCH_ID)
   })
 })

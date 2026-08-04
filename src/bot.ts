@@ -64,11 +64,19 @@ export async function notifyMatch(recipients: MatchNotifyRecipient[]): Promise<v
 export async function notifyNewMessage(
   toTelegramId: number,
   senderName: string,
-  messageBody: string
+  messageBody: string,
+  senderPhoto: string | null = null
 ): Promise<void> {
   const bot = getBot()
   const keyboard = new InlineKeyboard().webApp('Open Luma ❤️', process.env.WEB_URL!)
-  await bot.api.sendMessage(toTelegramId, `New message from ${senderName}\n${messageBody}`, {
-    reply_markup: keyboard,
-  })
+  const caption = `New message from ${senderName}\n${messageBody}`
+
+  if (senderPhoto) {
+    // Telegram caps photo captions at 1024 chars; a long message body would
+    // otherwise make sendPhoto fail. Truncate — this is just a notification nudge.
+    const photoCaption = caption.length > 1024 ? `${caption.slice(0, 1023)}…` : caption
+    await bot.api.sendPhoto(toTelegramId, senderPhoto, { caption: photoCaption, reply_markup: keyboard })
+  } else {
+    await bot.api.sendMessage(toTelegramId, caption, { reply_markup: keyboard })
+  }
 }

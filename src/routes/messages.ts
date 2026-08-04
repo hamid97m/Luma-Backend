@@ -97,10 +97,20 @@ export async function messagesRoutes(app: FastifyInstance) {
 
     const isOffline = !other.last_active || Date.now() - new Date(other.last_active).getTime() > OFFLINE_THRESHOLD_MS
     if (isOffline && !other.notified_offline_at && other.allows_write_to_pm !== false) {
+      // Sender's primary photo (lowest position) so the bot notification shows
+      // who messaged. Null when they have no photo — falls back to a text notice.
+      const { data: senderPhoto } = await db
+        .from('user_photos')
+        .select('url')
+        .eq('user_id', req.userId)
+        .order('position', { ascending: true })
+        .limit(1)
+        .maybeSingle()
+
       // Mark notified_offline_at only after the Telegram send succeeds — a
       // blocked bot or API hiccup shouldn't silently consume this offline
       // stretch's one-notification allowance.
-      notifyNewMessage(other.telegram_id, me.name, trimmed)
+      notifyNewMessage(other.telegram_id, me.name, trimmed, senderPhoto?.url ?? null)
         .then(() =>
           db.from('users').update({ notified_offline_at: new Date().toISOString() }).eq('id', other.id)
         )

@@ -47,11 +47,11 @@ async function resolveRecipient(
     if (!matchId) return { error: 'match_required' }
     const { data: m } = await db
       .from('matches')
-      .select('user1_id, user2_id, user1:users!matches_user1_id_fkey(id, telegram_id, deleted_at), user2:users!matches_user2_id_fkey(id, telegram_id, deleted_at)')
+      .select('user1_id, user2_id, user1:users!matches_user1_id_fkey(id, telegram_id, deleted_at, banned_at), user2:users!matches_user2_id_fkey(id, telegram_id, deleted_at, banned_at)')
       .eq('id', matchId).single()
     if (!m || (m.user1_id !== buyerId && m.user2_id !== buyerId)) return { error: 'match_not_found' }
     const other: any = m.user1_id === buyerId ? m.user2 : m.user1
-    if (!other || other.deleted_at) return { error: 'recipient_unavailable' }
+    if (!other || other.deleted_at || other.banned_at) return { error: 'recipient_unavailable' }
     return { id: other.id, telegramId: other.telegram_id }
   }
   if (!targetUserId) return { error: 'target_required' }
@@ -122,25 +122,37 @@ export async function handleGiftPaid(payload: string, chargeId: string, buyerTel
     return
   }
 
-  await db.from('gift_transactions').update({ status: 'sent', sent_at: new Date().toISOString() }).eq('id', tx.id)
+  {
+    const { error: sentErr } = await db.from('gift_transactions').update({ status: 'sent', sent_at: new Date().toISOString() }).eq('id', tx.id)
+    if (sentErr) console.error(`[gifts] failed to mark tx ${tx.id} as sent:`, sentErr)
+  }
 
   if (tx.context === 'chat' && tx.match_id) {
-    await db.from('messages').insert({
+    const { error: msgErr } = await db.from('messages').insert({
       match_id: tx.match_id, sender_id: tx.buyer_id, type: 'gift', gift_transaction_id: tx.id, body: null,
     })
+    if (msgErr) console.error(`[gifts] failed to insert gift message for tx ${tx.id}:`, msgErr)
     if (recipient.telegram_id) {
       notifyNewMessage(recipient.telegram_id, buyer?.name ?? 'Someone', `sent you a gift ${tx.gift_emoji ?? '🎁'}`)
         .catch(() => {})
     }
   } else {
-    await db.from('gift_transactions').update({ intro_status: 'pending' }).eq('id', tx.id)
-    notifyGiftIntro(recipient.telegram_id, buyer?.name ?? 'Someone', tx.gift_emoji ?? '🎁').catch(() => {})
+    const { error: introErr } = await db.from('gift_transactions').update({ intro_status: 'pending' }).eq('id', tx.id)
+    if (introErr) console.error(`[gifts] failed to set intro_status for tx ${tx.id}:`, introErr)
+    if (recipient.telegram_id) {
+      notifyGiftIntro(recipient.telegram_id, buyer?.name ?? 'Someone', tx.gift_emoji ?? '🎁').catch(() => {})
+    }
   }
 }
 
 async function failAndRefund(txId: string, buyerTelegramId: number, chargeId: string) {
-  try { await refundGift(buyerTelegramId, chargeId) } catch (e) { console.error('[gifts] refund failed:', (e as Error)?.message) }
-  await db.from('gift_transactions').update({ status: 'refunded' }).eq('id', txId)
+  try {
+    await refundGift(buyerTelegramId, chargeId)
+    await db.from('gift_transactions').update({ status: 'refunded' }).eq('id', txId)
+  } catch (e) {
+    console.error('[gifts] refund failed:', (e as Error)?.message)
+    await db.from('gift_transactions').update({ status: 'send_failed' }).eq('id', txId)
+  }
 }
 
 export async function getTransactionStatus(txId: string, userId: string) {

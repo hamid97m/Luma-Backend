@@ -1,4 +1,5 @@
 import { Bot, Context, InlineKeyboard } from 'grammy'
+import type { Gift } from '@grammyjs/types'
 import { db } from './db.js'
 import { createTicket, shouldCaptureSupport } from './support/service.js'
 
@@ -138,4 +139,36 @@ export async function notifyTicketReply(
   const text = `📮 Support reply\n\nYour issue:\n"${preview}"\n\nOur answer:\n${answer}`
   const safe = text.length > 4000 ? `${text.slice(0, 3999)}…` : text
   await bot.api.sendMessage(toTelegramId, safe, { reply_markup: keyboard })
+}
+
+/** Telegram's catalog of gifts the bot can send. */
+export async function getGiftCatalog(): Promise<Gift[]> {
+  const { gifts } = await getBot().api.getAvailableGifts()
+  return gifts
+}
+
+/** Send a gift to a user, funded by the bot's Star float. `note` is clamped to 128 chars. */
+export async function sendGiftToUser(telegramId: number, giftId: string, note?: string): Promise<void> {
+  const text = note?.trim().slice(0, 128)
+  await getBot().api.sendGift(telegramId, giftId, text ? { text } : undefined)
+}
+
+/** Create a Telegram Stars (XTR) invoice link. `payload` is the gift_transactions.id. */
+export async function createGiftInvoiceLink(
+  payload: string, title: string, description: string, stars: number,
+): Promise<string> {
+  return getBot().api.createInvoiceLink(
+    title, description, payload, '', 'XTR', [{ label: title, amount: stars }],
+  )
+}
+
+/** Refund a Stars payment (used when sendGift fails after the buyer paid). */
+export async function refundGift(telegramId: number, chargeId: string): Promise<void> {
+  await getBot().api.refundStarPayment(telegramId, chargeId)
+}
+
+/** Current bot Star balance (integer Stars). */
+export async function getBotStarBalance(): Promise<number> {
+  const { amount } = await getBot().api.getMyStarBalance()
+  return amount
 }

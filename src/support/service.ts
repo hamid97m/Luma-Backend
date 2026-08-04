@@ -45,7 +45,11 @@ export async function createTicket(userId: string, rawBody: string): Promise<Cre
   const { error: mErr } = await db
     .from('support_messages')
     .insert({ ticket_id: ticket.id, sender: 'user', body })
-  if (mErr) return { ok: false, error: 'create_failed' }
+  if (mErr) {
+    // Best-effort cleanup: don't leave a message-less ticket occupying the open-ticket cap.
+    await db.from('support_tickets').delete().eq('id', ticket.id)
+    return { ok: false, error: 'create_failed' }
+  }
 
   return { ok: true, ticketId: ticket.id, createdAt: ticket.created_at }
 }

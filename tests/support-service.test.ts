@@ -62,4 +62,32 @@ describe('createTicket', () => {
     expect((ticketInsert.mock.calls[0][0] as any)).toMatchObject({ user_id: 'u1', status: 'open', last_sender: 'user' })
     expect((msgInsert.mock.calls[0][0] as any)).toMatchObject({ ticket_id: 't1', sender: 'user', body: 'hello' })
   })
+
+  it('returns create_failed when ticket insert fails', async () => {
+    const ticketInsert = vi.fn(() => chainable({ data: null, error: { message: 'boom' } }))
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'support_tickets') {
+        return { select: () => chainable({ count: 0, error: null }), insert: ticketInsert } as any
+      }
+      return chainable({ error: null })
+    })
+    const res = await createTicket('u1', 'help me')
+    expect(res).toEqual({ ok: false, error: 'create_failed' })
+  })
+
+  it('returns create_failed and cleans up ticket when message insert fails', async () => {
+    const ticketInsert = vi.fn(() => chainable({ data: { id: 't1', created_at: 'now' }, error: null }))
+    const deleteSpy = vi.fn(() => chainable({ error: null }))
+    const msgInsert = vi.fn(() => chainable({ error: { message: 'boom' } }))
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'support_tickets') {
+        return { select: () => chainable({ count: 0, error: null }), insert: ticketInsert, delete: deleteSpy } as any
+      }
+      if (table === 'support_messages') return { insert: msgInsert } as any
+      return chainable({ error: null })
+    })
+    const res = await createTicket('u1', 'help me')
+    expect(res).toEqual({ ok: false, error: 'create_failed' })
+    expect(deleteSpy).toHaveBeenCalled()
+  })
 })

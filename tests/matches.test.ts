@@ -18,6 +18,12 @@ function setupAuth() {
   } as any)
 }
 
+function mockNoBlocks() {
+  vi.mocked(db.from).mockReturnValueOnce({
+    select: () => ({ or: () => ({ data: [], error: null }) }),
+  } as any)
+}
+
 function mockMatchesRow() {
   vi.mocked(db.from).mockReturnValueOnce({
     select: () => ({
@@ -76,6 +82,7 @@ describe('GET /matches', () => {
 
   it('returns list of matches with other user info, last message, and unread count', async () => {
     setupAuth()
+    mockNoBlocks()
     mockMatchesRow()
     mockPhotos()
     mockLastMessage({ body: 'hey there', created_at: '2026-01-02T00:00:00Z', sender_id: 'other-user' })
@@ -100,6 +107,7 @@ describe('GET /matches', () => {
 
   it('returns null lastMessage and 0 unreadCount when there are no messages yet', async () => {
     setupAuth()
+    mockNoBlocks()
     mockMatchesRow()
     mockPhotos()
     mockLastMessage(null)
@@ -114,6 +122,7 @@ describe('GET /matches', () => {
 
   it('excludes a match whose counterpart has deleted their account', async () => {
     setupAuth()
+    mockNoBlocks()
 
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({

@@ -5,6 +5,16 @@ export async function matchesRoutes(app: FastifyInstance) {
   app.get('/matches', async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
+    const { data: blockRows } = await db
+      .from('blocks')
+      .select('blocker_id, blocked_id')
+      .or(`blocker_id.eq.${req.userId},blocked_id.eq.${req.userId}`)
+    const blockedIds = new Set(
+      (blockRows ?? []).map((b: { blocker_id: string; blocked_id: string }) =>
+        b.blocker_id === req.userId ? b.blocked_id : b.blocker_id
+      )
+    )
+
     const { data: rows } = await db
       .from('matches')
       .select(`
@@ -17,7 +27,7 @@ export async function matchesRoutes(app: FastifyInstance) {
 
     const activeRows = (rows ?? []).filter((row: any) => {
       const other = row.user1_id === req.userId ? row.user2 : row.user1
-      return !other.deleted_at
+      return !other.deleted_at && !blockedIds.has(other.id)
     })
 
     const matches = await Promise.all(

@@ -180,6 +180,27 @@ export async function adminUsersRoutes(app: FastifyInstance) {
       return reply.status(500).send({ error: 'user_detail_fetch_failed' })
     }
   })
+
+  const setBanned = async (id: string, bannedAt: string | null, reply: any) => {
+    const { data, error } = await db
+      .from('users')
+      .update({ banned_at: bannedAt })
+      .eq('id', id)
+      .select('id')
+      .single()
+    if (error || !data) return reply.status(404).send({ error: 'user_not_found' })
+    return { ok: true }
+  }
+
+  app.post('/users/:id/ban', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    return setBanned(id, new Date().toISOString(), reply)
+  })
+
+  app.post('/users/:id/unban', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    return setBanned(id, null, reply)
+  })
 }
 
 export { GENDERS, LOOKING }

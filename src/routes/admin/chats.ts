@@ -30,23 +30,30 @@ export async function adminChatsRoutes(app: FastifyInstance) {
 
     if (error) return reply.status(500).send({ error: 'chats_fetch_failed' })
 
-    const items = await Promise.all(
-      (rows ?? []).map(async (row: any) => {
-        const [{ count: messageCount }, { data: lastRows }] = await Promise.all([
-          db.from('messages').select('id', { count: 'exact', head: true }).eq('match_id', row.id),
-          db.from('messages').select('body, created_at').eq('match_id', row.id)
-            .order('created_at', { ascending: false }).limit(1),
-        ])
-        const last = lastRows?.[0]
-        return {
-          matchId: row.id,
-          matchedAt: row.created_at,
-          users: [participant(row.user1), participant(row.user2)],
-          messageCount: messageCount ?? 0,
-          lastMessage: last ? { body: last.body, createdAt: last.created_at } : null,
-        }
-      })
-    )
+    let items
+    try {
+      items = await Promise.all(
+        (rows ?? []).map(async (row: any) => {
+          const [{ count: messageCount, error: countErr }, { data: lastRows, error: lastErr }] = await Promise.all([
+            db.from('messages').select('id', { count: 'exact', head: true }).eq('match_id', row.id),
+            db.from('messages').select('body, created_at').eq('match_id', row.id)
+              .order('created_at', { ascending: false }).limit(1),
+          ])
+          if (countErr || lastErr) throw new Error('chats sub-query failed')
+          const last = lastRows?.[0]
+          return {
+            matchId: row.id,
+            matchedAt: row.created_at,
+            users: [participant(row.user1), participant(row.user2)],
+            messageCount: messageCount ?? 0,
+            lastMessage: last ? { body: last.body, createdAt: last.created_at } : null,
+          }
+        })
+      )
+    } catch (err) {
+      req.log.error({ err }, 'chats fetch failed')
+      return reply.status(500).send({ error: 'chats_fetch_failed' })
+    }
 
     const total = count ?? 0
     return { items, total, page: pageNum, pageCount: Math.max(1, Math.ceil(total / PAGE_SIZE)) }
@@ -58,12 +65,16 @@ export async function adminChatsRoutes(app: FastifyInstance) {
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const from = (pageNum - 1) * MESSAGES_PAGE_SIZE
 
-    const { data: match } = await db
+    const { data: match, error: matchErr } = await db
       .from('matches')
       .select(MATCH_SELECT)
       .eq('id', matchId)
       .single()
 
+    if (matchErr && matchErr.code !== 'PGRST116') {
+      req.log.error({ err: matchErr }, 'match lookup failed')
+      return reply.status(500).send({ error: 'chats_fetch_failed' })
+    }
     if (!match) return reply.status(404).send({ error: 'match_not_found' })
 
     const { data: rows, count, error } = await db

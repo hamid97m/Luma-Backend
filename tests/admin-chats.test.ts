@@ -73,8 +73,35 @@ describe('admin chats', () => {
   })
 
   it('returns 404 for an unknown match', async () => {
-    mockTables({ matches: { data: null, error: { message: 'not found' } } })
+    mockTables({ matches: { data: null, error: { code: 'PGRST116', message: 'not found' } } })
     const res = await app.inject({ method: 'GET', url: '/admin/chats/nope', headers })
     expect(res.statusCode).toBe(404)
+  })
+
+  it('returns 500 when a chats sub-query fails', async () => {
+    mockTables({
+      matches: { data: [MATCH_ROW], count: 1, error: null },
+      messages: { count: null, data: null, error: { message: 'boom' } },
+    })
+    const res = await app.inject({ method: 'GET', url: '/admin/chats', headers })
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toEqual({ error: 'chats_fetch_failed' })
+  })
+
+  it('returns 500 (not 404) when the match lookup fails with a real DB error', async () => {
+    mockTables({ matches: { data: null, error: { code: '57014', message: 'timeout' } } })
+    const res = await app.inject({ method: 'GET', url: '/admin/chats/m1', headers })
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toEqual({ error: 'chats_fetch_failed' })
+  })
+
+  it('returns 500 when the transcript messages query fails', async () => {
+    mockTables({
+      matches: { data: MATCH_ROW, error: null },
+      messages: { count: null, data: null, error: { message: 'boom' } },
+    })
+    const res = await app.inject({ method: 'GET', url: '/admin/chats/m1', headers })
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toEqual({ error: 'messages_fetch_failed' })
   })
 })

@@ -69,60 +69,68 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     const { data: user } = await db.from('users').select('*').eq('id', id).single()
     if (!user) return reply.status(404).send({ error: 'user_not_found' })
 
-    const { data: photos } = await db
-      .from('user_photos')
-      .select('url, position')
-      .eq('user_id', id)
-      .order('position', { ascending: true })
+    try {
+      const { data: photos, error: photosErr } = await db
+        .from('user_photos')
+        .select('url, position')
+        .eq('user_id', id)
+        .order('position', { ascending: true })
+      if (photosErr) throw new Error('user detail photos failed')
 
-    const countOf = async (table: string, refine: (q: any) => any): Promise<number> => {
-      const { count } = await refine(db.from(table).select('id', { count: 'exact', head: true }))
-      return count ?? 0
-    }
-
-    const [swipesGiven, likesReceived, messagesSent] = await Promise.all([
-      countOf('swipes', (q) => q.eq('swiper_id', id)),
-      countOf('swipes', (q) => q.eq('swiped_id', id).eq('direction', 'like')),
-      countOf('messages', (q) => q.eq('sender_id', id)),
-    ])
-
-    const { data: matchRows } = await db
-      .from('matches')
-      .select(`
-        id, created_at, user1_id, user2_id,
-        user1:users!matches_user1_id_fkey(id, name, user_photos(url, position)),
-        user2:users!matches_user2_id_fkey(id, name, user_photos(url, position))
-      `)
-      .or(`user1_id.eq.${id},user2_id.eq.${id}`)
-      .order('created_at', { ascending: false })
-
-    const matches = (matchRows ?? []).map((row: any) => {
-      const other = row.user1_id === id ? row.user2 : row.user1
-      const photo =
-        (other?.user_photos ?? [])
-          .slice()
-          .sort((a: any, b: any) => a.position - b.position)[0]?.url ?? null
-      return {
-        matchId: row.id,
-        matchedAt: row.created_at,
-        user: { id: other?.id ?? null, name: other?.name ?? '', photo },
+      const countOf = async (table: string, refine: (q: any) => any): Promise<number> => {
+        const { count, error } = await refine(db.from(table).select('id', { count: 'exact', head: true }))
+        if (error) throw new Error(`user detail count failed: ${table}`)
+        return count ?? 0
       }
-    })
 
-    return {
-      user: {
-        ...toListItem(user),
-        lookingFor: user.looking_for,
-        bio: user.bio,
-        interests: user.interests ?? [],
-        location: user.location,
-        icebreakerPrompt: user.icebreaker_prompt,
-        icebreakerAnswer: user.icebreaker_answer,
-        allowsWriteToPm: user.allows_write_to_pm,
-        photos: (photos ?? []).map((p: any) => p.url),
-      },
-      counts: { swipesGiven, likesReceived, matches: matches.length, messagesSent },
-      matches,
+      const [swipesGiven, likesReceived, messagesSent] = await Promise.all([
+        countOf('swipes', (q) => q.eq('swiper_id', id)),
+        countOf('swipes', (q) => q.eq('swiped_id', id).eq('direction', 'like')),
+        countOf('messages', (q) => q.eq('sender_id', id)),
+      ])
+
+      const { data: matchRows, error: matchesErr } = await db
+        .from('matches')
+        .select(`
+          id, created_at, user1_id, user2_id,
+          user1:users!matches_user1_id_fkey(id, name, user_photos(url, position)),
+          user2:users!matches_user2_id_fkey(id, name, user_photos(url, position))
+        `)
+        .or(`user1_id.eq.${id},user2_id.eq.${id}`)
+        .order('created_at', { ascending: false })
+      if (matchesErr) throw new Error('user detail matches failed')
+
+      const matches = (matchRows ?? []).map((row: any) => {
+        const other = row.user1_id === id ? row.user2 : row.user1
+        const photo =
+          (other?.user_photos ?? [])
+            .slice()
+            .sort((a: any, b: any) => a.position - b.position)[0]?.url ?? null
+        return {
+          matchId: row.id,
+          matchedAt: row.created_at,
+          user: { id: other?.id ?? null, name: other?.name ?? '', photo },
+        }
+      })
+
+      return {
+        user: {
+          ...toListItem(user),
+          lookingFor: user.looking_for,
+          bio: user.bio,
+          interests: user.interests ?? [],
+          location: user.location,
+          icebreakerPrompt: user.icebreaker_prompt,
+          icebreakerAnswer: user.icebreaker_answer,
+          allowsWriteToPm: user.allows_write_to_pm,
+          photos: (photos ?? []).map((p: any) => p.url),
+        },
+        counts: { swipesGiven, likesReceived, matches: matches.length, messagesSent },
+        matches,
+      }
+    } catch (err) {
+      req.log.error({ err }, 'user detail fetch failed')
+      return reply.status(500).send({ error: 'user_detail_fetch_failed' })
     }
   })
 }

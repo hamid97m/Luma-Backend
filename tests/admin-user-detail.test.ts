@@ -63,4 +63,17 @@ describe('GET /admin/users/:id', () => {
     expect(res.statusCode).toBe(404)
     expect(res.json()).toEqual({ error: 'user_not_found' })
   })
+
+  it('returns 500 when a sub-query fails', async () => {
+    mockTables({
+      users: { data: USER_ROW, error: null },
+      user_photos: { data: null, error: { message: 'boom' } },
+      swipes: { count: 0, error: null },
+      messages: { count: 0, error: null },
+      matches: { data: [], error: null },
+    })
+    const res = await app.inject({ method: 'GET', url: '/admin/users/u1', headers })
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toEqual({ error: 'user_detail_fetch_failed' })
+  })
 })

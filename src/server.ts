@@ -61,12 +61,13 @@ export async function buildApp(): Promise<FastifyInstance> {
 
     const { data } = await db
       .from('users')
-      .select('id, deleted_at, last_active')
+      .select('id, deleted_at, banned_at, last_active')
       .eq('telegram_id', tgUser.id)
       .single()
 
     if (!data) return reply.status(401).send({ error: 'user_not_found' })
     if (data.deleted_at) return reply.status(401).send({ error: 'account_deleted' })
+    if (data.banned_at) return reply.status(401).send({ error: 'account_banned' })
     req.userId = data.id
 
     if (data.last_active && Date.now() - new Date(data.last_active).getTime() > LAST_ACTIVE_THROTTLE_MS) {

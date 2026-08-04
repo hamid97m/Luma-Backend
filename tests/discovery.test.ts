@@ -40,10 +40,12 @@ describe('GET /discovery', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({
         eq: () => ({
-          eq: () => ({
-            not: () => ({
-              order: () => ({
-                limit: () => ({ data: [], error: null }),
+          is: () => ({
+            eq: () => ({
+              not: () => ({
+                order: () => ({
+                  limit: () => ({ data: [], error: null }),
+                }),
               }),
             }),
           }),
@@ -76,24 +78,26 @@ describe('GET /discovery', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({
         eq: () => ({
-          eq: () => ({
-            not: () => ({
-              order: () => ({
-                limit: () => ({
-                  data: [
-                    {
-                      id: 'user-uuid-2',
-                      name: 'Sara',
-                      age: 27,
-                      bio: 'سلام',
-                      telegram_id: 999,
-                      user_photos: [
-                        { id: 'ph2', url: 'https://img2.jpg', position: 1 },
-                        { id: 'ph1', url: 'https://img1.jpg', position: 0 },
-                      ],
-                    },
-                  ],
-                  error: null,
+          is: () => ({
+            eq: () => ({
+              not: () => ({
+                order: () => ({
+                  limit: () => ({
+                    data: [
+                      {
+                        id: 'user-uuid-2',
+                        name: 'Sara',
+                        age: 27,
+                        bio: 'سلام',
+                        telegram_id: 999,
+                        user_photos: [
+                          { id: 'ph2', url: 'https://img2.jpg', position: 1 },
+                          { id: 'ph1', url: 'https://img1.jpg', position: 0 },
+                        ],
+                      },
+                    ],
+                    error: null,
+                  }),
                 }),
               }),
             }),
@@ -157,11 +161,13 @@ describe('GET /discovery', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({
         eq: () => ({
-          not: () => ({
-            order: () => ({
-              limit: () => ({
-                data: [],
-                error: null,
+          is: () => ({
+            not: () => ({
+              order: () => ({
+                limit: () => ({
+                  data: [],
+                  error: null,
+                }),
               }),
             }),
           }),

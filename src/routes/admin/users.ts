@@ -63,6 +63,53 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     }
   })
 
+  app.post('/users', async (req, reply) => {
+    const body = (req.body ?? {}) as Record<string, unknown>
+    const name = typeof body.name === 'string' ? body.name.trim() : ''
+    const age = Number(body.age)
+    const gender = body.gender as string
+    const looking_for = body.looking_for as string
+    const photos = Array.isArray(body.photos)
+      ? (body.photos as unknown[]).filter((u): u is string => typeof u === 'string' && u.length > 0)
+      : []
+
+    if (!name) return reply.status(400).send({ error: 'invalid_name' })
+    if (!Number.isInteger(age) || age < 18 || age > 99) return reply.status(400).send({ error: 'invalid_age' })
+    if (!GENDERS.includes(gender)) return reply.status(400).send({ error: 'invalid_gender' })
+    if (!LOOKING.includes(looking_for)) return reply.status(400).send({ error: 'invalid_looking_for' })
+    if (photos.length > 6) return reply.status(400).send({ error: 'too_many_photos' })
+
+    const { data: user, error } = await db
+      .from('users')
+      .insert({
+        telegram_id: -Date.now(),
+        name,
+        age,
+        gender,
+        looking_for,
+        bio: typeof body.bio === 'string' ? body.bio : null,
+        interests: Array.isArray(body.interests) ? body.interests : [],
+        location: typeof body.location === 'string' ? body.location : null,
+        icebreaker_prompt: typeof body.icebreaker_prompt === 'string' ? body.icebreaker_prompt : null,
+        icebreaker_answer: typeof body.icebreaker_answer === 'string' ? body.icebreaker_answer : null,
+        is_seed: true,
+        is_active: true,
+      })
+      .select('id')
+      .single()
+
+    if (error || !user) return reply.status(500).send({ error: 'create_failed' })
+
+    if (photos.length) {
+      const { error: photoErr } = await db
+        .from('user_photos')
+        .insert(photos.map((url, i) => ({ user_id: user.id, url, position: i })))
+      if (photoErr) req.log.warn({ err: photoErr }, 'failed to insert seed photos')
+    }
+
+    return reply.status(201).send({ id: user.id })
+  })
+
   app.get('/users/:id', async (req, reply) => {
     const { id } = req.params as { id: string }
 

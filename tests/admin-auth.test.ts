@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import bcrypt from 'bcryptjs'
 
 vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 
@@ -52,6 +53,27 @@ describe('admin auth', () => {
     })
     expect(res.statusCode).toBe(401)
     expect(res.json()).toEqual({ error: 'invalid_credentials' })
+  })
+
+  it('runs bcrypt against a dummy hash for unknown usernames (constant-time login)', async () => {
+    vi.mocked(db.from).mockImplementation(() =>
+      chainable({ data: null, error: { message: 'not found' } })
+    )
+    const compareSpy = vi.spyOn(bcrypt, 'compare')
+
+    const res = await app.inject({
+      method: 'POST', url: '/admin/auth/login',
+      payload: { username: 'ghost', password: 'x' },
+    })
+
+    expect(res.statusCode).toBe(401)
+    expect(res.json()).toEqual({ error: 'invalid_credentials' })
+    // Behavior is unchanged, but the code shape must always invoke bcrypt
+    // exactly once — this is what equalizes timing between known and
+    // unknown usernames and prevents enumeration via response latency.
+    expect(compareSpy).toHaveBeenCalledTimes(1)
+
+    compareSpy.mockRestore()
   })
 
   it('returns 400 when credentials are missing', async () => {

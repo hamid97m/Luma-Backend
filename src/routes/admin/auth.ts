@@ -2,6 +2,11 @@ import { FastifyInstance } from 'fastify'
 import { db } from '../../db.js'
 import { signAdminToken, verifyPassword } from './auth-utils.js'
 
+// Precomputed bcrypt hash of an arbitrary password — used in place of a real
+// password_hash for unknown usernames so bcrypt always runs once per login
+// attempt, equalizing response timing and preventing username enumeration.
+const DUMMY_HASH = '$2b$10$7fhpYqlmsR39k/Qu2m.kJOYd4yI8SgM7RB4jj6.470sELbPljPhBm'
+
 export async function adminAuthRoutes(app: FastifyInstance) {
   app.post('/auth/login', async (req, reply) => {
     if (!process.env.ADMIN_JWT_SECRET) {
@@ -17,7 +22,8 @@ export async function adminAuthRoutes(app: FastifyInstance) {
       .eq('username', username)
       .single()
 
-    if (!admin || !(await verifyPassword(password, admin.password_hash))) {
+    const passwordOk = await verifyPassword(password, admin?.password_hash ?? DUMMY_HASH)
+    if (!admin || !passwordOk) {
       return reply.status(401).send({ error: 'invalid_credentials' })
     }
 

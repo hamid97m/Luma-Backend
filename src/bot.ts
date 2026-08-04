@@ -1,4 +1,6 @@
 import { Bot, Context, InlineKeyboard } from 'grammy'
+import { db } from './db.js'
+import { createTicket, shouldCaptureSupport } from './support/service.js'
 
 let _bot: Bot | null = null
 
@@ -17,10 +19,54 @@ async function sendStart(ctx: Context): Promise<void> {
   })
 }
 
+async function clearPending(ctx: Context): Promise<void> {
+  const tgId = ctx.from?.id
+  if (tgId) await db.from('users').update({ awaiting_support_since: null }).eq('telegram_id', tgId)
+}
+
 export function startBot(): void {
   const bot = getBot()
 
-  bot.command('start', sendStart)
+  bot.command('start', async (ctx) => {
+    await clearPending(ctx)
+    await sendStart(ctx)
+  })
+
+  bot.command('support', async (ctx) => {
+    const tgId = ctx.from?.id
+    if (tgId) {
+      await db.from('users').update({ awaiting_support_since: new Date().toISOString() }).eq('telegram_id', tgId)
+    }
+    await ctx.reply("What's the issue? Send it to me in one message and I'll open a support ticket.")
+  })
+
+  // Capture the next plain message as a ticket when a /support prompt is pending.
+  bot.on('message', async (ctx, next) => {
+    const tgId = ctx.from?.id
+    const text = ctx.message?.text
+    if (!tgId) return next()
+
+    const { data: user } = await db
+      .from('users')
+      .select('id, awaiting_support_since')
+      .eq('telegram_id', tgId)
+      .maybeSingle()
+
+    if (!user || !shouldCaptureSupport(text, user.awaiting_support_since ?? null, Date.now())) {
+      return next()
+    }
+
+    await db.from('users').update({ awaiting_support_since: null }).eq('id', user.id)
+    const result = await createTicket(user.id, text!)
+    const keyboard = new InlineKeyboard().webApp('Open Luma ❤️', process.env.WEB_URL!)
+    if (result.ok) {
+      await ctx.reply("Thanks — your ticket is in. We'll reply here and in the app.", { reply_markup: keyboard })
+    } else if (result.error === 'too_many_open_tickets') {
+      await ctx.reply("You already have several open tickets — please wait for a reply before opening another.")
+    } else {
+      await ctx.reply("Sorry, I couldn't save that. Please try /support again.")
+    }
+  })
 
   // Any other command or message we don't explicitly support falls through
   // to here and is treated the same as /start.
@@ -81,6 +127,15 @@ export async function notifyNewMessage(
   }
 }
 
-export async function notifyTicketReply(_toTelegramId: number, _issuePreview: string, _answer: string): Promise<void> {
-  // Replaced with the real implementation in Task 5.
+export async function notifyTicketReply(
+  toTelegramId: number,
+  issuePreview: string,
+  answer: string,
+): Promise<void> {
+  const bot = getBot()
+  const keyboard = new InlineKeyboard().webApp('Open Luma ❤️', process.env.WEB_URL!)
+  const preview = issuePreview.length > 200 ? `${issuePreview.slice(0, 199)}…` : issuePreview
+  const text = `📮 Support reply\n\nYour issue:\n"${preview}"\n\nOur answer:\n${answer}`
+  const safe = text.length > 4000 ? `${text.slice(0, 3999)}…` : text
+  await bot.api.sendMessage(toTelegramId, safe, { reply_markup: keyboard })
 }

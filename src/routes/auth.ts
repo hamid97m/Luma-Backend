@@ -24,9 +24,11 @@ export async function authRoutes(app: FastifyInstance) {
     // Find or create user
     const { data: existing } = await db
       .from('users')
-      .select('id, name, age, gender, looking_for, bio, deleted_at')
+      .select('id, name, age, gender, looking_for, bio, deleted_at, banned_at')
       .eq('telegram_id', tgUser.id)
       .single()
+
+    if (existing?.banned_at) return reply.status(401).send({ error: 'account_banned' })
 
     let userId: string
     let userName: string

@@ -55,6 +55,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
       .from('users')
       .select('id, name, age, bio, telegram_id, interests, location, user_photos(id, url, position)')
       .eq('is_active', true)
+      .is('banned_at', null)
 
     // Apply gender filter before exclude and ordering
     const filteredQuery = genderFilter

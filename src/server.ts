@@ -11,6 +11,7 @@ import { discoveryRoutes } from './routes/discovery.js'
 import { swipesRoutes } from './routes/swipes.js'
 import { matchesRoutes } from './routes/matches.js'
 import { messagesRoutes } from './routes/messages.js'
+import { adminRoutes } from './routes/admin/index.js'
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -32,8 +33,11 @@ export async function buildApp(): Promise<FastifyInstance> {
     throw new Error('WEB_URL environment variable is required in production')
   }
 
+  const corsOrigins = [process.env.WEB_URL, process.env.ADMIN_WEB_URL]
+    .filter((o): o is string => Boolean(o))
+
   await app.register(cors, {
-    origin: process.env.WEB_URL ?? '*',
+    origin: corsOrigins.length ? corsOrigins : '*',
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
   })
 
@@ -46,7 +50,7 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   // Auth middleware — skips /auth/verify and /health
   app.addHook('preHandler', async (req: FastifyRequest, reply: FastifyReply) => {
-    if (req.url === '/auth/verify' || req.url === '/health') return
+    if (req.url === '/auth/verify' || req.url === '/health' || req.url.startsWith('/admin')) return
 
     const initData = req.headers.authorization
     if (!initData) return reply.status(401).send({ error: 'missing_auth' })
@@ -87,6 +91,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(swipesRoutes)
   await app.register(matchesRoutes)
   await app.register(messagesRoutes)
+  await app.register(adminRoutes, { prefix: '/admin' })
 
   return app
 }

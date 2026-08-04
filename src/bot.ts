@@ -128,6 +128,13 @@ export async function notifyNewMessage(
   }
 }
 
+/** DM a recipient that someone sent them a gift as an intro. */
+export async function notifyGiftIntro(toTelegramId: number, senderName: string, emoji: string): Promise<void> {
+  const bot = getBot()
+  const keyboard = new InlineKeyboard().webApp('Open Luma ❤️', process.env.WEB_URL!)
+  await bot.api.sendMessage(toTelegramId, `${senderName} sent you a gift ${emoji} — open Luma to see who!`, { reply_markup: keyboard })
+}
+
 export async function notifyTicketReply(
   toTelegramId: number,
   issuePreview: string,

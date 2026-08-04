@@ -66,4 +66,82 @@ describe('support routes', () => {
     const res = await app.inject({ method: 'POST', url: '/support/tickets/t9/messages', headers: AUTH, payload: { body: 'hi' } })
     expect(res.statusCode).toBe(404)
   })
+
+  it('lists tickets with preview + unread', async () => {
+    mockAuthUserLookup()
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'support_tickets') {
+        return {
+          select: () => chainable({
+            data: [{ id: 't1', status: 'open', last_sender: 'admin', last_message_at: 'now', created_at: 'then' }],
+            error: null,
+          }),
+        } as any
+      }
+      if (table === 'support_messages') {
+        return {
+          select: () => chainable({
+            data: [{ ticket_id: 't1', body: 'help me', created_at: 'then' }],
+            error: null,
+          }),
+        } as any
+      }
+      return chainable({ error: null })
+    })
+    const res = await app.inject({ method: 'GET', url: '/support/tickets', headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.tickets[0]).toMatchObject({ id: 't1', status: 'open', preview: 'help me', unread: true })
+  })
+
+  it('404s a foreign ticket on detail fetch', async () => {
+    mockAuthUserLookup()
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'support_tickets') return { select: () => chainable({ data: null, error: null }) } as any
+      return chainable({ error: null })
+    })
+    const res = await app.inject({ method: 'GET', url: '/support/tickets/t9', headers: AUTH })
+    expect(res.statusCode).toBe(404)
+  })
+
+  it('returns ticket detail and stamps admin messages read', async () => {
+    mockAuthUserLookup()
+    const updateSpy = vi.fn(() => chainable({ error: null }))
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'support_tickets') {
+        return { select: () => chainable({ data: { id: 't1', status: 'open', created_at: 'then' }, error: null }) } as any
+      }
+      if (table === 'support_messages') {
+        return {
+          select: () => chainable({ data: [{ id: 'm1', sender: 'admin', body: 'hi', created_at: 'now' }], error: null }),
+          update: updateSpy,
+        } as any
+      }
+      return chainable({ error: null })
+    })
+    const res = await app.inject({ method: 'GET', url: '/support/tickets/t1', headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.messages[0].sender).toBe('admin')
+    expect(updateSpy).toHaveBeenCalled()
+  })
+
+  it('sends a reply and reopens the ticket', async () => {
+    mockAuthUserLookup()
+    const ticketUpdate = vi.fn(() => chainable({ error: null }))
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'support_tickets') {
+        return { select: () => chainable({ data: { id: 't1' }, error: null }), update: ticketUpdate } as any
+      }
+      if (table === 'support_messages') {
+        return { insert: () => chainable({ data: { id: 'm2', sender: 'user', body: 'hi', created_at: 'now' }, error: null }) } as any
+      }
+      return chainable({ error: null })
+    })
+    const res = await app.inject({ method: 'POST', url: '/support/tickets/t1/messages', headers: AUTH, payload: { body: 'hi' } })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.message).toMatchObject({ id: 'm2', sender: 'user', body: 'hi' })
+    expect(ticketUpdate.mock.calls[0][0]).toMatchObject({ status: 'open', last_sender: 'user' })
+  })
 })

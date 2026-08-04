@@ -123,10 +123,11 @@ export async function supportRoutes(app: FastifyInstance) {
     if (error || !message) return reply.status(500).send({ error: 'send_failed' })
 
     // A user reply reopens a closed ticket and flips the queue back to us.
-    await db
+    const { error: reopenErr } = await db
       .from('support_tickets')
       .update({ status: 'open', last_sender: 'user', last_message_at: new Date().toISOString() })
       .eq('id', id)
+    if (reopenErr) return reply.status(500).send({ error: 'reopen_failed' })
 
     return { message: mapMessage(message) }
   })

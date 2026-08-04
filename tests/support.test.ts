@@ -144,4 +144,20 @@ describe('support routes', () => {
     expect(body.message).toMatchObject({ id: 'm2', sender: 'user', body: 'hi' })
     expect(ticketUpdate.mock.calls[0][0]).toMatchObject({ status: 'open', last_sender: 'user' })
   })
+
+  it('500s when the ticket reopen update fails after a successful reply', async () => {
+    mockAuthUserLookup()
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'support_tickets') {
+        return { select: () => chainable({ data: { id: 't1' }, error: null }), update: () => chainable({ error: { message: 'boom' } }) } as any
+      }
+      if (table === 'support_messages') {
+        return { insert: () => chainable({ data: { id: 'm2', sender: 'user', body: 'hi', created_at: 'now' }, error: null }) } as any
+      }
+      return chainable({ error: null })
+    })
+    const res = await app.inject({ method: 'POST', url: '/support/tickets/t1/messages', headers: AUTH, payload: { body: 'hi' } })
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toEqual({ error: 'reopen_failed' })
+  })
 })

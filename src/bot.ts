@@ -2,6 +2,7 @@ import { Bot, Context, InlineKeyboard } from 'grammy'
 import type { Gift } from '@grammyjs/types'
 import { db } from './db.js'
 import { createTicket, shouldCaptureSupport } from './support/service.js'
+import { validatePreCheckout, handleGiftPaid } from './gifts/service.js'
 
 let _bot: Bot | null = null
 
@@ -27,6 +28,19 @@ async function clearPending(ctx: Context): Promise<void> {
 
 export function startBot(): void {
   const bot = getBot()
+
+  // --- Telegram Stars payments for gifts (must precede the message catch-alls) ---
+  bot.on('pre_checkout_query', async (ctx) => {
+    const q = ctx.preCheckoutQuery
+    const result = await validatePreCheckout(q.invoice_payload, q.total_amount, q.currency)
+    await ctx.answerPreCheckoutQuery(result.ok, result.ok ? undefined : { error_message: result.reason })
+  })
+
+  bot.on('message:successful_payment', async (ctx) => {
+    const sp = ctx.message.successful_payment
+    await handleGiftPaid(sp.invoice_payload, sp.telegram_payment_charge_id, ctx.from.id)
+      .catch((err) => console.error('[bot] handleGiftPaid failed:', err?.message ?? err))
+  })
 
   bot.command('start', async (ctx) => {
     await clearPending(ctx)

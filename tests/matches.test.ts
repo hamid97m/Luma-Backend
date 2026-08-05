@@ -24,6 +24,15 @@ function mockNoBlocks() {
   } as any)
 }
 
+// Premium gate disabled: the `.single()` chain resolves with no row, so
+// `cfg?.premium_enabled === true` is false and the route never issues the
+// follow-up `users` premium_until lookup.
+function mockPremiumDisabled() {
+  vi.mocked(db.from).mockReturnValueOnce({
+    select: () => ({ eq: () => ({ single: () => ({ data: null }) }) }),
+  } as any)
+}
+
 function mockMatchesRow() {
   vi.mocked(db.from).mockReturnValueOnce({
     select: () => ({
@@ -83,6 +92,7 @@ describe('GET /matches', () => {
   it('returns list of matches with other user info, last message, and unread count', async () => {
     setupAuth()
     mockNoBlocks()
+    mockPremiumDisabled()
     mockMatchesRow()
     mockPhotos()
     mockLastMessage({ body: 'hey there', created_at: '2026-01-02T00:00:00Z', sender_id: 'other-user' })
@@ -108,6 +118,7 @@ describe('GET /matches', () => {
   it('returns null lastMessage and 0 unreadCount when there are no messages yet', async () => {
     setupAuth()
     mockNoBlocks()
+    mockPremiumDisabled()
     mockMatchesRow()
     mockPhotos()
     mockLastMessage(null)
@@ -123,6 +134,7 @@ describe('GET /matches', () => {
   it('excludes a match whose counterpart has deleted their account', async () => {
     setupAuth()
     mockNoBlocks()
+    mockPremiumDisabled()
 
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({

@@ -1,0 +1,122 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+
+vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
+vi.mock('../src/bot.js', () => ({}))
+
+import { buildApp } from '../src/server.js'
+import { db } from '../src/db.js'
+import { signAdminToken } from '../src/routes/admin/auth-utils.js'
+import { chainable } from './admin-helpers.js'
+
+const PLAN_ROW = {
+  id: 'p1', title: '1 Month', description: 'Best start', price_stars: 100,
+  discount_percent: null, duration_days: 30, is_active: true, sort_order: 0,
+  created_at: '2026-08-05T00:00:00Z',
+}
+const PLAN_JSON = {
+  id: 'p1', title: '1 Month', description: 'Best start', priceStars: 100,
+  discountPercent: null, durationDays: 30, isActive: true, sortOrder: 0,
+  createdAt: '2026-08-05T00:00:00Z',
+}
+
+describe('admin premium', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  let headers: Record<string, string>
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    process.env.ADMIN_JWT_SECRET = 'test-secret'
+    app = await buildApp()
+    headers = { authorization: `Bearer ${signAdminToken({ adminId: 'a1', username: 'root' })}` }
+  })
+
+  it('rejects requests without a valid admin token', async () => {
+    const res = await app.inject({ method: 'GET', url: '/admin/premium/config' })
+    expect(res.statusCode).toBe(401)
+  })
+
+  it('reads the premium config', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) =>
+      table === 'premium_config' ? chainable({ data: { premium_enabled: true }, error: null }) : chainable({ data: null }))
+    const res = await app.inject({ method: 'GET', url: '/admin/premium/config', headers })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ premiumEnabled: true })
+  })
+
+  it('updates the toggle', async () => {
+    const updates: any[] = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_config') {
+        return { update: (p: any) => { updates.push(p); return chainable({ data: { premium_enabled: true }, error: null }) } } as any
+      }
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'PUT', url: '/admin/premium/config', headers, payload: { premiumEnabled: true } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ premiumEnabled: true })
+    expect(updates[0]).toMatchObject({ premium_enabled: true })
+  })
+
+  it('rejects a non-boolean toggle', async () => {
+    const res = await app.inject({ method: 'PUT', url: '/admin/premium/config', headers, payload: { premiumEnabled: 'yes' } })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('lists all plans including inactive', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) =>
+      table === 'premium_plans' ? chainable({ data: [PLAN_ROW], error: null }) : chainable({ data: null }))
+    const res = await app.inject({ method: 'GET', url: '/admin/premium/plans', headers })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ plans: [PLAN_JSON] })
+  })
+
+  it('creates a plan', async () => {
+    const inserts: any[] = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_plans') {
+        return { insert: (p: any) => { inserts.push(p); return chainable({ data: PLAN_ROW, error: null }) } } as any
+      }
+      return chainable({ data: null })
+    })
+    const res = await app.inject({
+      method: 'POST', url: '/admin/premium/plans', headers,
+      payload: { title: '1 Month', description: 'Best start', priceStars: 100, durationDays: 30 },
+    })
+    expect(res.statusCode).toBe(201)
+    expect(res.json()).toEqual(PLAN_JSON)
+    expect(inserts[0]).toMatchObject({ title: '1 Month', price_stars: 100, duration_days: 30 })
+  })
+
+  it('validates plan input', async () => {
+    for (const payload of [
+      { title: '', priceStars: 100, durationDays: 30 },
+      { title: 'X', priceStars: 0, durationDays: 30 },
+      { title: 'X', priceStars: 100, durationDays: 0 },
+      { title: 'X', priceStars: 100, durationDays: 30, discountPercent: 95 },
+    ]) {
+      const res = await app.inject({ method: 'POST', url: '/admin/premium/plans', headers, payload })
+      expect(res.statusCode).toBe(400)
+    }
+  })
+
+  it('409s deleting a plan that has transactions', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_transactions') return chainable({ count: 3, error: null })
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'DELETE', url: '/admin/premium/plans/p1', headers })
+    expect(res.statusCode).toBe(409)
+    expect(res.json()).toEqual({ error: 'plan_has_transactions' })
+  })
+
+  it('deletes an unused plan', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_transactions') return chainable({ count: 0, error: null })
+      if (table === 'premium_plans') return chainable({ data: { id: 'p1' }, error: null })
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'DELETE', url: '/admin/premium/plans/p1', headers })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ ok: true })
+  })
+})

@@ -25,10 +25,15 @@ function parsePlanBody(body: Record<string, unknown>, partial: boolean): { error
   const row: Record<string, unknown> = {}
   if (body.title !== undefined || !partial) {
     if (typeof body.title !== 'string' || !body.title.trim()) return { error: 'invalid_title' }
-    row.title = body.title.trim()
+    const title = body.title.trim()
+    // Telegram createInvoiceLink caps title at 32 chars; longer values 500 every checkout for the plan.
+    if (title.length > 32) return { error: 'invalid_title' }
+    row.title = title
   }
   if (body.description !== undefined) {
     if (typeof body.description !== 'string') return { error: 'invalid_description' }
+    // Telegram createInvoiceLink caps description at 255 chars.
+    if (body.description.length > 255) return { error: 'invalid_description' }
     row.description = body.description
   }
   if (body.priceStars !== undefined || !partial) {

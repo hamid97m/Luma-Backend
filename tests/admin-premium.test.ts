@@ -99,6 +99,24 @@ describe('admin premium', () => {
     }
   })
 
+  it('POST with a title over 32 chars → 400 invalid_title', async () => {
+    const res = await app.inject({
+      method: 'POST', url: '/admin/premium/plans', headers,
+      payload: { title: 'X'.repeat(33), priceStars: 100, durationDays: 30 },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_title' })
+  })
+
+  it('POST with a description over 255 chars → 400 invalid_description', async () => {
+    const res = await app.inject({
+      method: 'POST', url: '/admin/premium/plans', headers,
+      payload: { title: 'X', description: 'X'.repeat(256), priceStars: 100, durationDays: 30 },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_description' })
+  })
+
   it('409s deleting a plan that has transactions', async () => {
     vi.mocked(db.from).mockImplementation((table: string) => {
       if (table === 'premium_transactions') return chainable({ count: 3, error: null })

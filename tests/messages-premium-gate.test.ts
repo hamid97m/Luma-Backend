@@ -107,4 +107,14 @@ describe('premiumGateBlocks (unmocked)', () => {
     const gate = await realGate()
     expect(await gate('u1', 'woman')).toBe(false)
   })
+
+  it('fails open (does not block) when the users lookup errors — cannot risk 403ing a paying user', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_config') return chainable({ data: { premium_enabled: true } })
+      if (table === 'users') return chainable({ data: null, error: { message: 'db down' } })
+      return chainable({ data: null })
+    })
+    const gate = await realGate()
+    expect(await gate('u1', 'woman')).toBe(false)
+  })
 })

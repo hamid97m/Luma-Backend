@@ -126,6 +126,9 @@ export async function getPremiumTransactionStatus(txId: string, userId: string) 
 export async function premiumGateBlocks(senderId: string, partnerGender: string | null): Promise<boolean> {
   if (partnerGender !== 'woman') return false
   if (!(await isPremiumEnabled())) return false
-  const { data: me } = await db.from('users').select('premium_until').eq('id', senderId).single()
+  const { data: me, error } = await db.from('users').select('premium_until').eq('id', senderId).single()
+  // Can't determine status (transient db error) — fail open rather than 403ing a possibly-paying user;
+  // the gate re-checks on every send, so a genuine free user is only briefly ungated.
+  if (error) return false
   return !isPremiumActive(me?.premium_until ?? null)
 }

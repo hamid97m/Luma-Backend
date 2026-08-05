@@ -73,3 +73,50 @@ export async function createPremiumCheckout(userId: string, planId: string) {
   )
   return { transactionId: tx.id, invoiceLink }
 }
+
+export async function validatePremiumPreCheckout(transactionId: string, totalAmount: number, currency: string) {
+  const { data: tx } = await db
+    .from('premium_transactions').select('status, price_stars').eq('id', transactionId).maybeSingle()
+  if (!tx) return { ok: false as const, reason: 'This purchase is no longer available.' }
+  if (tx.status !== 'pending_payment') return { ok: false as const, reason: 'This purchase was already processed.' }
+  if (currency !== 'XTR' || totalAmount !== tx.price_stars) return { ok: false as const, reason: 'Price mismatch.' }
+  return { ok: true as const }
+}
+
+export async function handlePremiumPaid(transactionId: string, chargeId: string, buyerTelegramId: number) {
+  // Idempotency: only a still-pending row proceeds (guards Telegram update replays).
+  const { data: tx } = await db
+    .from('premium_transactions')
+    .update({ status: 'paid', paid_at: new Date().toISOString(), telegram_payment_charge_id: chargeId })
+    .eq('id', transactionId).eq('status', 'pending_payment')
+    .select('id, user_id, duration_days').maybeSingle()
+  if (!tx) return // already handled or unknown
+
+  const { data: user } = await db.from('users').select('premium_until').eq('id', tx.user_id).single()
+  if (!user) { await failAndRefund(tx.id, buyerTelegramId, chargeId); return }
+
+  const { error: updErr } = await db
+    .from('users')
+    .update({ premium_until: extendPremiumUntil(user.premium_until ?? null, tx.duration_days) })
+    .eq('id', tx.user_id)
+  if (updErr) { await failAndRefund(tx.id, buyerTelegramId, chargeId); return }
+}
+
+/** Buyer paid but we couldn't grant time: refund the Stars and mark the tx.
+ * If the refund API itself fails we log and leave the tx 'paid' so an admin
+ * can refund manually via the recorded charge id. */
+async function failAndRefund(txId: string, buyerTelegramId: number, chargeId: string) {
+  try {
+    await refundPremiumPayment(buyerTelegramId, chargeId)
+    await db.from('premium_transactions').update({ status: 'refunded' }).eq('id', txId)
+  } catch (e) {
+    console.error('[premium] refund failed:', (e as Error)?.message)
+  }
+}
+
+export async function getPremiumTransactionStatus(txId: string, userId: string) {
+  const { data } = await db
+    .from('premium_transactions').select('status, user_id').eq('id', txId).maybeSingle()
+  if (!data || data.user_id !== userId) return null
+  return { status: data.status }
+}

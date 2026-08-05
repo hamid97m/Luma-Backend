@@ -2,6 +2,9 @@ import { Bot, Context, InlineKeyboard } from 'grammy'
 import { db } from './db.js'
 import { createTicket, shouldCaptureSupport } from './support/service.js'
 import { validatePreCheckout, handleGiftPaid } from './gifts/service.js'
+import {
+  PREMIUM_PAYLOAD_PREFIX, validatePremiumPreCheckout, handlePremiumPaid,
+} from './premium/service.js'
 
 let _bot: Bot | null = null
 
@@ -28,17 +31,22 @@ async function clearPending(ctx: Context): Promise<void> {
 export function startBot(): void {
   const bot = getBot()
 
-  // --- Telegram Stars payments for gifts (must precede the message catch-alls) ---
+  // --- Telegram Stars payments (gifts + premium; must precede the message catch-alls) ---
+  // The invoice payload routes: `premium:<txId>` -> premium, anything else -> gifts.
   bot.on('pre_checkout_query', async (ctx) => {
     const q = ctx.preCheckoutQuery
-    const result = await validatePreCheckout(q.invoice_payload, q.total_amount, q.currency)
+    const result = q.invoice_payload.startsWith(PREMIUM_PAYLOAD_PREFIX)
+      ? await validatePremiumPreCheckout(q.invoice_payload.slice(PREMIUM_PAYLOAD_PREFIX.length), q.total_amount, q.currency)
+      : await validatePreCheckout(q.invoice_payload, q.total_amount, q.currency)
     await ctx.answerPreCheckoutQuery(result.ok, result.ok ? undefined : { error_message: result.reason })
   })
 
   bot.on('message:successful_payment', async (ctx) => {
     const sp = ctx.message.successful_payment
-    await handleGiftPaid(sp.invoice_payload, sp.telegram_payment_charge_id, ctx.from.id)
-      .catch((err) => console.error('[bot] handleGiftPaid failed:', err?.message ?? err))
+    const run = sp.invoice_payload.startsWith(PREMIUM_PAYLOAD_PREFIX)
+      ? handlePremiumPaid(sp.invoice_payload.slice(PREMIUM_PAYLOAD_PREFIX.length), sp.telegram_payment_charge_id, ctx.from.id)
+      : handleGiftPaid(sp.invoice_payload, sp.telegram_payment_charge_id, ctx.from.id)
+    await run.catch((err) => console.error('[bot] payment handler failed:', err?.message ?? err))
   })
 
   bot.command('start', async (ctx) => {

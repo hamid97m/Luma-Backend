@@ -187,3 +187,94 @@ describe('admin premium', () => {
     expect(res.json()).toEqual({ error: 'plan_not_found' })
   })
 })
+
+describe('admin premium transactions + grant/revoke', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  let headers: Record<string, string>
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    process.env.ADMIN_JWT_SECRET = 'test-secret'
+    app = await buildApp()
+    headers = { authorization: `Bearer ${signAdminToken({ adminId: 'a1', username: 'root' })}` }
+  })
+
+  it('lists transactions with user info and pagination', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_transactions') {
+        return chainable({
+          data: [{
+            id: 't1', plan_title: '1 Month', price_stars: 100, duration_days: 30,
+            status: 'paid', source: 'purchase', created_at: '2026-08-05T00:00:00Z', paid_at: '2026-08-05T00:01:00Z',
+            user: { name: 'Ali', username: 'ali' },
+          }],
+          count: 1, error: null,
+        })
+      }
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'GET', url: '/admin/premium/transactions?page=1', headers })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({
+      items: [{
+        id: 't1', userName: 'Ali', userUsername: 'ali', planTitle: '1 Month',
+        priceStars: 100, durationDays: 30, status: 'paid', source: 'purchase',
+        createdAt: '2026-08-05T00:00:00Z', paidAt: '2026-08-05T00:01:00Z',
+      }],
+      total: 1, page: 1, pageCount: 1,
+    })
+  })
+
+  it('grants days: extends premium_until and records an admin_grant tx', async () => {
+    const userUpdates: any[] = []
+    const txInserts: any[] = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') {
+        return {
+          select: () => ({ eq: () => ({ maybeSingle: () => ({ data: { id: 'u1', premium_until: null } }) }) }),
+          update: (p: any) => { userUpdates.push(p); return chainable({ error: null }) },
+        } as any
+      }
+      if (table === 'premium_transactions') {
+        return { insert: (p: any) => { txInserts.push(p); return chainable({ error: null }) } } as any
+      }
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/premium/grant', headers, payload: { days: 30 } })
+    expect(res.statusCode).toBe(200)
+    expect(new Date(res.json().premiumUntil).getTime()).toBeGreaterThan(Date.now() + 29 * 86400000)
+    expect(userUpdates[0].premium_until).toBe(res.json().premiumUntil)
+    expect(txInserts[0]).toMatchObject({
+      user_id: 'u1', plan_id: null, plan_title: 'Admin grant', price_stars: 0,
+      duration_days: 30, status: 'paid', source: 'admin_grant',
+    })
+  })
+
+  it('rejects an invalid grant days value', async () => {
+    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/premium/grant', headers, payload: { days: 0 } })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('404s granting to an unknown user', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') return { select: () => ({ eq: () => ({ maybeSingle: () => ({ data: null }) }) }) } as any
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/premium/grant', headers, payload: { days: 7 } })
+    expect(res.statusCode).toBe(404)
+  })
+
+  it('revoke clears premium_until', async () => {
+    const userUpdates: any[] = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') {
+        return { update: (p: any) => { userUpdates.push(p); return { eq: () => ({ select: () => ({ maybeSingle: () => ({ data: { id: 'u1' } }) }) }) } } } as any
+      }
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/premium/revoke', headers })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ ok: true })
+    expect(userUpdates[0]).toMatchObject({ premium_until: null })
+  })
+})

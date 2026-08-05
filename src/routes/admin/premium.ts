@@ -1,7 +1,11 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../../db.js'
+import { extendPremiumUntil } from '../../premium/service.js'
 
 const PLAN_SELECT = 'id, title, description, price_stars, discount_percent, duration_days, is_active, sort_order, created_at'
+const PAGE_SIZE = 25
+const TX_STATUSES = ['pending_payment', 'paid', 'refunded']
+const TX_SOURCES = ['purchase', 'admin_grant']
 
 function isPositiveInt(n: unknown): n is number {
   return typeof n === 'number' && Number.isInteger(n) && n > 0
@@ -108,6 +112,74 @@ export async function adminPremiumRoutes(app: FastifyInstance) {
     const { data, error } = await db.from('premium_plans').delete().eq('id', id).select('id').maybeSingle()
     if (error) return reply.status(500).send({ error: 'plan_delete_failed' })
     if (!data) return reply.status(404).send({ error: 'plan_not_found' })
+    return { ok: true }
+  })
+
+  app.get('/premium/transactions', async (req, reply) => {
+    const { page = '1', status, source } = req.query as Record<string, string>
+    const pageNum = Math.max(1, parseInt(page, 10) || 1)
+    const from = (pageNum - 1) * PAGE_SIZE
+
+    let q = db
+      .from('premium_transactions')
+      .select(
+        'id, plan_title, price_stars, duration_days, status, source, created_at, paid_at, ' +
+        'user:users!premium_transactions_user_id_fkey(name, username)',
+        { count: 'exact' },
+      )
+    if (status && TX_STATUSES.includes(status)) q = q.eq('status', status)
+    if (source && TX_SOURCES.includes(source)) q = q.eq('source', source)
+
+    const { data, count, error } = await q
+      .order('created_at', { ascending: false })
+      .range(from, from + PAGE_SIZE - 1)
+    if (error) return reply.status(500).send({ error: 'transactions_fetch_failed' })
+
+    const total = count ?? 0
+    return {
+      items: (data ?? []).map((r: any) => ({
+        id: r.id,
+        userName: r.user?.name ?? '',
+        userUsername: r.user?.username ?? null,
+        planTitle: r.plan_title,
+        priceStars: r.price_stars,
+        durationDays: r.duration_days,
+        status: r.status,
+        source: r.source,
+        createdAt: r.created_at,
+        paidAt: r.paid_at ?? null,
+      })),
+      total, page: pageNum, pageCount: Math.max(1, Math.ceil(total / PAGE_SIZE)),
+    }
+  })
+
+  app.post('/users/:id/premium/grant', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { days } = (req.body ?? {}) as { days?: unknown }
+    if (!isPositiveInt(days) || days > 3650) return reply.status(400).send({ error: 'invalid_days' })
+
+    const { data: user } = await db.from('users').select('id, premium_until').eq('id', id).maybeSingle()
+    if (!user) return reply.status(404).send({ error: 'user_not_found' })
+
+    const premiumUntil = extendPremiumUntil(user.premium_until ?? null, days)
+    const { error: updErr } = await db.from('users').update({ premium_until: premiumUntil }).eq('id', id)
+    if (updErr) return reply.status(500).send({ error: 'grant_failed' })
+
+    const { error: txErr } = await db.from('premium_transactions').insert({
+      user_id: id, plan_id: null, plan_title: 'Admin grant', price_stars: 0,
+      duration_days: days, status: 'paid', source: 'admin_grant', paid_at: new Date().toISOString(),
+    })
+    if (txErr) req.log.warn({ err: txErr }, 'failed to record admin grant tx')
+
+    return { premiumUntil }
+  })
+
+  app.post('/users/:id/premium/revoke', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { data, error } = await db
+      .from('users').update({ premium_until: null }).eq('id', id).select('id').maybeSingle()
+    if (error) return reply.status(500).send({ error: 'revoke_failed' })
+    if (!data) return reply.status(404).send({ error: 'user_not_found' })
     return { ok: true }
   })
 }

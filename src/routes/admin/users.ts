@@ -170,6 +170,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
           icebreakerPrompt: user.icebreaker_prompt,
           icebreakerAnswer: user.icebreaker_answer,
           allowsWriteToPm: user.allows_write_to_pm,
+          premiumUntil: user.premium_until ?? null,
           photos: (photos ?? []).map((p: any) => p.url),
         },
         counts: { swipesGiven, likesReceived, matches: matches.length, messagesSent },

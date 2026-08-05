@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 import { notifyNewMessage } from '../bot.js'
+import { premiumGateBlocks } from '../premium/service.js'
 
 const MAX_MESSAGE_LENGTH = 2000
 const OFFLINE_THRESHOLD_MS = 10 * 60 * 1000
@@ -10,8 +11,8 @@ async function getUsableMatch(matchId: string, userId: string) {
     .from('matches')
     .select(`
       id, user1_id, user2_id,
-      user1:users!matches_user1_id_fkey(id, name, telegram_id, deleted_at, last_active, notified_offline_at, allows_write_to_pm),
-      user2:users!matches_user2_id_fkey(id, name, telegram_id, deleted_at, last_active, notified_offline_at, allows_write_to_pm)
+      user1:users!matches_user1_id_fkey(id, name, telegram_id, deleted_at, last_active, notified_offline_at, allows_write_to_pm, gender),
+      user2:users!matches_user2_id_fkey(id, name, telegram_id, deleted_at, last_active, notified_offline_at, allows_write_to_pm, gender)
     `)
     .eq('id', matchId)
     .single()
@@ -75,6 +76,11 @@ export async function messagesRoutes(app: FastifyInstance) {
 
     const match = await getUsableMatch(matchId, req.userId)
     if (!match) return reply.status(404).send({ error: 'match_not_found' })
+
+    const partner: any = match.user1_id === req.userId ? match.user2 : match.user1
+    if (await premiumGateBlocks(req.userId, partner?.gender ?? null)) {
+      return reply.status(403).send({ error: 'premium_required' })
+    }
 
     if (replyToMessageId) {
       const { data: parent } = await db

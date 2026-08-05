@@ -120,3 +120,12 @@ export async function getPremiumTransactionStatus(txId: string, userId: string) 
   if (!data || data.user_id !== userId) return null
   return { status: data.status }
 }
+
+/** True when the sender may NOT message this partner. Order matters: the gender
+ * check is first so non-gated chats (and all existing tests) never touch the db. */
+export async function premiumGateBlocks(senderId: string, partnerGender: string | null): Promise<boolean> {
+  if (partnerGender !== 'woman') return false
+  if (!(await isPremiumEnabled())) return false
+  const { data: me } = await db.from('users').select('premium_until').eq('id', senderId).single()
+  return !isPremiumActive(me?.premium_until ?? null)
+}

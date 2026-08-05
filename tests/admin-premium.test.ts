@@ -119,4 +119,71 @@ describe('admin premium', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ ok: true })
   })
+
+  it('PUT partial update — description only', async () => {
+    const updates: any[] = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_plans') {
+        return {
+          update: (p: any) => { updates.push(p); return chainable({ data: { ...PLAN_ROW, description: 'Updated desc' }, error: null }) },
+          eq: () => ({ select: () => ({ maybeSingle: () => chainable({ data: { ...PLAN_ROW, description: 'Updated desc' }, error: null }) }) })
+        } as any
+      }
+      return chainable({ data: null })
+    })
+    const res = await app.inject({
+      method: 'PUT', url: '/admin/premium/plans/p1', headers,
+      payload: { description: 'Updated desc' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ description: 'Updated desc' })
+    expect(updates[0]).toMatchObject({ description: 'Updated desc' })
+    expect(updates[0]).toHaveProperty('updated_at')
+  })
+
+  it('PUT with empty body → 400 empty_update', async () => {
+    const res = await app.inject({
+      method: 'PUT', url: '/admin/premium/plans/p1', headers,
+      payload: {},
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'empty_update' })
+  })
+
+  it('PUT with non-integer priceStars → 400 invalid_price_stars', async () => {
+    const res = await app.inject({
+      method: 'PUT', url: '/admin/premium/plans/p1', headers,
+      payload: { priceStars: 10.5 },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_price_stars' })
+  })
+
+  it('PUT with unknown id → 404 plan_not_found', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_plans') {
+        return {
+          update: () => ({ eq: () => ({ select: () => ({ maybeSingle: () => chainable({ data: null, error: null }) }) }) })
+        } as any
+      }
+      return chainable({ data: null })
+    })
+    const res = await app.inject({
+      method: 'PUT', url: '/admin/premium/plans/unknown', headers,
+      payload: { description: 'New' },
+    })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'plan_not_found' })
+  })
+
+  it('DELETE with unknown id → 404 plan_not_found', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_transactions') return chainable({ count: 0, error: null })
+      if (table === 'premium_plans') return chainable({ data: null, error: null })
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'DELETE', url: '/admin/premium/plans/unknown', headers })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'plan_not_found' })
+  })
 })

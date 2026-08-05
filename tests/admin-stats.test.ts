@@ -23,8 +23,10 @@ describe('GET /admin/stats', () => {
   })
 
   it('returns the dashboard payload shape', async () => {
-    vi.mocked(db.from).mockImplementation(() =>
-      chainable({ count: 5, data: [{ created_at: new Date().toISOString() }], error: null })
+    vi.mocked(db.from).mockImplementation((table: string) =>
+      table === 'premium_transactions'
+        ? chainable({ count: 0, data: [], error: null })
+        : chainable({ count: 5, data: [{ created_at: new Date().toISOString() }], error: null })
     )
 
     const res = await app.inject({ method: 'GET', url: '/admin/stats', headers })
@@ -56,8 +58,10 @@ describe('GET /admin/stats', () => {
 
   it('issues distinctly filtered queries (dau/wau windows, gender split, like rate)', async () => {
     const log: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockImplementation(() =>
-      chainable({ count: 5, data: [{ created_at: new Date().toISOString() }], error: null }, log)
+    vi.mocked(db.from).mockImplementation((table: string) =>
+      table === 'premium_transactions'
+        ? chainable({ count: 0, data: [], error: null }, log)
+        : chainable({ count: 5, data: [{ created_at: new Date().toISOString() }], error: null }, log)
     )
     await app.inject({ method: 'GET', url: '/admin/stats', headers })
     const genderEqs = log.filter((c) => c.method === 'eq' && c.args[0] === 'gender').map((c) => c.args[1])
@@ -65,5 +69,32 @@ describe('GET /admin/stats', () => {
     const lastActiveCutoffs = log.filter((c) => c.method === 'gte' && c.args[0] === 'last_active').map((c) => c.args[1])
     expect(new Set(lastActiveCutoffs).size).toBe(2)
     expect(log.some((c) => c.method === 'eq' && c.args[0] === 'direction' && c.args[1] === 'like')).toBe(true)
+  })
+
+  it('includes premium stats', async () => {
+    const today = new Date().toISOString()
+    vi.mocked(db.from).mockImplementation((table: string) =>
+      table === 'premium_transactions'
+        ? chainable({
+            count: 5,
+            data: [
+              { user_id: 'u1', paid_at: today, price_stars: 100 },
+              { user_id: 'u1', paid_at: today, price_stars: 100 },
+              { user_id: 'u2', paid_at: today, price_stars: 50 },
+            ],
+            error: null,
+          })
+        : chainable({ count: 5, data: [{ created_at: today }], error: null })
+    )
+
+    const res = await app.inject({ method: 'GET', url: '/admin/stats', headers })
+
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.premium.activeUsers).toBeTypeOf('number')
+    expect(body.premium.revenueStars).toBeTypeOf('number')
+    const todayStr = new Date().toISOString().slice(0, 10)
+    const todayBucket = body.premium.newPremiumPerDay.find((d: any) => d.date === todayStr)
+    expect(todayBucket.count).toBe(2) // u1 counted once, u2 once
   })
 })

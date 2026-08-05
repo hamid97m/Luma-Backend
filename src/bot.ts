@@ -194,3 +194,18 @@ export async function getBotStarBalance(): Promise<number> {
   const { amount } = await getBot().api.getMyStarBalance()
   return amount
 }
+
+/** Stars invoice link for a premium purchase. Payload is `premium:<premium_transactions.id>`
+ * so the shared bot payment handlers can dispatch between gifts and premium. */
+export async function createPremiumInvoiceLink(
+  transactionId: string, title: string, description: string, stars: number,
+): Promise<string> {
+  return getBot().api.createInvoiceLink(
+    title, description, `premium:${transactionId}`, '', 'XTR', [{ label: title, amount: stars }],
+  )
+}
+
+/** Refund a premium Stars payment (used when granting time fails after payment). */
+export async function refundPremiumPayment(telegramId: number, chargeId: string): Promise<void> {
+  await getBot().api.refundStarPayment(telegramId, chargeId)
+}

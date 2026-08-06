@@ -42,6 +42,7 @@ export async function adminReportsRoutes(app: FastifyInstance) {
     const { data: rows, count, error } = await db
       .from('pending_report_summary')
       .select('reported_id, report_count, reasons, contexts, latest_at', { count: 'exact' })
+      .order('report_count', { ascending: false })
       .order('latest_at', { ascending: false })
       .range(from, from + PAGE_SIZE - 1)
     if (error) return reply.status(500).send({ error: 'reports_fetch_failed' })

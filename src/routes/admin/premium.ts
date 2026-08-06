@@ -2,7 +2,7 @@ import { FastifyInstance } from 'fastify'
 import { db } from '../../db.js'
 import { extendPremiumUntil } from '../../premium/service.js'
 
-const PLAN_SELECT = 'id, title, description, price_stars, discount_percent, duration_days, is_active, sort_order, created_at'
+const PLAN_SELECT = 'id, title, description, price_stars, discount_percent, discount_ends_at, duration_days, is_active, sort_order, created_at'
 const PAGE_SIZE = 25
 const TX_STATUSES = ['pending_payment', 'paid', 'refunded']
 const TX_SOURCES = ['purchase', 'admin_grant']
@@ -15,6 +15,7 @@ function planToJson(p: any) {
   return {
     id: p.id, title: p.title, description: p.description,
     priceStars: p.price_stars, discountPercent: p.discount_percent ?? null,
+    discountEndsAt: p.discount_ends_at ?? null,
     durationDays: p.duration_days, isActive: p.is_active, sortOrder: p.sort_order,
     createdAt: p.created_at,
   }
@@ -49,6 +50,19 @@ function parsePlanBody(body: Record<string, unknown>, partial: boolean): { error
       return { error: 'invalid_discount_percent' }
     }
     row.discount_percent = body.discountPercent
+  }
+  if (body.discountEndsAt !== undefined) {
+    if (body.discountEndsAt !== null) {
+      if (typeof body.discountEndsAt !== 'string' || Number.isNaN(new Date(body.discountEndsAt).getTime())) {
+        return { error: 'invalid_discount_ends_at' }
+      }
+      // A deadline needs a percent to apply to. On POST the percent must be given in this same
+      // request; on PUT an omitted percent assumes the row's existing one — only an explicit null
+      // (clearing it) conflicts with setting a deadline.
+      const percentMissing = partial ? body.discountPercent === null : body.discountPercent === undefined || body.discountPercent === null
+      if (percentMissing) return { error: 'discount_ends_requires_percent' }
+    }
+    row.discount_ends_at = body.discountEndsAt
   }
   if (body.isActive !== undefined) {
     if (typeof body.isActive !== 'boolean') return { error: 'invalid_is_active' }

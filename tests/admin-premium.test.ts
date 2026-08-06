@@ -10,12 +10,12 @@ import { chainable } from './admin-helpers.js'
 
 const PLAN_ROW = {
   id: 'p1', title: '1 Month', description: 'Best start', price_stars: 100,
-  discount_percent: null, duration_days: 30, is_active: true, sort_order: 0,
+  discount_percent: null, discount_ends_at: null, duration_days: 30, is_active: true, sort_order: 0,
   created_at: '2026-08-05T00:00:00Z',
 }
 const PLAN_JSON = {
   id: 'p1', title: '1 Month', description: 'Best start', priceStars: 100,
-  discountPercent: null, durationDays: 30, isActive: true, sortOrder: 0,
+  discountPercent: null, discountEndsAt: null, durationDays: 30, isActive: true, sortOrder: 0,
   createdAt: '2026-08-05T00:00:00Z',
 }
 
@@ -115,6 +115,109 @@ describe('admin premium', () => {
     })
     expect(res.statusCode).toBe(400)
     expect(res.json()).toEqual({ error: 'invalid_description' })
+  })
+
+  it('creates a plan with a discount percent and an ends-at deadline', async () => {
+    const inserts: any[] = []
+    const endsAt = '2026-09-01T00:00:00.000Z'
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_plans') {
+        return {
+          insert: (p: any) => {
+            inserts.push(p)
+            return chainable({ data: { ...PLAN_ROW, discount_percent: 25, discount_ends_at: endsAt }, error: null })
+          },
+        } as any
+      }
+      return chainable({ data: null })
+    })
+    const res = await app.inject({
+      method: 'POST', url: '/admin/premium/plans', headers,
+      payload: { title: '1 Month', priceStars: 100, durationDays: 30, discountPercent: 25, discountEndsAt: endsAt },
+    })
+    expect(res.statusCode).toBe(201)
+    expect(inserts[0]).toMatchObject({ discount_percent: 25, discount_ends_at: endsAt })
+    expect(res.json()).toMatchObject({ discountPercent: 25, discountEndsAt: endsAt })
+  })
+
+  it('POST with an unparseable discountEndsAt → 400 invalid_discount_ends_at', async () => {
+    const res = await app.inject({
+      method: 'POST', url: '/admin/premium/plans', headers,
+      payload: { title: 'X', priceStars: 100, durationDays: 30, discountPercent: 25, discountEndsAt: 'not-a-date' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_discount_ends_at' })
+  })
+
+  it('POST with discountEndsAt but discountPercent omitted → 400 discount_ends_requires_percent', async () => {
+    const res = await app.inject({
+      method: 'POST', url: '/admin/premium/plans', headers,
+      payload: { title: 'X', priceStars: 100, durationDays: 30, discountEndsAt: '2026-09-01T00:00:00.000Z' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'discount_ends_requires_percent' })
+  })
+
+  it('POST with discountEndsAt and discountPercent explicitly null → 400 discount_ends_requires_percent', async () => {
+    const res = await app.inject({
+      method: 'POST', url: '/admin/premium/plans', headers,
+      payload: { title: 'X', priceStars: 100, durationDays: 30, discountPercent: null, discountEndsAt: '2026-09-01T00:00:00.000Z' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'discount_ends_requires_percent' })
+  })
+
+  it('PUT setting discountEndsAt with percent omitted assumes the existing percent (allowed)', async () => {
+    const endsAt = '2026-09-01T00:00:00.000Z'
+    const updates: any[] = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_plans') {
+        return {
+          update: (p: any) => {
+            updates.push(p)
+            return { eq: () => ({ select: () => ({ maybeSingle: () => chainable({ data: { ...PLAN_ROW, discount_percent: 25, discount_ends_at: endsAt }, error: null }) }) }) }
+          },
+        } as any
+      }
+      return chainable({ data: null })
+    })
+    const res = await app.inject({
+      method: 'PUT', url: '/admin/premium/plans/p1', headers,
+      payload: { discountEndsAt: endsAt },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(updates[0]).toMatchObject({ discount_ends_at: endsAt })
+    expect(updates[0]).not.toHaveProperty('discount_percent')
+  })
+
+  it('PUT setting discountEndsAt while explicitly nulling the percent → 400 discount_ends_requires_percent', async () => {
+    const res = await app.inject({
+      method: 'PUT', url: '/admin/premium/plans/p1', headers,
+      payload: { discountPercent: null, discountEndsAt: '2026-09-01T00:00:00.000Z' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'discount_ends_requires_percent' })
+  })
+
+  it('PUT clearing discountEndsAt to null is valid', async () => {
+    const updates: any[] = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_plans') {
+        return {
+          update: (p: any) => {
+            updates.push(p)
+            return { eq: () => ({ select: () => ({ maybeSingle: () => chainable({ data: { ...PLAN_ROW, discount_ends_at: null }, error: null }) }) }) }
+          },
+        } as any
+      }
+      return chainable({ data: null })
+    })
+    const res = await app.inject({
+      method: 'PUT', url: '/admin/premium/plans/p1', headers,
+      payload: { discountEndsAt: null },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(updates[0]).toMatchObject({ discount_ends_at: null })
   })
 
   it('409s deleting a plan that has transactions', async () => {

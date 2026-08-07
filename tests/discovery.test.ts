@@ -2,10 +2,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
 vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
+vi.mock('../src/premium/swipeLimit.js', () => ({
+  getSwipeLimitStatus: vi.fn().mockResolvedValue({ limited: false, resetAt: null }),
+}))
 
 import { buildApp } from '../src/server.js'
 import { verifyInitData } from '../src/auth.js'
 import { db } from '../src/db.js'
+import { getSwipeLimitStatus } from '../src/premium/swipeLimit.js'
 
 const AUTH = { authorization: 'valid_init_data' }
 const USER_ID = 'user-uuid-1'
@@ -60,7 +64,7 @@ describe('GET /discovery', () => {
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
 
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ profiles: [], exhausted: true })
+    expect(res.json()).toEqual({ profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null } })
   })
 
   it('returns profiles with photos sorted by position', async () => {
@@ -189,7 +193,7 @@ describe('GET /discovery', () => {
 
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ profiles: [], exhausted: true })
+    expect(res.json()).toEqual({ profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null } })
   })
 
   it('boosts a liker to the top of the batch, city profile second', async () => {
@@ -272,8 +276,52 @@ describe('GET /discovery', () => {
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
 
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ profiles: [], exhausted: true })
+    expect(res.json()).toEqual({ profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null } })
     // auth + viewer + swipes + blocks + likerSwipes + rest = exactly 6 db calls
     expect(vi.mocked(db.from)).toHaveBeenCalledTimes(6)
+  })
+
+  it('includes swipeLimit status in the response', async () => {
+    setupAuth()
+
+    // viewer lookup — looking_for: women → genderFilter = 'woman'
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women' }, error: null }) }) }),
+    } as any)
+    // recent swipes
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
+    } as any)
+    // blocks (both directions via .or())
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ or: () => ({ data: [], error: null }) }),
+    } as any)
+    // liker swipes — nobody has liked the viewer
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+    } as any)
+    // profiles query: eq(is_active) → eq(gender) → not(id) → order → limit
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({
+        eq: () => ({
+          is: () => ({
+            eq: () => ({
+              not: () => ({
+                order: () => ({
+                  limit: () => ({ data: [], error: null }),
+                }),
+              }),
+            }),
+          }),
+        }),
+      }),
+    } as any)
+
+    vi.mocked(getSwipeLimitStatus).mockResolvedValueOnce({ limited: true, resetAt: '2026-08-07T16:00:00.000Z' })
+
+    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().swipeLimit).toEqual({ limited: true, resetAt: '2026-08-07T16:00:00.000Z' })
   })
 })

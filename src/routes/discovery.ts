@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 import { interleaveBatch, escapeIlike } from '../discoveryRanking.js'
+import { getSwipeLimitStatus } from '../premium/swipeLimit.js'
 
 const BATCH_SIZE = 10
 const MAX_LIKER_SLOTS = 4
@@ -25,6 +26,8 @@ export async function discoveryRoutes(app: FastifyInstance) {
       .single()
 
     if (!viewer) return reply.status(404).send({ error: 'user_not_found' })
+
+    const swipeLimit = await getSwipeLimitStatus(req.userId)
 
     const recycleTime = new Date(Date.now() - PASS_RECYCLE_MS).toISOString()
 
@@ -131,6 +134,6 @@ export async function discoveryRoutes(app: FastifyInstance) {
         .map((ph: any) => ph.url),
     }))
 
-    return { profiles: formatted, exhausted: formatted.length === 0 }
+    return { profiles: formatted, exhausted: formatted.length === 0, swipeLimit }
   })
 }

@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 import { notifyMatch } from '../bot.js'
+import { checkAndCountSwipe } from '../premium/swipeLimit.js'
 
 export async function swipesRoutes(app: FastifyInstance) {
   app.post('/swipes', {
@@ -15,6 +16,12 @@ export async function swipesRoutes(app: FastifyInstance) {
 
     if (targetUserId === req.userId) return reply.status(400).send({ error: 'cannot_swipe_self' })
 
+    const limit = await checkAndCountSwipe(req.userId)
+    if (limit.blocked) return reply.status(403).send({ error: 'swipe_limit', resetAt: limit.resetAt })
+    // Spread into every success payload so the client can flip to the limited
+    // screen right after the 20th swipe instead of failing the 21st.
+    const swipeLimit = limit.swipeLimit ? { swipeLimit: limit.swipeLimit } : {}
+
     // Upsert swipe — a later swipe on the same pair (e.g. liking someone you
     // previously passed on, once the pass recycles back into the feed) must
     // overwrite the stored direction rather than silently no-op on conflict.
@@ -27,7 +34,7 @@ export async function swipesRoutes(app: FastifyInstance) {
 
     if (swipeErr) return reply.status(500).send({ error: 'swipe_failed' })
 
-    if (direction === 'pass') return { matched: false }
+    if (direction === 'pass') return { matched: false, ...swipeLimit }
 
     // Check for reverse like
     const { data: reverseSwipe } = await db
@@ -38,7 +45,7 @@ export async function swipesRoutes(app: FastifyInstance) {
       .eq('direction', 'like')
       .single()
 
-    if (!reverseSwipe) return { matched: false }
+    if (!reverseSwipe) return { matched: false, ...swipeLimit }
 
     // Normalise pair order so UNIQUE(user1_id, user2_id) is deterministic
     const [u1, u2] = [req.userId, targetUserId].sort()
@@ -49,7 +56,7 @@ export async function swipesRoutes(app: FastifyInstance) {
       .select('id')
       .single()
 
-    if (matchErr?.code === '23505') return { matched: false } // race — already matched
+    if (matchErr?.code === '23505') return { matched: false, ...swipeLimit } // race — already matched
     if (matchErr) return reply.status(500).send({ error: 'match_failed' })
 
     // Fetch both users for notification
@@ -60,7 +67,7 @@ export async function swipesRoutes(app: FastifyInstance) {
 
     if (usersErr || !users || users.length < 2) {
       // Match was created, but we can't build the response — return minimal success
-      return { matched: true, match: { id: match!.id, user: { id: targetUserId, name: '', telegramId: 0, username: null } } }
+      return { matched: true, ...swipeLimit, match: { id: match!.id, user: { id: targetUserId, name: '', telegramId: 0, username: null } } }
     }
 
     const me = users.find((u: { id: string }) => u.id === req.userId)!
@@ -89,6 +96,7 @@ export async function swipesRoutes(app: FastifyInstance) {
 
     return {
       matched: true,
+      ...swipeLimit,
       match: {
         id: match!.id,
         user: { id: them.id, name: them.name, telegramId: them.telegram_id, username: them.username },

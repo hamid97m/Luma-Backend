@@ -53,6 +53,31 @@ export type SwipeLimitCheck =
   | { blocked: true; resetAt: string }
   | { blocked: false; swipeLimit: { remaining: number; resetAt: string } | null }
 
+/**
+ * Optimistic-concurrency write: only persists the new window state if
+ * swipe_window_count still matches what we last read. Two parallel requests
+ * reading the same count would otherwise both write count+1, letting a
+ * scripted client overshoot the limit — the `.eq('swipe_window_count', ...)`
+ * guard means only the first writer's update actually matches a row.
+ * Returns 'ok' | 'lost' (0 rows matched — someone else won the race) |
+ * 'dbError' (couldn't persist at all).
+ */
+async function guardedWindowUpdate(
+  userId: string,
+  expectedCount: number,
+  w: SwipeWindow,
+): Promise<'ok' | 'lost' | 'dbError'> {
+  const { data, error } = await db
+    .from('users')
+    .update({ swipe_window_started_at: w.nextStartedAt, swipe_window_count: w.nextCount })
+    .eq('id', userId)
+    .eq('swipe_window_count', expectedCount)
+    .select('id')
+  if (error) return 'dbError'
+  if (!data || data.length === 0) return 'lost'
+  return 'ok'
+}
+
 /** Gate + counter for POST /swipes: blocks at the limit, otherwise counts this swipe. */
 export async function checkAndCountSwipe(userId: string, nowMs = Date.now()): Promise<SwipeLimitCheck> {
   const me = await loadLimitedUser(userId, nowMs)
@@ -61,14 +86,29 @@ export async function checkAndCountSwipe(userId: string, nowMs = Date.now()): Pr
   const w = evaluateSwipeWindow(me.swipe_window_started_at ?? null, me.swipe_window_count ?? 0, nowMs)
   if (w.blocked) return { blocked: true, resetAt: w.resetAt }
 
-  const { error } = await db
+  const first = await guardedWindowUpdate(userId, me.swipe_window_count ?? 0, w)
+  if (first === 'ok') return { blocked: false, swipeLimit: { remaining: w.remaining!, resetAt: w.resetAt } }
+  // Couldn't persist the counter at all — fail open without limit info
+  // rather than showing the user a countdown we didn't actually record.
+  if (first === 'dbError') return { blocked: false, swipeLimit: null }
+
+  // Lost the race — a concurrent request updated the count first. Re-read
+  // once and re-run the window evaluation against the fresh count.
+  const { data: retryRow, error: retryError } = await db
     .from('users')
-    .update({ swipe_window_started_at: w.nextStartedAt, swipe_window_count: w.nextCount })
+    .select(WINDOW_COLUMNS)
     .eq('id', userId)
-  // Couldn't persist the counter — fail open without limit info rather than
-  // showing the user a countdown we didn't actually record.
-  if (error) return { blocked: false, swipeLimit: null }
-  return { blocked: false, swipeLimit: { remaining: w.remaining!, resetAt: w.resetAt } }
+    .single()
+  if (retryError || !retryRow) return { blocked: false, swipeLimit: null }
+
+  const retryW = evaluateSwipeWindow(retryRow.swipe_window_started_at ?? null, retryRow.swipe_window_count ?? 0, nowMs)
+  if (retryW.blocked) return { blocked: true, resetAt: retryW.resetAt }
+
+  const second = await guardedWindowUpdate(userId, retryRow.swipe_window_count ?? 0, retryW)
+  if (second === 'ok') return { blocked: false, swipeLimit: { remaining: retryW.remaining!, resetAt: retryW.resetAt } }
+  // Lost twice in a row — fail open, matching the module's existing
+  // fail-open philosophy rather than blocking a legitimate swipe.
+  return { blocked: false, swipeLimit: null }
 }
 
 /** Read-only status for GET /discovery (never counts). */

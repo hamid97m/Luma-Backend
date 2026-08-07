@@ -75,4 +75,27 @@ describe('POST /swipes — swipe limit', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ matched: false })
   })
+
+  it('includes swipeLimit in the response for a like with no reverse swipe (no match)', async () => {
+    setupAuth()
+    vi.mocked(checkAndCountSwipe).mockResolvedValue({
+      blocked: false, swipeLimit: { remaining: 0, resetAt: RESET_AT },
+    })
+    // swipes upsert
+    vi.mocked(db.from).mockReturnValueOnce({
+      upsert: vi.fn().mockReturnValue({ error: null }),
+    } as any)
+    // reverse-swipe select — no reverse like recorded
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: null }) }) }) }) }),
+    } as any)
+
+    const res = await app.inject({
+      method: 'POST', url: '/swipes', headers: AUTH,
+      payload: { targetUserId: TARGET_ID, direction: 'like' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ matched: false, swipeLimit: { remaining: 0, resetAt: RESET_AT } })
+  })
 })

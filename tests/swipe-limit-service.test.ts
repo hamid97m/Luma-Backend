@@ -76,13 +76,62 @@ describe('evaluateSwipeWindow', () => {
   })
 })
 
-/** users-select then users-update chain mock for checkAndCountSwipe. */
+/** users-select then users-guarded-update chain mock for checkAndCountSwipe. */
 function mockUserRow(row: Record<string, unknown> | null, opts?: { selectError?: boolean; updateError?: boolean; onUpdate?: (patch: any) => void }) {
   vi.mocked(db.from).mockImplementation(((table: string) => {
     if (table !== 'users') throw new Error(`unexpected table ${table}`)
     return {
       select: () => ({ eq: () => ({ single: () => (opts?.selectError ? { data: null, error: { message: 'boom' } } : { data: row, error: null }) }) }),
-      update: (patch: any) => { opts?.onUpdate?.(patch); return { eq: () => ({ error: opts?.updateError ? { message: 'boom' } : null }) } },
+      update: (patch: any) => {
+        opts?.onUpdate?.(patch)
+        return {
+          eq: () => ({
+            eq: () => ({
+              select: () => (opts?.updateError
+                ? { data: null, error: { message: 'boom' } }
+                : { data: [{ id: 'u1' }], error: null }),
+            }),
+          }),
+        }
+      },
+    }
+  }) as any)
+}
+
+/**
+ * users-select then a guarded-update chain whose select() result is driven
+ * by a per-call sequence — lets tests simulate a first update losing the
+ * optimistic-concurrency race and a retry re-read seeing a fresh count.
+ */
+function mockUserRowSequence(
+  selects: Array<Record<string, unknown> | null>,
+  updates: Array<{ data: Array<{ id: string }> | null; error?: { message: string } | null }>,
+) {
+  let selectCall = 0
+  let updateCall = 0
+  vi.mocked(db.from).mockImplementation(((table: string) => {
+    if (table !== 'users') throw new Error(`unexpected table ${table}`)
+    return {
+      select: () => ({
+        eq: () => ({
+          single: () => {
+            const row = selects[Math.min(selectCall, selects.length - 1)]
+            selectCall++
+            return { data: row, error: null }
+          },
+        }),
+      }),
+      update: () => ({
+        eq: () => ({
+          eq: () => ({
+            select: () => {
+              const res = updates[Math.min(updateCall, updates.length - 1)]
+              updateCall++
+              return { data: res.data, error: res.error ?? null }
+            },
+          }),
+        }),
+      }),
     }
   }) as any)
 }
@@ -143,6 +192,53 @@ describe('checkAndCountSwipe', () => {
     vi.mocked(isPremiumEnabled).mockResolvedValue(true)
     const res = await checkAndCountSwipe('u1', NOW)
     expect(res).toEqual({ blocked: false, swipeLimit: null })
+  })
+
+  describe('optimistic-concurrency retry', () => {
+    const start = iso(NOW - 60_000)
+
+    it('retries and succeeds when the guarded update loses the race once', async () => {
+      // Initial read sees count=5; a concurrent writer bumps it to 6 before
+      // our guarded update runs, so the first attempt (expecting 5) loses.
+      // The retry re-read sees 6, re-evaluates (still under the limit), and
+      // the second guarded update (expecting 6) succeeds.
+      mockUserRowSequence(
+        [{ ...LIMITED_USER, swipe_window_started_at: start, swipe_window_count: 5 },
+         { ...LIMITED_USER, swipe_window_started_at: start, swipe_window_count: 6 }],
+        [{ data: [] }, { data: [{ id: 'u1' }] }],
+      )
+      vi.mocked(isPremiumEnabled).mockResolvedValue(true)
+      const res = await checkAndCountSwipe('u1', NOW)
+      expect(res).toEqual({
+        blocked: false,
+        swipeLimit: { remaining: SWIPE_LIMIT - 7, resetAt: iso(NOW - 60_000 + SWIPE_WINDOW_MS) },
+      })
+    })
+
+    it('fails open when the guarded update loses the race twice', async () => {
+      mockUserRowSequence(
+        [{ ...LIMITED_USER, swipe_window_started_at: start, swipe_window_count: 5 },
+         { ...LIMITED_USER, swipe_window_started_at: start, swipe_window_count: 6 }],
+        [{ data: [] }, { data: [] }],
+      )
+      vi.mocked(isPremiumEnabled).mockResolvedValue(true)
+      const res = await checkAndCountSwipe('u1', NOW)
+      expect(res).toEqual({ blocked: false, swipeLimit: null })
+    })
+
+    it('blocks when the retry re-read shows the count now at the limit', async () => {
+      // Initial read sees count=19 (one swipe left); a concurrent writer
+      // pushes it to the limit (20) before our guarded update lands, so the
+      // retry re-evaluation blocks instead of attempting a second update.
+      mockUserRowSequence(
+        [{ ...LIMITED_USER, swipe_window_started_at: start, swipe_window_count: 19 },
+         { ...LIMITED_USER, swipe_window_started_at: start, swipe_window_count: 20 }],
+        [{ data: [] }],
+      )
+      vi.mocked(isPremiumEnabled).mockResolvedValue(true)
+      const res = await checkAndCountSwipe('u1', NOW)
+      expect(res).toEqual({ blocked: true, resetAt: iso(NOW - 60_000 + SWIPE_WINDOW_MS) })
+    })
   })
 })
 

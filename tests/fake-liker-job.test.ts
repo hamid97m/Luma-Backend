@@ -388,6 +388,57 @@ describe('runFakeLikerJob — salam phase', () => {
     expect(res.salamsSent).toBe(0)
     expect(logs.inserts.messages).toBeUndefined()
   })
+
+  it('orders the salam match queries by created_at descending', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [mkFake('f1'), mkUser('r1', { looking_for: 'men', created_at: OLD, last_active: RECENT })],
+      matches: [{ id: 'm1', user1_id: 'f1', user2_id: 'r1', created_at: OLD }],
+    }
+    useStore(store)
+    const orders: Array<{ col: string; ascending: boolean }> = []
+    const realFrom = vi.mocked(db.from).getMockImplementation()!
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      const qb = realFrom(table) as any
+      const origOrder = qb.order.bind(qb)
+      qb.order = (col: string, opts?: { ascending?: boolean }) => {
+        if (table === 'matches') orders.push({ col, ascending: opts?.ascending !== false })
+        return origOrder(col, opts)
+      }
+      return qb
+    })
+    await runFakeLikerJob('schedule', silent)
+    // both user1_id and user2_id match queries must order created_at desc
+    expect(orders).toEqual([
+      { col: 'created_at', ascending: false },
+      { col: 'created_at', ascending: false },
+    ])
+  })
+
+  it('salams the newest zero-message match when merged candidates exceed the cap', async () => {
+    // Build > SALAM_CAP (200) fake-involved matches. The oldest ones already have
+    // messages; only the single NEWEST match is zero-message. Without recency
+    // ordering + a recency-based cap, that newest match would be starved out of
+    // the 200-row window and never salam'd.
+    const CAP = 200
+    const users: any[] = [mkFake('f1', { name: 'Sara' })]
+    const matches: any[] = []
+    const messages: any[] = []
+    for (let i = 0; i < CAP + 50; i++) {
+      const rid = `r${i}`
+      // ascending created_at with i; the last index is the newest.
+      const created = `2020-01-01T00:00:${String(i).padStart(2, '0')}.000Z`
+      users.push(mkUser(rid, { looking_for: 'men', created_at: OLD, last_active: RECENT }))
+      matches.push({ id: `m${i}`, user1_id: 'f1', user2_id: rid, created_at: created })
+      // every match EXCEPT the newest already has a message
+      if (i !== CAP + 49) messages.push({ match_id: `m${i}`, sender_id: rid, body: 'hey' })
+    }
+    const store: Store = { fake_liker_config: enabledConfig(), users, matches, messages }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    expect(res.salamsSent).toBe(1)
+    expect(logs.inserts.messages).toEqual([{ match_id: `m${CAP + 49}`, sender_id: 'f1', body: 'salam' }])
+  })
 })
 
 describe('runFakeLikerJob — salam notification gating', () => {

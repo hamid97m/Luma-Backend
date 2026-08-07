@@ -77,9 +77,10 @@ export async function runFakeLikerJob(
 
   const startedAt = new Date()
   const stats: RunStats = { likesSent: 0, matchesCreated: 0, salamsSent: 0, skipped: 0, errors: 0 }
-  logger.info({ trigger }, 'fake liker run started')
 
   try {
+    logger.info({ trigger }, 'fake liker run started')
+
     // --- Fake pool: active, non-banned women seeds ---
     const { data: pool, error: poolErr } = await db
       .from('users')
@@ -240,18 +241,24 @@ export async function runFakeLikerJob(
     // Runs every time (independent of the like phase) so it also seeds matches the real
     // swipe route created. Two `.in` queries + dedupe stand in for an OR anti-join.
     const fakeIdSet = new Set(fakeIds)
-    const matchMap = new Map<string, { id: string; user1_id: string; user2_id: string }>()
+    const matchMap = new Map<string, { id: string; user1_id: string; user2_id: string; created_at: string }>()
     for (const col of ['user1_id', 'user2_id'] as const) {
       const { data: rows } = await db
         .from('matches')
-        .select('id, user1_id, user2_id')
+        .select('id, user1_id, user2_id, created_at')
         .in(col, fakeIds)
+        .order('created_at', { ascending: false })
         .limit(SALAM_CAP)
-      for (const m of (rows ?? []) as Array<{ id: string; user1_id: string; user2_id: string }>) {
+      for (const m of (rows ?? []) as Array<{ id: string; user1_id: string; user2_id: string; created_at: string }>) {
         matchMap.set(m.id, m)
       }
     }
-    const candidateMatches = [...matchMap.values()].slice(0, SALAM_CAP)
+    // Each query returns its own newest-200 window; merging can exceed the cap, so
+    // re-sort by recency and apply the cap on recency (not query-arrival order) —
+    // the newest matches (most likely to still need their first salam) always win.
+    const candidateMatches = [...matchMap.values()]
+      .sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))
+      .slice(0, SALAM_CAP)
 
     if (candidateMatches.length > 0) {
       // Real users on the non-fake side (skip both-fake matches).

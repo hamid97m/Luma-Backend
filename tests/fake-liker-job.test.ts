@@ -16,7 +16,15 @@ import { runFakeLikerJob } from '../src/jobs/fakeLiker.js'
 // swipes/matches UNIQUE(...) constraints (23505) from the real DB.
 // ---------------------------------------------------------------------------
 
-type Store = Record<string, any[]> & { __failInsert?: Record<string, boolean> }
+type Store = Record<string, any[]> & {
+  __failInsert?: Record<string, boolean>
+  // Fault-injection hooks, all keyed by table (supabase-js never throws — it resolves
+  // an `{ error }`, so these simulate that path per query shape):
+  __failSelect?: Record<string, boolean> // plain multi-row select resolves an error
+  __failCount?: Record<string, boolean> // head/count select resolves an error
+  __failSingle?: Record<string, boolean> // single()/maybeSingle() select resolves an error
+  __failCountMatch?: Set<string> // head/count select whose eq('match_id', x) has x ∈ set errors
+}
 interface Logs {
   inserts: Record<string, any[]>
   updates: Array<{ table: string; patch: any; filters: any[] }>
@@ -32,11 +40,17 @@ class QB {
   private _update: any = null
   private _selected = false
   private _single: 'single' | 'maybe' | null = null
+  private _count = false
+  private _head = false
 
   constructor(private table: string, private store: Store, private logs: Logs) {}
 
-  select(_cols?: string) {
+  select(_cols?: string, opts?: { count?: string; head?: boolean }) {
     if (this.op === 'insert') this._selected = true
+    if (opts?.count) {
+      this._count = true
+      this._head = !!opts.head
+    }
     return this
   }
   insert(row: any) { this.op = 'insert'; this._insert = row; return this }
@@ -79,7 +93,19 @@ class QB {
   private resolve() {
     if (this.op === 'select') {
       const rows = this.rows()
-      if (this._single) return { data: rows[0] ?? null, error: null }
+      if (this._count) {
+        if (this.store.__failCount?.[this.table]) return { data: null, count: null, error: { code: 'XX', message: 'count fail' } }
+        const matchFilter = this.filters.find(([t, col]) => t === 'eq' && col === 'match_id')
+        if (matchFilter && this.store.__failCountMatch?.has(matchFilter[2])) {
+          return { data: null, count: null, error: { code: 'XX', message: 'count fail' } }
+        }
+        return { data: this._head ? null : rows, count: rows.length, error: null }
+      }
+      if (this._single) {
+        if (this.store.__failSingle?.[this.table]) return { data: null, error: { code: 'XX', message: 'single fail' } }
+        return { data: rows[0] ?? null, error: null }
+      }
+      if (this.store.__failSelect?.[this.table]) return { data: null, error: { code: 'XX', message: 'select fail' } }
       return { data: rows, error: null }
     }
     if (this.op === 'update') {
@@ -140,6 +166,7 @@ function enabledConfig(max = 100) {
 }
 
 const silent = { info: () => {}, warn: () => {} }
+const mkLogger = () => ({ info: vi.fn(), warn: vi.fn() })
 const flush = () => new Promise((r) => setImmediate(r))
 
 beforeEach(() => vi.clearAllMocks())
@@ -513,6 +540,155 @@ describe('runFakeLikerJob — run row', () => {
     expect(row.started_at).toBeTruthy()
     expect(row.finished_at).toBeTruthy()
     expect(res).toMatchObject({ likesSent: 1, matchesCreated: 1, salamsSent: 1 })
+  })
+})
+
+describe('runFakeLikerJob — error handling (supabase-js resolves, never throws)', () => {
+  const realOpts = { looking_for: 'men', created_at: OLD }
+
+  it('seeds counters via head-count queries, not a raw-row fetch', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [mkFake('A'), mkFake('B'), mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both' })],
+      swipes: [
+        { swiper_id: 'A', swiped_id: 'x', direction: 'like' },
+        { swiper_id: 'A', swiped_id: 'y', direction: 'like' },
+      ],
+    }
+    const logs = useStore(store)
+    const seedSelects: Array<{ head?: boolean }> = []
+    const realFrom = vi.mocked(db.from).getMockImplementation()!
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      const qb = realFrom(table) as any
+      const origSelect = qb.select.bind(qb)
+      qb.select = (cols?: string, opts?: { count?: string; head?: boolean }) => {
+        if (table === 'swipes' && opts?.count) seedSelects.push({ head: opts.head })
+        return origSelect(cols, opts)
+      }
+      return qb
+    })
+    await runFakeLikerJob('schedule', silent)
+    // A had 2 historical likes → B (0) wins the like; and the seeding used head counts.
+    expect(seedSelects.length).toBeGreaterThanOrEqual(2)
+    expect(seedSelects.every((s) => s.head === true)).toBe(true)
+    expect(logs.inserts.swipes.map((s: any) => [s.swiper_id, s.swiped_id])).toEqual([['B', 't1']])
+  })
+
+  it('zeroes a fake counter and warns when the counter head-count errors', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [mkFake('A'), mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both' })],
+      __failCount: { swipes: true },
+    }
+    const logs = useStore(store)
+    const logger = mkLogger()
+    const res = (await runFakeLikerJob('schedule', logger)) as any
+    // Counter zeroed on error → the fake still likes; a warn is logged.
+    expect(res.likesSent).toBe(1)
+    expect(logs.inserts.swipes.map((s: any) => s.swiped_id)).toEqual(['t1'])
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ fake: 'A' }), expect.stringContaining('counter seed'))
+  })
+
+  it('skips a whole candidate batch (no likes) when the received-like fetch errors', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [mkFake('f1'), mkUser('ok', { created_at: OLD, gender: 'man', looking_for: 'both' })],
+      __failSelect: { swipes: true },
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    expect(res.likesSent).toBe(0)
+    expect(res.errors).toBeGreaterThanOrEqual(1)
+    expect(logs.inserts.swipes).toBeUndefined()
+  })
+
+  it('pages the received-like lookup beyond one page (page-size boundary)', async () => {
+    // One eligible candidate 'c1' with exactly PAGE_SIZE (1000) received likes → the
+    // first page fills to the cap, so a second `.range()` page must be requested.
+    const users: any[] = [mkFake('f1'), mkUser('c1', { created_at: OLD, gender: 'man', looking_for: 'both' })]
+    const swipes: any[] = []
+    for (let i = 0; i < 1000; i++) swipes.push({ swiper_id: `s${i}`, swiped_id: 'c1', direction: 'like' })
+    const store: Store = { fake_liker_config: enabledConfig(), users, swipes }
+    useStore(store)
+    const ranges: Array<[number, number]> = []
+    const realFrom = vi.mocked(db.from).getMockImplementation()!
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      const qb = realFrom(table) as any
+      const origRange = qb.range.bind(qb)
+      qb.range = (from: number, to: number) => {
+        if (table === 'swipes') ranges.push([from, to])
+        return origRange(from, to)
+      }
+      return qb
+    })
+    await runFakeLikerJob('schedule', silent)
+    // Page 1 was full (1000) so page 2 was requested.
+    expect(ranges).toContainEqual([0, 999])
+    expect(ranges).toContainEqual([1000, 1999])
+  })
+
+  it('sends no salam (and counts errors) when every message-count query errors', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [mkFake('f1'), mkUser('r1', { ...realOpts, last_active: RECENT })],
+      matches: [{ id: 'm1', user1_id: 'f1', user2_id: 'r1' }],
+      __failCount: { messages: true },
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    expect(res.salamsSent).toBe(0)
+    expect(res.errors).toBeGreaterThanOrEqual(1)
+    expect(logs.inserts.messages).toBeUndefined()
+  })
+
+  it('a per-match message-count error skips only that match', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1', { name: 'Sara' }),
+        mkUser('r1', { ...realOpts, last_active: RECENT }),
+        mkUser('r2', { ...realOpts, last_active: RECENT }),
+      ],
+      matches: [
+        { id: 'm1', user1_id: 'f1', user2_id: 'r1' },
+        { id: 'm2', user1_id: 'f1', user2_id: 'r2' },
+      ],
+      __failCountMatch: new Set(['m2']),
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    expect(res.salamsSent).toBe(1)
+    expect(res.errors).toBeGreaterThanOrEqual(1)
+    expect(logs.inserts.messages).toEqual([{ match_id: 'm1', sender_id: 'f1', body: 'salam' }])
+  })
+
+  it('warns when the run-row insert errors (supabase-js resolves it, not throws)', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [mkFake('f1')],
+      __failInsert: { fake_liker_runs: true },
+    }
+    useStore(store)
+    const logger = mkLogger()
+    await runFakeLikerJob('schedule', logger)
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ err: expect.anything() }), expect.stringContaining('run row insert failed'))
+  })
+
+  it('a reverse-like check error creates no match and counts an error', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1'),
+        mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', last_active: RECENT }),
+      ],
+      __failSingle: { swipes: true },
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    expect(res.likesSent).toBe(1)
+    expect(res.matchesCreated).toBe(0)
+    expect(res.errors).toBeGreaterThanOrEqual(1)
+    expect(logs.inserts.matches).toBeUndefined()
   })
 })
 

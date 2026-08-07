@@ -19,6 +19,7 @@ interface JobLogger {
 const FOUR_HOURS_MS = 4 * 60 * 60 * 1000
 const OFFLINE_THRESHOLD_MS = 10 * 60 * 1000
 const CANDIDATE_BATCH = 200
+const RECEIVED_LIKE_PAGE_SIZE = 1000
 const SCAN_CAP = 2000
 const SALAM_CAP = 200
 const TARGET_LOOKING_FOR = ['women', 'both', 'everyone']
@@ -101,14 +102,22 @@ export async function runFakeLikerJob(
     if (fakeIds.length === 0) return stats // no fakes → record a zeroed run and finish
 
     // --- Seed per-fake like counters from history (for load balancing) ---
-    const { data: counterRows } = await db
-      .from('swipes')
-      .select('swiper_id')
-      .in('swiper_id', fakeIds)
-      .eq('direction', 'like')
+    // Per-fake head counts, not a raw-row fetch: an unbounded `select` over every fake
+    // like truncates at PostgREST's max-rows cap (~1000) once fakes accumulate that many
+    // cumulative likes, skewing balancing. The pool is small (~tens), so per-fake is cheap.
     const counters: Record<string, number> = {}
-    for (const r of (counterRows ?? []) as Array<{ swiper_id: string }>) {
-      counters[r.swiper_id] = (counters[r.swiper_id] ?? 0) + 1
+    for (const f of (pool ?? []) as Array<{ id: string }>) {
+      const { count, error: cntErr } = await db
+        .from('swipes')
+        .select('id', { count: 'exact', head: true })
+        .eq('swiper_id', f.id)
+        .eq('direction', 'like')
+      if (cntErr) {
+        logger.warn({ err: cntErr, fake: f.id }, 'fake liker: counter seed failed')
+        counters[f.id] = 0
+        continue
+      }
+      counters[f.id] = count ?? 0
     }
 
     // --- Fake primary photos (lowest position) for notifications ---
@@ -160,12 +169,37 @@ export async function runFakeLikerJob(
       scanned += rows.length
 
       const ids = rows.map((r) => r.id)
-      const { data: liked } = await db
-        .from('swipes')
-        .select('swiped_id')
-        .in('swiped_id', ids)
-        .eq('direction', 'like')
-      const likedSet = new Set((liked ?? []).map((l: { swiped_id: string }) => l.swiped_id))
+      // Page the received-like lookup fully: a single unbounded `.in()` truncates at
+      // PostgREST's max-rows cap, and on truncation/error the batch would look like it has
+      // zero received likes (fakes would then like already-liked users). On error we skip
+      // the whole batch rather than silently treat it as zero.
+      const likedSet = new Set<string>()
+      let likedOffset = 0
+      let likedFailed = false
+      for (;;) {
+        const { data: liked, error: likedErr } = await db
+          .from('swipes')
+          .select('swiped_id')
+          .in('swiped_id', ids)
+          .eq('direction', 'like')
+          .range(likedOffset, likedOffset + RECEIVED_LIKE_PAGE_SIZE - 1)
+        if (likedErr) {
+          stats.errors++
+          logger.warn({ err: likedErr }, 'fake liker: received-like fetch failed')
+          likedFailed = true
+          break
+        }
+        const likedRows = (liked ?? []) as Array<{ swiped_id: string }>
+        for (const l of likedRows) likedSet.add(l.swiped_id)
+        if (likedRows.length < RECEIVED_LIKE_PAGE_SIZE) break
+        likedOffset += RECEIVED_LIKE_PAGE_SIZE
+      }
+      if (likedFailed) {
+        // Skip this candidate batch; keep the outer scan advancing exactly as normal.
+        if (rows.length < CANDIDATE_BATCH) break
+        offset += CANDIDATE_BATCH
+        continue
+      }
 
       for (const cand of rows) {
         if (likedSet.has(cand.id)) continue
@@ -202,13 +236,20 @@ export async function runFakeLikerJob(
         stats.likesSent++
 
         // Reverse-like? (target already liked this fake) → it's a match.
-        const { data: reverse } = await db
+        const { data: reverse, error: reverseErr } = await db
           .from('swipes')
           .select('id')
           .eq('swiper_id', target.id)
           .eq('swiped_id', fake.id)
           .eq('direction', 'like')
           .maybeSingle()
+        if (reverseErr) {
+          // A transient error read as "no reverse like" would permanently miss the match
+          // (neither side re-swipes this pair). Skip match-creation instead.
+          stats.errors++
+          logger.warn({ err: reverseErr, fake: fake.id, target: target.id }, 'fake liker: reverse-like check failed')
+          continue
+        }
         if (!reverse) continue
 
         const [u1, u2] = [fake.id, target.id].sort()
@@ -276,9 +317,24 @@ export async function runFakeLikerJob(
         .in('id', [...realIds])
       const realMap = new Map((realUsers ?? []).map((u: any) => [u.id, u]))
 
-      const matchIds = candidateMatches.map((m) => m.id)
-      const { data: msgs } = await db.from('messages').select('match_id').in('match_id', matchIds)
-      const withMessages = new Set((msgs ?? []).map((x: { match_id: string }) => x.match_id))
+      // Which candidate matches are truly zero-message? Per-match head counts, not a
+      // single unbounded `.in()`: on truncation/error that membership query would make
+      // matches with an active conversation look zero-message, so the fake would send
+      // "salam" into it every run. On a count error we SKIP that match (never treat the
+      // error as "no messages"); a match only qualifies when its count is confirmed 0.
+      const zeroMessageMatchIds = new Set<string>()
+      for (const m of candidateMatches) {
+        const { count, error: countErr } = await db
+          .from('messages')
+          .select('id', { count: 'exact', head: true })
+          .eq('match_id', m.id)
+        if (countErr) {
+          stats.errors++
+          logger.warn({ err: countErr, match: m.id }, 'fake liker: message-count query failed')
+          continue
+        }
+        if ((count ?? 0) === 0) zeroMessageMatchIds.add(m.id)
+      }
 
       for (const m of candidateMatches) {
         try {
@@ -290,7 +346,7 @@ export async function runFakeLikerJob(
           const realId = u1Fake ? m.user2_id : m.user1_id
           const real: any = realMap.get(realId)
           if (!real || real.deleted_at || real.banned_at) continue // real side gone → skip
-          if (withMessages.has(m.id)) continue // already has messages → skip
+          if (!zeroMessageMatchIds.has(m.id)) continue // has messages, or count errored → skip
 
           const fake = fakes.find((f) => f.id === fakeId)
           if (!fake) continue
@@ -328,7 +384,7 @@ export async function runFakeLikerJob(
     return stats
   } finally {
     try {
-      await db.from('fake_liker_runs').insert({
+      const { error: runErr } = await db.from('fake_liker_runs').insert({
         trigger,
         started_at: startedAt.toISOString(),
         finished_at: new Date().toISOString(),
@@ -337,6 +393,9 @@ export async function runFakeLikerJob(
         salams_sent: stats.salamsSent,
         errors: stats.errors,
       })
+      // supabase-js resolves (never throws) on a failed insert — the surrounding
+      // try/catch alone would let the failure pass silently.
+      if (runErr) logger.warn({ err: runErr }, 'fake liker: run row insert failed')
     } catch (err) {
       logger.warn({ err }, 'fake liker: run row insert failed')
     }

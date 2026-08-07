@@ -58,21 +58,23 @@ export async function adminFakeLikerRoutes(app: FastifyInstance) {
       .is('deleted_at', null)
     if (poolErr) return reply.status(500).send({ error: 'stats_fetch_failed' })
 
-    const { data: runs, error: runsErr } = await db
-      .from('fake_liker_runs')
-      .select('started_at, likes_sent, matches_created, salams_sent')
-    if (runsErr) return reply.status(500).send({ error: 'stats_fetch_failed' })
+    // Aggregated server-side (not fetched-and-summed client-side): fake_liker_runs
+    // grows unbounded over time and an unordered unbounded `select` would silently
+    // truncate at PostgREST's max-rows cap, corrupting totals/lastRunAt once the
+    // table outgrows it.
+    const { data: totalsRow, error: totalsErr } = await db.rpc('fake_liker_run_totals').single()
+    if (totalsErr) return reply.status(500).send({ error: 'stats_fetch_failed' })
 
-    let totalLikesSent = 0
-    let totalMatchesCreated = 0
-    let totalSalamsSent = 0
-    let lastRunAt: string | null = null
-    for (const r of (runs ?? []) as Array<{ started_at: string; likes_sent: number; matches_created: number; salams_sent: number }>) {
-      totalLikesSent += r.likes_sent ?? 0
-      totalMatchesCreated += r.matches_created ?? 0
-      totalSalamsSent += r.salams_sent ?? 0
-      if (!lastRunAt || r.started_at > lastRunAt) lastRunAt = r.started_at
+    const totals = (totalsRow ?? {}) as {
+      total_likes_sent: number | string
+      total_matches_created: number | string
+      total_salams_sent: number | string
+      last_run_at: string | null
     }
+    const totalLikesSent = Number(totals.total_likes_sent ?? 0)
+    const totalMatchesCreated = Number(totals.total_matches_created ?? 0)
+    const totalSalamsSent = Number(totals.total_salams_sent ?? 0)
+    const lastRunAt = totals.last_run_at ?? null
 
     const perFake = await Promise.all(
       (pool ?? []).map(async (f: any) => {

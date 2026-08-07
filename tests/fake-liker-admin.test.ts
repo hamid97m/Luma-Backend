@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
+vi.mock('../src/db.js', () => ({ db: { from: vi.fn(), rpc: vi.fn() } }))
 vi.mock('../src/bot.js', () => ({}))
 vi.mock('../src/jobs/fakeLiker.js', () => ({ runFakeLikerJob: vi.fn() }))
 
@@ -134,6 +134,13 @@ describe('admin fake-liker run', () => {
     expect(res.statusCode).toBe(409)
     expect(res.json()).toEqual({ ok: false, error: 'already_running' })
   })
+
+  it('maps an unrecognized skip reason to 500 rather than guessing a status', async () => {
+    vi.mocked(runFakeLikerJob).mockResolvedValue({ skipped: 'something_else' })
+    const res = await app.inject({ method: 'POST', url: '/admin/fake-liker/run', headers })
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toEqual({ ok: false, error: 'something_else' })
+  })
 })
 
 describe('admin fake-liker stats', () => {
@@ -147,22 +154,18 @@ describe('admin fake-liker stats', () => {
     headers = { authorization: `Bearer ${signAdminToken({ adminId: 'a1', username: 'root' })}` }
   })
 
-  it('returns pool size, totals, last run, and per-fake breakdown', async () => {
+  it('returns pool size, totals (via rpc), last run, and per-fake breakdown', async () => {
     vi.mocked(db.from).mockImplementation((table: string) => {
       if (table === 'users') return chainable({ data: [{ id: 'f1', name: 'Fake One' }, { id: 'f2', name: 'Fake Two' }], error: null })
-      if (table === 'fake_liker_runs') {
-        return chainable({
-          data: [
-            { started_at: '2026-08-01T00:00:00Z', likes_sent: 10, matches_created: 2, salams_sent: 2 },
-            { started_at: '2026-08-05T00:00:00Z', likes_sent: 5, matches_created: 1, salams_sent: 1 },
-          ],
-          error: null,
-        })
-      }
       if (table === 'swipes') return chainable({ count: 4, error: null })
       if (table === 'matches') return chainable({ count: 2, error: null })
       return chainable({ data: null })
     })
+    // Postgres bigint aggregates arrive over PostgREST as strings — assert the route coerces them.
+    vi.mocked(db.rpc).mockReturnValue(chainable({
+      data: { total_likes_sent: '15', total_matches_created: '3', total_salams_sent: '3', last_run_at: '2026-08-05T00:00:00Z' },
+      error: null,
+    }))
     const res = await app.inject({ method: 'GET', url: '/admin/fake-liker/stats', headers })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({
@@ -176,14 +179,18 @@ describe('admin fake-liker stats', () => {
         { id: 'f2', name: 'Fake Two', likesSent: 4, matches: 2 },
       ],
     })
+    expect(db.rpc).toHaveBeenCalledWith('fake_liker_run_totals')
   })
 
   it('returns zeroed stats and null lastRunAt with an empty pool/history', async () => {
     vi.mocked(db.from).mockImplementation((table: string) => {
       if (table === 'users') return chainable({ data: [], error: null })
-      if (table === 'fake_liker_runs') return chainable({ data: [], error: null })
       return chainable({ data: null })
     })
+    vi.mocked(db.rpc).mockReturnValue(chainable({
+      data: { total_likes_sent: 0, total_matches_created: 0, total_salams_sent: 0, last_run_at: null },
+      error: null,
+    }))
     const res = await app.inject({ method: 'GET', url: '/admin/fake-liker/stats', headers })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({
@@ -201,6 +208,17 @@ describe('admin fake-liker stats', () => {
       if (table === 'users') return chainable({ data: null, error: { message: 'boom' } })
       return chainable({ data: null })
     })
+    const res = await app.inject({ method: 'GET', url: '/admin/fake-liker/stats', headers })
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toEqual({ error: 'stats_fetch_failed' })
+  })
+
+  it('500s when the totals rpc fails', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') return chainable({ data: [{ id: 'f1', name: 'Fake One' }], error: null })
+      return chainable({ data: null })
+    })
+    vi.mocked(db.rpc).mockReturnValue(chainable({ data: null, error: { message: 'boom' } }))
     const res = await app.inject({ method: 'GET', url: '/admin/fake-liker/stats', headers })
     expect(res.statusCode).toBe(500)
     expect(res.json()).toEqual({ error: 'stats_fetch_failed' })

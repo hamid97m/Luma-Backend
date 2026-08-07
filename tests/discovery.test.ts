@@ -36,6 +36,10 @@ describe('GET /discovery', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ or: () => ({ data: [], error: null }) }),
     } as any)
+    // liker swipes — nobody has liked the viewer
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+    } as any)
     // profiles query: eq(is_active) → eq(gender) → not(id) → order → limit
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({
@@ -73,6 +77,10 @@ describe('GET /discovery', () => {
     // blocks — empty (both directions via .or())
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ or: () => ({ data: [], error: null }) }),
+    } as any)
+    // liker swipes — nobody has liked the viewer
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
     } as any)
     // profiles query: eq(is_active) → eq(gender) → not(id) → order → limit
     vi.mocked(db.from).mockReturnValueOnce({
@@ -157,6 +165,10 @@ describe('GET /discovery', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ or: () => ({ data: [], error: null }) }),
     } as any)
+    // liker swipes — nobody has liked the viewer
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+    } as any)
     // profiles query: eq(is_active) → not(id) → order → limit  (NO gender eq)
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({
@@ -178,5 +190,90 @@ describe('GET /discovery', () => {
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ profiles: [], exhausted: true })
+  })
+
+  it('boosts a liker to the top of the batch, city profile second', async () => {
+    setupAuth()
+
+    // viewer — has a location so the city tier runs
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women', location: 'Tehran' }, error: null }) }) }),
+    } as any)
+    // recent swipes — empty
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
+    } as any)
+    // blocks — empty
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ or: () => ({ data: [], error: null }) }),
+    } as any)
+    // liker swipes — one person liked the viewer
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ data: [{ swiper_id: 'liker-1' }], error: null }) }) }),
+    } as any)
+    const profile = (id: string, location: string) => ({
+      id, name: 'N', age: 25, bio: null, telegram_id: 1,
+      interests: [], location, user_photos: [],
+    })
+    // liker profiles: select → eq → is → eq(gender) → in → order → limit
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ is: () => ({ eq: () => ({ in: () => ({ order: () => ({
+        limit: () => ({ data: [profile('liker-1', 'Tehran')], error: null }),
+      }) }) }) }) }) }),
+    } as any)
+    // same-city profiles: select → eq → is → eq(gender) → ilike → not → order → limit
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ is: () => ({ eq: () => ({ ilike: () => ({ not: () => ({ order: () => ({
+        limit: () => ({ data: [profile('city-1', 'Tehran')], error: null }),
+      }) }) }) }) }) }) }),
+    } as any)
+    // rest profiles: select → eq → is → eq(gender) → not → order → limit
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ is: () => ({ eq: () => ({ not: () => ({ order: () => ({
+        limit: () => ({ data: [profile('rest-1', 'Mashhad')], error: null }),
+      }) }) }) }) }) }),
+    } as any)
+
+    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    // liker at position 0, city fills position 1, rest follows — no liker marker in payload
+    expect(body.profiles.map((p: any) => p.id)).toEqual(['liker-1', 'city-1', 'rest-1'])
+    expect(body.profiles[0]).not.toHaveProperty('likedYou')
+  })
+
+  it('excludes already-swiped likers and skips the city tier without a location', async () => {
+    setupAuth()
+
+    // viewer — no location → city tier must be skipped
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'both', location: null }, error: null }) }) }),
+    } as any)
+    // recent swipes — viewer already liked 'liker-1' (they are matched or pending)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ or: () => ({ data: [{ swiped_id: 'liker-1' }], error: null }) }) }),
+    } as any)
+    // blocks — empty
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ or: () => ({ data: [], error: null }) }),
+    } as any)
+    // liker swipes — only the excluded liker → liker-profiles query must NOT run
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ data: [{ swiper_id: 'liker-1' }], error: null }) }) }),
+    } as any)
+    // rest profiles (no gender filter): select → eq → is → not → order → limit
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ is: () => ({ not: () => ({ order: () => ({
+        limit: () => ({ data: [], error: null }),
+      }) }) }) }) }),
+    } as any)
+
+    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ profiles: [], exhausted: true })
+    // auth + viewer + swipes + blocks + likerSwipes + rest = exactly 6 db calls
+    expect(vi.mocked(db.from)).toHaveBeenCalledTimes(6)
   })
 })

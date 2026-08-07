@@ -1,17 +1,26 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
+import { interleaveBatch, escapeIlike } from '../discoveryRanking.js'
 
 const BATCH_SIZE = 10
+const MAX_LIKER_SLOTS = 4
+const LIKER_POSITIONS = [0, 2, 4, 6]
 const PASS_RECYCLE_MS = 24 * 60 * 60 * 1000
+// Cap the id-list sent to the liker-profiles query; the newest likes are
+// not preferred here — any 500 likers is plenty to fill 4 slots.
+const MAX_LIKER_IDS = 500
+
+const PROFILE_COLUMNS =
+  'id, name, age, bio, telegram_id, interests, location, user_photos(id, url, position)'
 
 export async function discoveryRoutes(app: FastifyInstance) {
   app.get('/discovery', async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
-    // Get viewer's preference
+    // Get viewer's preference and city
     const { data: viewer } = await db
       .from('users')
-      .select('looking_for')
+      .select('looking_for, location')
       .eq('id', req.userId)
       .single()
 
@@ -44,32 +53,72 @@ export async function discoveryRoutes(app: FastifyInstance) {
       ...(recentSwipes?.map((s: { swiped_id: string }) => s.swiped_id) ?? []),
       ...blockedIds,
     ]
+    const excluded = new Set(excludeIds)
 
     // Map looking_for to gender filter — 'both'/'everyone' means no gender filter
     const genderFilter =
       viewer.looking_for === 'men' ? 'man' :
       viewer.looking_for === 'women' ? 'woman' : null
 
-    // Build base query up to is_active filter
-    const baseQuery = db
-      .from('users')
-      .select('id, name, age, bio, telegram_id, interests, location, user_photos(id, url, position)')
-      .eq('is_active', true)
-      .is('banned_at', null)
+    const profileQuery = () => {
+      const q = db
+        .from('users')
+        .select(PROFILE_COLUMNS)
+        .eq('is_active', true)
+        .is('banned_at', null)
+      return genderFilter ? (q as any).eq('gender', genderFilter) : (q as any)
+    }
 
-    // Apply gender filter before exclude and ordering
-    const filteredQuery = genderFilter
-      ? (baseQuery as any).eq('gender', genderFilter)
-      : baseQuery
+    // Tier 1: people who already liked the viewer (uses idx_swipes_match_check)
+    const { data: likerSwipes, error: likersErr } = await db
+      .from('swipes')
+      .select('swiper_id')
+      .eq('swiped_id', req.userId)
+      .eq('direction', 'like')
 
-    const { data: profiles, error } = await (filteredQuery as any)
-      .not('id', 'in', `(${excludeIds.join(',')})`)
+    if (likersErr) return reply.status(500).send({ error: 'discovery_failed' })
+
+    const likerIds = (likerSwipes ?? [])
+      .map((s: { swiper_id: string }) => s.swiper_id)
+      .filter((id: string) => !excluded.has(id))
+      .slice(0, MAX_LIKER_IDS)
+
+    let likers: any[] = []
+    if (likerIds.length > 0) {
+      const { data, error } = await profileQuery()
+        .in('id', likerIds)
+        .order('last_active', { ascending: false })
+        .limit(MAX_LIKER_SLOTS)
+      if (error) return reply.status(500).send({ error: 'discovery_failed' })
+      likers = data ?? []
+    }
+
+    // Tier 2: same city (case-insensitive exact match on free-text location)
+    const likerPickedIds = [...excludeIds, ...likers.map((p: any) => p.id)]
+    const city = (viewer.location ?? '').trim()
+    let sameCity: any[] = []
+    if (city) {
+      const { data, error } = await profileQuery()
+        .ilike('location', escapeIlike(city))
+        .not('id', 'in', `(${likerPickedIds.join(',')})`)
+        .order('last_active', { ascending: false })
+        .limit(BATCH_SIZE)
+      if (error) return reply.status(500).send({ error: 'discovery_failed' })
+      sameCity = data ?? []
+    }
+
+    // Tier 3: everyone else, most recently active first
+    const allPickedIds = [...likerPickedIds, ...sameCity.map((p: any) => p.id)]
+    const { data: rest, error } = await profileQuery()
+      .not('id', 'in', `(${allPickedIds.join(',')})`)
       .order('last_active', { ascending: false })
       .limit(BATCH_SIZE)
 
     if (error) return reply.status(500).send({ error: 'discovery_failed' })
 
-    const formatted = (profiles ?? []).map((p: any) => ({
+    const merged = interleaveBatch(likers, sameCity, rest ?? [], BATCH_SIZE, LIKER_POSITIONS)
+
+    const formatted = merged.map((p: any) => ({
       id: p.id,
       name: p.name,
       age: p.age,

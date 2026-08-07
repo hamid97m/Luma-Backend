@@ -29,7 +29,7 @@ describe('banned user enforcement', () => {
     })
 
     expect(res.statusCode).toBe(401)
-    expect(res.json()).toEqual({ error: 'account_banned' })
+    expect(res.json()).toEqual({ error: 'account_banned', botUsername: null })
   })
 
   it('rejects a banned user on POST /auth/verify with account_banned', async () => {
@@ -54,6 +54,6 @@ describe('banned user enforcement', () => {
     })
 
     expect(res.statusCode).toBe(401)
-    expect(res.json()).toEqual({ error: 'account_banned' })
+    expect(res.json()).toEqual({ error: 'account_banned', botUsername: null })
   })
 })

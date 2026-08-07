@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 import { verifyInitData } from '../auth.js'
+import { getBotUsername } from '../bot.js'
 import { getProfileWithPhotos } from './profile.js'
 
 export async function authRoutes(app: FastifyInstance) {
@@ -28,7 +29,10 @@ export async function authRoutes(app: FastifyInstance) {
       .eq('telegram_id', tgUser.id)
       .single()
 
-    if (existing?.banned_at) return reply.status(401).send({ error: 'account_banned' })
+    if (existing?.banned_at) {
+      // botUsername lets the Blocked screen deep-link into the support bot chat.
+      return reply.status(401).send({ error: 'account_banned', botUsername: getBotUsername() })
+    }
 
     let userId: string
     let userName: string

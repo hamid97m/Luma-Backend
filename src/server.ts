@@ -3,6 +3,7 @@ import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import { verifyInitData } from './auth.js'
+import { getBotUsername } from './bot.js'
 import { db } from './db.js'
 import type { TelegramUser } from './types.js'
 import { authRoutes } from './routes/auth.js'
@@ -77,7 +78,7 @@ export async function buildApp(): Promise<FastifyInstance> {
 
     if (!data) return reply.status(401).send({ error: 'user_not_found' })
     if (data.deleted_at) return reply.status(401).send({ error: 'account_deleted' })
-    if (data.banned_at) return reply.status(401).send({ error: 'account_banned' })
+    if (data.banned_at) return reply.status(401).send({ error: 'account_banned', botUsername: getBotUsername() })
     req.userId = data.id
 
     if (data.last_active && Date.now() - new Date(data.last_active).getTime() > LAST_ACTIVE_THROTTLE_MS) {

@@ -13,6 +13,14 @@ function getBot(): Bot {
   return _bot
 }
 
+// Learned from Telegram at startup; API responses (e.g. the banned 401) use it
+// so the frontend can deep-link into the bot chat without hardcoding the handle.
+let botUsername: string | null = null
+
+export function getBotUsername(): string | null {
+  return botUsername
+}
+
 async function sendStart(ctx: Context): Promise<void> {
   const keyboard = new InlineKeyboard().webApp(
     'Open Luma ❤️',
@@ -26,6 +34,14 @@ async function sendStart(ctx: Context): Promise<void> {
 async function clearPending(ctx: Context): Promise<void> {
   const tgId = ctx.from?.id
   if (tgId) await db.from('users').update({ awaiting_support_since: null }).eq('telegram_id', tgId)
+}
+
+async function promptSupport(ctx: Context): Promise<void> {
+  const tgId = ctx.from?.id
+  if (tgId) {
+    await db.from('users').update({ awaiting_support_since: new Date().toISOString() }).eq('telegram_id', tgId)
+  }
+  await ctx.reply("What's the issue? Send it to me in one message and I'll open a support ticket.")
 }
 
 export function startBot(): void {
@@ -50,17 +66,13 @@ export function startBot(): void {
   })
 
   bot.command('start', async (ctx) => {
+    // Deep link from the app's Blocked screen: t.me/<bot>?start=support
+    if (ctx.match === 'support') return promptSupport(ctx)
     await clearPending(ctx)
     await sendStart(ctx)
   })
 
-  bot.command('support', async (ctx) => {
-    const tgId = ctx.from?.id
-    if (tgId) {
-      await db.from('users').update({ awaiting_support_since: new Date().toISOString() }).eq('telegram_id', tgId)
-    }
-    await ctx.reply("What's the issue? Send it to me in one message and I'll open a support ticket.")
-  })
+  bot.command('support', promptSupport)
 
   // Capture the next plain message as a ticket when a /support prompt is pending.
   bot.on('message', async (ctx, next) => {
@@ -95,7 +107,10 @@ export function startBot(): void {
   bot.on('message', sendStart)
 
   bot.start({
-    onStart: () => console.log('[bot] polling started'),
+    onStart: (me) => {
+      botUsername = me.username
+      console.log('[bot] polling started')
+    },
   }).catch((err) => {
     // 409 happens during rolling restarts — log and exit so Render restarts cleanly
     console.error('[bot] fatal:', err.message)

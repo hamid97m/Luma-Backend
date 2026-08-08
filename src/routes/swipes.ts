@@ -101,11 +101,14 @@ export async function swipesRoutes(app: FastifyInstance) {
     const primaryPhoto = (userId: string) =>
       photos?.find((p: { user_id: string; url: string }) => p.user_id === userId)?.url ?? null
 
+    // Only DM the OTHER user (the earlier liker, who's away from the app). The
+    // current swiper already sees the match live in-app (match popup / chat
+    // opens), so a "someone liked you" push to themselves is redundant and
+    // reads backwards — as if they were the one who got liked.
     // Fire-and-forget. Telegram rejects DMs from bots the user hasn't granted
     // write access to (never pressed Start / declined the popup), so skip
     // anyone with an explicit false — null means unknown, still worth trying.
     const recipients = [
-      { user: me, matchName: them.name, matchPhoto: primaryPhoto(them.id) },
       { user: them, matchName: me.name, matchPhoto: primaryPhoto(me.id) },
     ]
       .filter((r) => r.user.allows_write_to_pm !== false)

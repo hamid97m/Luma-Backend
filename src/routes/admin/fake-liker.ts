@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../../db.js'
 import { getFakeLikerConfig, updateFakeLikerConfig } from '../../jobs/fakeLikerConfig.js'
-import { runFakeLikerJob, RunStats } from '../../jobs/fakeLiker.js'
+import { runFakeLikerJob, getNextScheduledRunAt, RunStats } from '../../jobs/fakeLiker.js'
 
 const RUNS_PAGE_SIZE = 20
 
@@ -92,6 +92,7 @@ export async function adminFakeLikerRoutes(app: FastifyInstance) {
       totalMatchesCreated,
       totalSalamsSent,
       lastRunAt,
+      nextRunAt: getNextScheduledRunAt(),
       perFake,
     }
   })

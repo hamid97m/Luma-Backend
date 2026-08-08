@@ -27,6 +27,17 @@ const TARGET_LOOKING_FOR = ['women', 'both', 'everyone']
 /** Module-level concurrency guard: only one run at a time across schedule + manual triggers. */
 let running = false
 
+/** Next scheduled run time, set by the scheduler in index.ts; null when the scheduler isn't armed (dev). */
+let nextScheduledRunAt: string | null = null
+
+export function setNextScheduledRunAt(ts: string | null): void {
+  nextScheduledRunAt = ts
+}
+
+export function getNextScheduledRunAt(): string | null {
+  return nextScheduledRunAt
+}
+
 interface Fake {
   id: string
   name: string

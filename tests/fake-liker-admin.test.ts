@@ -2,7 +2,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/db.js', () => ({ db: { from: vi.fn(), rpc: vi.fn() } }))
 vi.mock('../src/bot.js', () => ({}))
-vi.mock('../src/jobs/fakeLiker.js', () => ({ runFakeLikerJob: vi.fn() }))
+vi.mock('../src/jobs/fakeLiker.js', () => ({
+  runFakeLikerJob: vi.fn(),
+  getNextScheduledRunAt: vi.fn(() => null),
+  setNextScheduledRunAt: vi.fn(),
+}))
 
 import { buildApp } from '../src/server.js'
 import { db } from '../src/db.js'
@@ -174,6 +178,7 @@ describe('admin fake-liker stats', () => {
       totalMatchesCreated: 3,
       totalSalamsSent: 3,
       lastRunAt: '2026-08-05T00:00:00Z',
+      nextRunAt: null,
       perFake: [
         { id: 'f1', name: 'Fake One', likesSent: 4, matches: 2 },
         { id: 'f2', name: 'Fake Two', likesSent: 4, matches: 2 },
@@ -199,6 +204,7 @@ describe('admin fake-liker stats', () => {
       totalMatchesCreated: 0,
       totalSalamsSent: 0,
       lastRunAt: null,
+      nextRunAt: null,
       perFake: [],
     })
   })

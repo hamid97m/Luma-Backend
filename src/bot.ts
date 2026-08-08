@@ -144,6 +144,23 @@ export async function notifyMatch(recipients: MatchNotifyRecipient[]): Promise<v
   }
 }
 
+/** DM a recipient that a new person liked them. Always names the liker (FOMO
+ * teaser) even when they will be locked behind the paywall in-app. */
+export async function notifyNewLike(
+  toTelegramId: number,
+  likerName: string,
+  likerPhoto: string | null = null,
+): Promise<void> {
+  const bot = getBot()
+  const keyboard = new InlineKeyboard().webApp('Open Luma ❤️', process.env.WEB_URL!)
+  const caption = `${likerName} liked you 💛 — open Luma to see`
+  if (likerPhoto) {
+    await bot.api.sendPhoto(toTelegramId, likerPhoto, { caption, reply_markup: keyboard })
+  } else {
+    await bot.api.sendMessage(toTelegramId, caption, { reply_markup: keyboard })
+  }
+}
+
 export async function notifyNewMessage(
   toTelegramId: number,
   senderName: string,

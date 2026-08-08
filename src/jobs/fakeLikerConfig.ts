@@ -22,6 +22,24 @@ export async function getFakeLikerConfig(): Promise<FakeLikerConfig | null> {
   }
 }
 
+/** Timestamp (ISO) of the most recent fake-liker run of any trigger, or null if
+ * there are none / the query fails. Used at startup to resume the 6h cadence
+ * across restarts instead of re-firing shortly after every deploy. */
+export async function getLastFakeLikerRunAt(): Promise<string | null> {
+  try {
+    const { data, error } = await db
+      .from('fake_liker_runs')
+      .select('started_at')
+      .order('started_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (error || !data) return null
+    return data.started_at ?? null
+  } catch {
+    return null
+  }
+}
+
 /** Updates the fake_liker_config singleton row with the given patch, stamping
  * updated_at, and returns the resulting config (null if the update failed). */
 export async function updateFakeLikerConfig(

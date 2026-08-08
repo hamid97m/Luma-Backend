@@ -1,11 +1,17 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
-import { interleaveBatch, escapeIlike } from '../discoveryRanking.js'
+import { interleaveBatch, escapeIlike, shuffle } from '../discoveryRanking.js'
 import { getSwipeLimitStatus } from '../premium/swipeLimit.js'
 
 const BATCH_SIZE = 10
 const MAX_LIKER_SLOTS = 4
-const LIKER_POSITIONS = [0, 2, 4, 6]
+// Likers occupy the first slots of the batch (shuffled among themselves).
+const LIKER_POSITIONS = [0, 1, 2, 3]
+// Fetch more than we show so the per-request shuffle varies *which* profiles
+// surface across refreshes, not just their order. Ordered by last_active first,
+// so the pool still favours recently-active people before shuffling.
+const LIKER_POOL = 20
+const FILLER_POOL = BATCH_SIZE * 2
 const PASS_RECYCLE_MS = 24 * 60 * 60 * 1000
 // Cap the id-list sent to the liker-profiles query; the newest likes are
 // not preferred here — any 500 likers is plenty to fill 4 slots.
@@ -91,9 +97,9 @@ export async function discoveryRoutes(app: FastifyInstance) {
       const { data, error } = await profileQuery()
         .in('id', likerIds)
         .order('last_active', { ascending: false })
-        .limit(MAX_LIKER_SLOTS)
+        .limit(LIKER_POOL)
       if (error) return reply.status(500).send({ error: 'discovery_failed' })
-      likers = data ?? []
+      likers = shuffle(data ?? []).slice(0, MAX_LIKER_SLOTS)
     }
 
     // Tier 2: same city (case-insensitive exact match on free-text location)
@@ -105,9 +111,9 @@ export async function discoveryRoutes(app: FastifyInstance) {
         .ilike('location', escapeIlike(city))
         .not('id', 'in', `(${likerPickedIds.join(',')})`)
         .order('last_active', { ascending: false })
-        .limit(BATCH_SIZE)
+        .limit(FILLER_POOL)
       if (error) return reply.status(500).send({ error: 'discovery_failed' })
-      sameCity = data ?? []
+      sameCity = shuffle(data ?? [])
     }
 
     // Tier 3: everyone else, most recently active first
@@ -115,11 +121,11 @@ export async function discoveryRoutes(app: FastifyInstance) {
     const { data: rest, error } = await profileQuery()
       .not('id', 'in', `(${allPickedIds.join(',')})`)
       .order('last_active', { ascending: false })
-      .limit(BATCH_SIZE)
+      .limit(FILLER_POOL)
 
     if (error) return reply.status(500).send({ error: 'discovery_failed' })
 
-    const merged = interleaveBatch(likers, sameCity, rest ?? [], BATCH_SIZE, LIKER_POSITIONS)
+    const merged = interleaveBatch(likers, sameCity, shuffle(rest ?? []), BATCH_SIZE, LIKER_POSITIONS)
 
     const formatted = merged.map((p: any) => ({
       id: p.id,

@@ -34,6 +34,19 @@ export function interleaveBatch<T extends { id: string }>(
   return result
 }
 
+/**
+ * Fisher–Yates in-place shuffle (also returns the array). Uses Math.random, so
+ * each call yields a fresh order — this is for feed variety only, not anything
+ * security-sensitive.
+ */
+export function shuffle<T>(arr: T[]): T[] {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[arr[i], arr[j]] = [arr[j], arr[i]]
+  }
+  return arr
+}
+
 /** Escape ILIKE wildcards so a free-text value matches literally. */
 export function escapeIlike(value: string): string {
   return value.replace(/[\\%_]/g, (m) => `\\${m}`)

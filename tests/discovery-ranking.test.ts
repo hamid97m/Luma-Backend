@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { interleaveBatch, escapeIlike } from '../src/discoveryRanking.js'
+import { interleaveBatch, escapeIlike, shuffle } from '../src/discoveryRanking.js'
 
 const p = (id: string) => ({ id })
 const ids = (arr: { id: string }[]) => arr.map((x) => x.id)
@@ -45,6 +45,20 @@ describe('interleaveBatch', () => {
 
   it('returns empty array when all tiers are empty', () => {
     expect(interleaveBatch([], [], [], 10, POSITIONS)).toEqual([])
+  })
+})
+
+describe('shuffle', () => {
+  it('is a permutation — preserves every element and length', () => {
+    const input = Array.from({ length: 50 }, (_, i) => i)
+    const out = shuffle([...input])
+    expect(out).toHaveLength(input.length)
+    expect([...out].sort((a, b) => a - b)).toEqual(input)
+  })
+
+  it('handles empty and single-element arrays', () => {
+    expect(shuffle([])).toEqual([])
+    expect(shuffle(['only'])).toEqual(['only'])
   })
 })
 

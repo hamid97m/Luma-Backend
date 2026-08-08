@@ -4,10 +4,11 @@ vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/bot.js', () => ({
   notifyMatch: vi.fn().mockResolvedValue(undefined),
   notifyNewMessage: vi.fn().mockResolvedValue(undefined),
+  notifyNewLike: vi.fn().mockResolvedValue(undefined),
 }))
 
 import { db } from '../src/db.js'
-import { notifyMatch, notifyNewMessage } from '../src/bot.js'
+import { notifyMatch, notifyNewMessage, notifyNewLike } from '../src/bot.js'
 import { runFakeLikerJob } from '../src/jobs/fakeLiker.js'
 
 // ---------------------------------------------------------------------------
@@ -357,6 +358,60 @@ describe('runFakeLikerJob — match creation', () => {
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.matchesCreated).toBe(1)
     expect(notifyMatch).not.toHaveBeenCalled()
+  })
+})
+
+describe('runFakeLikerJob — new-like notification', () => {
+  it('DMs a real target when the fake likes them with no reverse like', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1', { name: 'Sara' }),
+        mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', telegram_id: 777 }),
+      ],
+      user_photos: [{ user_id: 'f1', url: 'https://p/f1.jpg', position: 0 }],
+    }
+    useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    await flush()
+
+    expect(res.likesSent).toBe(1)
+    expect(res.matchesCreated).toBe(0)
+    expect(notifyNewLike).toHaveBeenCalledWith(777, 'Sara', 'https://p/f1.jpg')
+  })
+
+  it('does not notify when the target has a fake/sentinel telegram id', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1'),
+        mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', telegram_id: -5 }),
+      ],
+    }
+    useStore(store)
+    await runFakeLikerJob('schedule', silent)
+    await flush()
+
+    expect(notifyNewLike).not.toHaveBeenCalled()
+  })
+
+  it('does not send a new-like DM when the like results in a match', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1', { name: 'Sara' }),
+        mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', telegram_id: 555, last_active: RECENT }),
+      ],
+      // target already liked the fake → reverse like present → matches instead
+      swipes: [{ swiper_id: 't1', swiped_id: 'f1', direction: 'like' }],
+      user_photos: [{ user_id: 'f1', url: 'https://p/f1.jpg', position: 0 }],
+    }
+    useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    await flush()
+
+    expect(res.matchesCreated).toBe(1)
+    expect(notifyNewLike).not.toHaveBeenCalled()
   })
 })
 

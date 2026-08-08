@@ -2,7 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
 vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
-vi.mock('../src/bot.js', () => ({ notifyMatch: vi.fn().mockResolvedValue(undefined) }))
+vi.mock('../src/bot.js', () => ({
+  notifyMatch: vi.fn().mockResolvedValue(undefined),
+  notifyNewLike: vi.fn().mockResolvedValue(undefined),
+}))
 vi.mock('../src/premium/swipeLimit.js', () => ({ checkAndCountSwipe: vi.fn() }))
 
 import { buildApp } from '../src/server.js'
@@ -88,6 +91,13 @@ describe('POST /swipes — swipe limit', () => {
     // reverse-swipe select — no reverse like recorded
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ eq: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: null }) }) }) }) }),
+    } as any)
+    // fetch pair — target is a fake sentinel, so the like-DM lookup short-circuits
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ in: () => ({ data: [
+        { id: USER_ID, name: 'Ali', telegram_id: 1, allows_write_to_pm: null },
+        { id: TARGET_ID, name: 'Sara', telegram_id: -1, allows_write_to_pm: null },
+      ], error: null }) }),
     } as any)
 
     const res = await app.inject({

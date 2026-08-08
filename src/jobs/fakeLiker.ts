@@ -1,5 +1,5 @@
 import { db } from '../db.js'
-import { notifyMatch, notifyNewMessage } from '../bot.js'
+import { notifyMatch, notifyNewMessage, notifyNewLike } from '../bot.js'
 import { getFakeLikerConfig } from './fakeLikerConfig.js'
 
 export interface RunStats {
@@ -261,7 +261,14 @@ export async function runFakeLikerJob(
           logger.warn({ err: reverseErr, fake: fake.id, target: target.id }, 'fake liker: reverse-like check failed')
           continue
         }
-        if (!reverse) continue
+        if (!reverse) {
+          // Fake liked a real user without matching → send the "someone liked you" DM.
+          if (target.telegram_id > 0 && target.allows_write_to_pm !== false) {
+            notifyNewLike(target.telegram_id, fake.name, fakePhoto(fake.id))
+              .catch((err) => logger.warn({ err }, 'fake liker: new-like notify failed'))
+          }
+          continue
+        }
 
         const [u1, u2] = [fake.id, target.id].sort()
         const { data: match, error: matchErr } = await db

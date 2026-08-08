@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
-import { notifyMatch } from '../bot.js'
+import { notifyMatch, notifyNewLike } from '../bot.js'
 import { checkAndCountSwipe } from '../premium/swipeLimit.js'
 
 export async function swipesRoutes(app: FastifyInstance) {
@@ -45,7 +45,26 @@ export async function swipesRoutes(app: FastifyInstance) {
       .eq('direction', 'like')
       .single()
 
-    if (!reverseSwipe) return { matched: false, ...swipeLimit }
+    if (!reverseSwipe) {
+      // New like, no match yet → nudge the liked user (names the liker; FOMO teaser).
+      const { data: pair } = await db
+        .from('users')
+        .select('id, name, telegram_id, allows_write_to_pm')
+        .in('id', [req.userId, targetUserId])
+      const me = pair?.find((u: { id: string }) => u.id === req.userId)
+      const target = pair?.find((u: { id: string }) => u.id === targetUserId)
+      if (me && target && target.telegram_id > 0 && target.allows_write_to_pm !== false) {
+        const { data: myPhoto } = await db
+          .from('user_photos')
+          .select('url')
+          .eq('user_id', req.userId)
+          .order('position', { ascending: true })
+          .limit(1)
+          .maybeSingle()
+        notifyNewLike(target.telegram_id, me.name, myPhoto?.url ?? null).catch(console.error)
+      }
+      return { matched: false, ...swipeLimit }
+    }
 
     // Normalise pair order so UNIQUE(user1_id, user2_id) is deterministic
     const [u1, u2] = [req.userId, targetUserId].sort()

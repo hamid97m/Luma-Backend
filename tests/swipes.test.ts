@@ -2,7 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
 vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
-vi.mock('../src/bot.js', () => ({ notifyMatch: vi.fn().mockResolvedValue(undefined) }))
+vi.mock('../src/bot.js', () => ({
+  notifyMatch: vi.fn().mockResolvedValue(undefined),
+  notifyNewLike: vi.fn().mockResolvedValue(undefined),
+}))
 vi.mock('../src/premium/swipeLimit.js', () => ({
   checkAndCountSwipe: vi.fn().mockResolvedValue({ blocked: false, swipeLimit: null }),
 }))
@@ -10,7 +13,7 @@ vi.mock('../src/premium/swipeLimit.js', () => ({
 import { buildApp } from '../src/server.js'
 import { verifyInitData } from '../src/auth.js'
 import { db } from '../src/db.js'
-import { notifyMatch } from '../src/bot.js'
+import { notifyMatch, notifyNewLike } from '../src/bot.js'
 
 const AUTH = { authorization: 'valid_init_data' }
 const USER_ID = 'aaaaaaaa-0000-0000-0000-000000000001'
@@ -62,6 +65,17 @@ describe('POST /swipes — like with no reverse', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ eq: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: null, error: null }) }) }) }) }),
     } as any)
+    // fetch pair (swiper + target) for the like-DM
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ in: () => ({ data: [
+        { id: USER_ID, name: 'Ali', telegram_id: 1, allows_write_to_pm: null },
+        { id: TARGET_ID, name: 'Sara', telegram_id: 2, allows_write_to_pm: null },
+      ], error: null }) }),
+    } as any)
+    // swiper's primary photo
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ order: () => ({ limit: () => ({ maybeSingle: () => ({ data: { url: 'https://example.com/ali.jpg' } }) }) }) }) }),
+    } as any)
 
     const res = await app.inject({
       method: 'POST',
@@ -72,6 +86,103 @@ describe('POST /swipes — like with no reverse', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ matched: false })
+  })
+
+  it('DMs the liked user when a like does not match', async () => {
+    setupAuth()
+
+    // upsert swipe OK
+    vi.mocked(db.from).mockReturnValueOnce({
+      upsert: vi.fn().mockReturnValue({ error: null }),
+    } as any)
+    // no reverse swipe
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: null, error: null }) }) }) }) }),
+    } as any)
+    // fetch pair (swiper + target)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ in: () => ({ data: [
+        { id: USER_ID, name: 'Ali', telegram_id: 1, allows_write_to_pm: null },
+        { id: TARGET_ID, name: 'Sara', telegram_id: 2, allows_write_to_pm: null },
+      ], error: null }) }),
+    } as any)
+    // swiper's primary photo
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ order: () => ({ limit: () => ({ maybeSingle: () => ({ data: { url: 'https://example.com/ali.jpg' } }) }) }) }) }),
+    } as any)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/swipes',
+      headers: AUTH,
+      payload: { targetUserId: TARGET_ID, direction: 'like' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ matched: false })
+    expect(notifyNewLike).toHaveBeenCalledWith(2, 'Ali', 'https://example.com/ali.jpg')
+  })
+
+  it('DMs with a null photo when the swiper has no primary photo', async () => {
+    setupAuth()
+
+    // upsert swipe OK
+    vi.mocked(db.from).mockReturnValueOnce({
+      upsert: vi.fn().mockReturnValue({ error: null }),
+    } as any)
+    // no reverse swipe
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: null, error: null }) }) }) }) }),
+    } as any)
+    // fetch pair (swiper + target)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ in: () => ({ data: [
+        { id: USER_ID, name: 'Ali', telegram_id: 1, allows_write_to_pm: null },
+        { id: TARGET_ID, name: 'Sara', telegram_id: 2, allows_write_to_pm: null },
+      ], error: null }) }),
+    } as any)
+    // swiper has no photos
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ order: () => ({ limit: () => ({ maybeSingle: () => ({ data: null }) }) }) }) }),
+    } as any)
+
+    await app.inject({
+      method: 'POST',
+      url: '/swipes',
+      headers: AUTH,
+      payload: { targetUserId: TARGET_ID, direction: 'like' },
+    })
+
+    expect(notifyNewLike).toHaveBeenCalledWith(2, 'Ali', null)
+  })
+
+  it('does not DM when the target has not granted bot write access', async () => {
+    setupAuth()
+
+    // upsert swipe OK
+    vi.mocked(db.from).mockReturnValueOnce({
+      upsert: vi.fn().mockReturnValue({ error: null }),
+    } as any)
+    // no reverse swipe
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: null, error: null }) }) }) }) }),
+    } as any)
+    // fetch pair — target opted out of bot DMs
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ in: () => ({ data: [
+        { id: USER_ID, name: 'Ali', telegram_id: 1, allows_write_to_pm: null },
+        { id: TARGET_ID, name: 'Sara', telegram_id: 2, allows_write_to_pm: false },
+      ], error: null }) }),
+    } as any)
+
+    await app.inject({
+      method: 'POST',
+      url: '/swipes',
+      headers: AUTH,
+      payload: { targetUserId: TARGET_ID, direction: 'like' },
+    })
+
+    expect(notifyNewLike).not.toHaveBeenCalled()
   })
 })
 
@@ -87,6 +198,13 @@ describe('POST /swipes — liking someone previously passed on', () => {
     // no reverse swipe
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ eq: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: null, error: null }) }) }) }) }),
+    } as any)
+    // fetch pair — target is a fake sentinel, so the DM lookup short-circuits before the photo query
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ in: () => ({ data: [
+        { id: USER_ID, name: 'Ali', telegram_id: 1, allows_write_to_pm: null },
+        { id: TARGET_ID, name: 'Sara', telegram_id: -1, allows_write_to_pm: null },
+      ], error: null }) }),
     } as any)
 
     const res = await app.inject({
@@ -158,5 +276,7 @@ describe('POST /swipes — mutual like', () => {
       { telegramId: 1, matchName: 'Sara', matchPhoto: 'https://example.com/sara.jpg' },
       { telegramId: 2, matchName: 'Ali', matchPhoto: 'https://example.com/ali.jpg' },
     ])
+    // The match path uses notifyMatch, not the new-like DM — no double notification.
+    expect(notifyNewLike).not.toHaveBeenCalled()
   })
 })

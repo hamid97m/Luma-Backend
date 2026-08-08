@@ -5,6 +5,8 @@ export interface IncomingLiker {
   name: string
   age: number | null
   bio: string | null
+  location: string | null
+  interests: string[]
   telegramId: number
   gender: string | null
   likedAt: string
@@ -16,7 +18,7 @@ export async function getIncomingLikers(userId: string): Promise<IncomingLiker[]
   // (1) People who liked me, with their profile joined (mirrors the matches join pattern).
   const { data: incoming } = await db
     .from('swipes')
-    .select('swiper_id, created_at, swiper:users!swipes_swiper_id_fkey(id, name, age, bio, telegram_id, gender, deleted_at, banned_at)')
+    .select('swiper_id, created_at, swiper:users!swipes_swiper_id_fkey(id, name, age, bio, location, interests, telegram_id, gender, deleted_at, banned_at)')
     .eq('swiped_id', userId)
     .eq('direction', 'like')
     .order('created_at', { ascending: false })
@@ -63,6 +65,8 @@ export async function getIncomingLikers(userId: string): Promise<IncomingLiker[]
       name: s.name,
       age: s.age ?? null,
       bio: s.bio ?? null,
+      location: s.location ?? null,
+      interests: s.interests ?? [],
       telegramId: s.telegram_id,
       gender: s.gender ?? null,
       likedAt: row.created_at,

@@ -9,8 +9,8 @@ import { db } from '../src/db.js'
 import { getIncomingLikers } from '../src/likes/service.js'
 import { chainable } from './admin-helpers.js'
 
-const woman = { id: 'w1', name: 'Sara', age: 27, bio: null, telegramId: 2, gender: 'woman', likedAt: '2026-08-08T00:00:00Z' }
-const man = { id: 'm1', name: 'Ali', age: 30, bio: null, telegramId: 3, gender: 'man', likedAt: '2026-08-07T00:00:00Z' }
+const woman = { id: 'w1', name: 'Sara', age: 27, bio: null, location: 'Tehran', interests: ['Yoga'], telegramId: 2, gender: 'woman', likedAt: '2026-08-08T00:00:00Z' }
+const man = { id: 'm1', name: 'Ali', age: 30, bio: 'hi', location: 'Shiraz', interests: ['Hiking', 'Music'], telegramId: 3, gender: 'man', likedAt: '2026-08-07T00:00:00Z' }
 
 function mockDb(opts: { enabled: boolean; myPremiumUntil: string | null; seenAt?: string | null }) {
   vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Me' } as any)
@@ -39,8 +39,12 @@ describe('GET /likes', () => {
     expect(body.lockedCount).toBe(1)
     expect(body.premiumRequired).toBe(true)
     expect(body.visible.map((v: any) => v.id)).toEqual(['m1'])
+    // visible liker carries profile fields for the liker-profile view
+    expect(body.visible[0].location).toBe('Shiraz')
+    expect(body.visible[0].interests).toEqual(['Hiking', 'Music'])
     // no woman identity leaked anywhere in the payload
     expect(JSON.stringify(body)).not.toContain('Sara')
+    expect(JSON.stringify(body)).not.toContain('Yoga')
     expect(JSON.stringify(body)).not.toContain('w1')
     expect(body.visible[0].photos).toEqual(['http://p/m1.jpg'])
   })

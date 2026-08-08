@@ -72,11 +72,6 @@ describe('POST /swipes — like with no reverse', () => {
         { id: TARGET_ID, name: 'Sara', telegram_id: 2, allows_write_to_pm: null },
       ], error: null }) }),
     } as any)
-    // swiper's primary photo
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ order: () => ({ limit: () => ({ maybeSingle: () => ({ data: { url: 'https://example.com/ali.jpg' } }) }) }) }) }),
-    } as any)
-
     const res = await app.inject({
       method: 'POST',
       url: '/swipes',
@@ -106,11 +101,6 @@ describe('POST /swipes — like with no reverse', () => {
         { id: TARGET_ID, name: 'Sara', telegram_id: 2, allows_write_to_pm: null },
       ], error: null }) }),
     } as any)
-    // swiper's primary photo
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ order: () => ({ limit: () => ({ maybeSingle: () => ({ data: { url: 'https://example.com/ali.jpg' } }) }) }) }) }),
-    } as any)
-
     const res = await app.inject({
       method: 'POST',
       url: '/swipes',
@@ -120,40 +110,7 @@ describe('POST /swipes — like with no reverse', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ matched: false })
-    expect(notifyNewLike).toHaveBeenCalledWith(2, 'Ali', 'https://example.com/ali.jpg')
-  })
-
-  it('DMs with a null photo when the swiper has no primary photo', async () => {
-    setupAuth()
-
-    // upsert swipe OK
-    vi.mocked(db.from).mockReturnValueOnce({
-      upsert: vi.fn().mockReturnValue({ error: null }),
-    } as any)
-    // no reverse swipe
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: null, error: null }) }) }) }) }),
-    } as any)
-    // fetch pair (swiper + target)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ in: () => ({ data: [
-        { id: USER_ID, name: 'Ali', telegram_id: 1, allows_write_to_pm: null },
-        { id: TARGET_ID, name: 'Sara', telegram_id: 2, allows_write_to_pm: null },
-      ], error: null }) }),
-    } as any)
-    // swiper has no photos
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ order: () => ({ limit: () => ({ maybeSingle: () => ({ data: null }) }) }) }) }),
-    } as any)
-
-    await app.inject({
-      method: 'POST',
-      url: '/swipes',
-      headers: AUTH,
-      payload: { targetUserId: TARGET_ID, direction: 'like' },
-    })
-
-    expect(notifyNewLike).toHaveBeenCalledWith(2, 'Ali', null)
+    expect(notifyNewLike).toHaveBeenCalledWith(2, 'Ali')
   })
 
   it('does not DM when the target has not granted bot write access', async () => {

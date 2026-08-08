@@ -149,16 +149,11 @@ export async function notifyMatch(recipients: MatchNotifyRecipient[]): Promise<v
 export async function notifyNewLike(
   toTelegramId: number,
   likerName: string,
-  likerPhoto: string | null = null,
 ): Promise<void> {
   const bot = getBot()
   const keyboard = new InlineKeyboard().webApp('Open Luma ❤️', process.env.WEB_URL!)
-  const caption = `${likerName} liked you 💛 — open Luma to see`
-  if (likerPhoto) {
-    await bot.api.sendPhoto(toTelegramId, likerPhoto, { caption, reply_markup: keyboard })
-  } else {
-    await bot.api.sendMessage(toTelegramId, caption, { reply_markup: keyboard })
-  }
+  // Like DMs are text-only by design — no liker photo (the reveal happens in-app).
+  await bot.api.sendMessage(toTelegramId, `${likerName} liked you 💛 — open Luma to see`, { reply_markup: keyboard })
 }
 
 export async function notifyNewMessage(

@@ -14,21 +14,11 @@ import { notifyNewLike } from '../src/bot.js'
 describe('notifyNewLike', () => {
   beforeEach(() => { vi.clearAllMocks(); process.env.WEB_URL = 'https://luma.test'; process.env.BOT_TOKEN = 'x' })
 
-  it('sends a photo caption naming the liker when a photo is given', async () => {
-    await notifyNewLike(123, 'Sara', 'https://cdn/sara.jpg')
-    expect(sendPhoto).toHaveBeenCalledTimes(1)
-    const [chatId, photo, opts] = sendPhoto.mock.calls[0]
-    expect(chatId).toBe(123)
-    expect(photo).toBe('https://cdn/sara.jpg')
-    expect(opts.caption).toContain('Sara')
-    expect(sendMessage).not.toHaveBeenCalled()
-  })
-
-  it('falls back to a text message naming the liker when no photo', async () => {
-    await notifyNewLike(456, 'Sara', null)
+  it('sends a text message naming the liker, never a photo', async () => {
+    await notifyNewLike(123, 'Sara')
     expect(sendMessage).toHaveBeenCalledTimes(1)
     const [chatId, text] = sendMessage.mock.calls[0]
-    expect(chatId).toBe(456)
+    expect(chatId).toBe(123)
     expect(text).toContain('Sara')
     expect(sendPhoto).not.toHaveBeenCalled()
   })

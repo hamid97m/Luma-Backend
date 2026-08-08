@@ -54,14 +54,7 @@ export async function swipesRoutes(app: FastifyInstance) {
       const me = pair?.find((u: { id: string }) => u.id === req.userId)
       const target = pair?.find((u: { id: string }) => u.id === targetUserId)
       if (me && target && target.telegram_id > 0 && target.allows_write_to_pm !== false) {
-        const { data: myPhoto } = await db
-          .from('user_photos')
-          .select('url')
-          .eq('user_id', req.userId)
-          .order('position', { ascending: true })
-          .limit(1)
-          .maybeSingle()
-        notifyNewLike(target.telegram_id, me.name, myPhoto?.url ?? null).catch(console.error)
+        notifyNewLike(target.telegram_id, me.name).catch(console.error)
       }
       return { matched: false, ...swipeLimit }
     }

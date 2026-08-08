@@ -264,7 +264,7 @@ export async function runFakeLikerJob(
         if (!reverse) {
           // Fake liked a real user without matching → send the "someone liked you" DM.
           if (target.telegram_id > 0 && target.allows_write_to_pm !== false) {
-            notifyNewLike(target.telegram_id, fake.name, fakePhoto(fake.id))
+            notifyNewLike(target.telegram_id, fake.name)
               .catch((err) => logger.warn({ err }, 'fake liker: new-like notify failed'))
           }
           continue

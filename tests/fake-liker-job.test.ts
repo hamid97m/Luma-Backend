@@ -377,7 +377,7 @@ describe('runFakeLikerJob — new-like notification', () => {
 
     expect(res.likesSent).toBe(1)
     expect(res.matchesCreated).toBe(0)
-    expect(notifyNewLike).toHaveBeenCalledWith(777, 'Sara', 'https://p/f1.jpg')
+    expect(notifyNewLike).toHaveBeenCalledWith(777, 'Sara')
   })
 
   it('does not notify when the target has a fake/sentinel telegram id', async () => {

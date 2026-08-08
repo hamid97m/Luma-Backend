@@ -14,6 +14,7 @@ export function toListItem(u: any) {
     name: u.name,
     age: u.age,
     gender: u.gender,
+    lookingFor: u.looking_for,
     isActive: u.is_active,
     isSeed: u.is_seed,
     bannedAt: u.banned_at,
@@ -32,7 +33,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     let q: any = db
       .from('users')
       .select(
-        'id, telegram_id, username, name, age, gender, is_active, is_seed, banned_at, deleted_at, created_at, last_active',
+        'id, telegram_id, username, name, age, gender, looking_for, is_active, is_seed, banned_at, deleted_at, created_at, last_active',
         { count: 'exact' }
       )
 
@@ -180,6 +181,120 @@ export async function adminUsersRoutes(app: FastifyInstance) {
       req.log.error({ err }, 'user detail fetch failed')
       return reply.status(500).send({ error: 'user_detail_fetch_failed' })
     }
+  })
+
+  // Fetches the user and enforces the seed-only guard shared by edit/delete.
+  // Sends the error reply itself and returns null when the guard fails.
+  const fetchSeedUser = async (id: string, reply: any) => {
+    const { data: user } = await db.from('users').select('id, is_seed').eq('id', id).single()
+    if (!user) {
+      reply.status(404).send({ error: 'user_not_found' })
+      return null
+    }
+    if (!user.is_seed) {
+      reply.status(400).send({ error: 'not_a_seed_user' })
+      return null
+    }
+    return user
+  }
+
+  app.put('/users/:id', async (req, reply) => {
+    const { id } = req.params as { id: string }
+
+    const user = await fetchSeedUser(id, reply)
+    if (!user) return reply
+
+    const body = (req.body ?? {}) as Record<string, unknown>
+    const patch: Record<string, unknown> = {}
+
+    if ('name' in body) {
+      const name = typeof body.name === 'string' ? body.name.trim() : ''
+      if (!name) return reply.status(400).send({ error: 'invalid_name' })
+      patch.name = name
+    }
+    if ('age' in body) {
+      const age = Number(body.age)
+      if (!Number.isInteger(age) || age < 18 || age > 99) return reply.status(400).send({ error: 'invalid_age' })
+      patch.age = age
+    }
+    if ('gender' in body) {
+      if (!GENDERS.includes(body.gender as string)) return reply.status(400).send({ error: 'invalid_gender' })
+      patch.gender = body.gender
+    }
+    if ('looking_for' in body) {
+      if (!LOOKING.includes(body.looking_for as string)) return reply.status(400).send({ error: 'invalid_looking_for' })
+      patch.looking_for = body.looking_for
+    }
+    for (const field of ['bio', 'location', 'icebreaker_prompt', 'icebreaker_answer']) {
+      if (field in body) {
+        const value = body[field]
+        if (value !== null && typeof value !== 'string') return reply.status(400).send({ error: `invalid_${field}` })
+        patch[field] = value
+      }
+    }
+    if ('interests' in body) {
+      if (!Array.isArray(body.interests) || !body.interests.every((i) => typeof i === 'string')) {
+        return reply.status(400).send({ error: 'invalid_interests' })
+      }
+      patch.interests = body.interests
+    }
+    if ('is_active' in body) {
+      if (typeof body.is_active !== 'boolean') return reply.status(400).send({ error: 'invalid_is_active' })
+      patch.is_active = body.is_active
+    }
+
+    let photos: string[] | null = null
+    if ('photos' in body) {
+      if (
+        !Array.isArray(body.photos) ||
+        !body.photos.every((u): u is string => typeof u === 'string' && u.length > 0)
+      ) {
+        return reply.status(400).send({ error: 'invalid_photos' })
+      }
+      if (body.photos.length > 6) return reply.status(400).send({ error: 'too_many_photos' })
+      photos = body.photos
+    }
+
+    if (Object.keys(patch).length === 0 && photos === null) {
+      return reply.status(400).send({ error: 'empty_update' })
+    }
+
+    if (Object.keys(patch).length > 0) {
+      const { error } = await db.from('users').update(patch).eq('id', id)
+      if (error) return reply.status(500).send({ error: 'update_failed' })
+    }
+
+    if (photos !== null) {
+      // Replace-all semantics: wipe existing rows, then re-insert in order.
+      const { error: delErr } = await db.from('user_photos').delete().eq('user_id', id)
+      if (delErr) return reply.status(500).send({ error: 'photos_update_failed' })
+      if (photos.length) {
+        const { error: insErr } = await db
+          .from('user_photos')
+          .insert(photos.map((url, i) => ({ user_id: id, url, position: i })))
+        if (insErr) return reply.status(500).send({ error: 'photos_update_failed' })
+      }
+    }
+
+    return { ok: true }
+  })
+
+  app.delete('/users/:id', async (req, reply) => {
+    const { id } = req.params as { id: string }
+
+    const user = await fetchSeedUser(id, reply)
+    if (!user) return reply
+
+    // Soft delete: swipes/matches/messages FK-reference users without ON DELETE CASCADE, so a hard
+    // delete would violate FKs once the fake has activity; deleted_at also removes it from the
+    // fake-liker pool (which filters is('deleted_at', null)).
+    const { error } = await db
+      .from('users')
+      .update({ deleted_at: new Date().toISOString(), is_active: false })
+      .eq('id', id)
+    if (error) return reply.status(500).send({ error: 'delete_failed' })
+
+    return { ok: true }
   })
 
   const setBanned = async (id: string, bannedAt: string | null, reply: any) => {

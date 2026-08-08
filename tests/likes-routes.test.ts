@@ -17,7 +17,11 @@ function mockDb(opts: { enabled: boolean; myPremiumUntil: string | null; seenAt?
   vi.mocked(db.from).mockImplementation((table: string) => {
     if (table === 'users') return chainable({ data: { id: 'me', premium_until: opts.myPremiumUntil, likes_seen_at: opts.seenAt ?? null } })
     if (table === 'premium_config') return chainable({ data: { premium_enabled: opts.enabled } })
-    if (table === 'user_photos') return chainable({ data: [{ user_id: 'm1', url: 'http://p/m1.jpg', position: 0 }] })
+    if (table === 'user_photos') return chainable({ data: [
+      { user_id: 'm1', url: 'http://p/m1.jpg', position: 0 },
+      // locked woman's photo URL is deliberately id-free so the non-leak assertions stay valid
+      { user_id: 'w1', url: 'http://p/locked.jpg', position: 0 },
+    ] })
     return chainable({ data: null })
   })
 }
@@ -42,10 +46,11 @@ describe('GET /likes', () => {
     // visible liker carries profile fields for the liker-profile view
     expect(body.visible[0].location).toBe('Shiraz')
     expect(body.visible[0].interests).toEqual(['Hiking', 'Music'])
-    // no woman identity leaked anywhere in the payload
-    expect(JSON.stringify(body)).not.toContain('Sara')
-    expect(JSON.stringify(body)).not.toContain('Yoga')
-    expect(JSON.stringify(body)).not.toContain('w1')
+    // locked woman exposes ONLY her photo (for the blurred tile) — no identity
+    expect(body.locked).toEqual([{ photo: 'http://p/locked.jpg' }])
+    expect(JSON.stringify(body)).not.toContain('Sara') // name
+    expect(JSON.stringify(body)).not.toContain('Yoga') // interest
+    expect(JSON.stringify(body)).not.toContain('w1')   // id
     expect(body.visible[0].photos).toEqual(['http://p/m1.jpg'])
   })
 

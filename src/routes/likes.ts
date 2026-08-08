@@ -21,15 +21,22 @@ export async function likesRoutes(app: FastifyInstance) {
     ])
 
     const visibleLikers = likers.filter((l) => !(gateActive && l.gender === 'woman'))
-    const lockedCount = likers.length - visibleLikers.length
+    const lockedLikers = likers.filter((l) => gateActive && l.gender === 'woman')
+    const lockedCount = lockedLikers.length
 
-    // Hydrate photos only for visible likers.
-    let photosByUser = new Map<string, string[]>()
-    if (visibleLikers.length > 0) {
+    // Hydrate photos for all likers. Locked likers only ever expose their first
+    // photo URL (rendered blurred client-side) — never their name, id, or any
+    // other profile field. NOTE: the URL is the real, unblurred original, so a
+    // determined non-premium viewer can retrieve it from the network tab. This
+    // is a deliberate product choice (blurred-real-photo teaser); a truly
+    // leak-proof version would serve a server-side pre-blurred thumbnail.
+    const photosByUser = new Map<string, string[]>()
+    const allIds = likers.map((l) => l.id)
+    if (allIds.length > 0) {
       const { data: photoRows } = await db
         .from('user_photos')
         .select('user_id, url, position')
-        .in('user_id', visibleLikers.map((l) => l.id))
+        .in('user_id', allIds)
         .order('position', { ascending: true })
       for (const p of (photoRows ?? []) as Array<{ user_id: string; url: string }>) {
         const arr = photosByUser.get(p.user_id) ?? []
@@ -50,12 +57,15 @@ export async function likesRoutes(app: FastifyInstance) {
       likedAt: l.likedAt,
     }))
 
+    // Locked likers: ONLY the first photo (for a blurred tile). No identity.
+    const locked = lockedLikers.map((l) => ({ photo: photosByUser.get(l.id)?.[0] ?? null }))
+
     // Mark seen so the badge clears. Fire-and-forget — a failed watermark write
     // only means the badge lingers, not a broken screen.
     db.from('users').update({ likes_seen_at: new Date().toISOString() }).eq('id', req.userId)
       .then(({ error }: { error: unknown }) => { if (error) req.log.warn({ err: error }, 'likes_seen_at update failed') })
 
-    return { visible, lockedCount, premiumRequired: lockedCount > 0 }
+    return { visible, locked, lockedCount, premiumRequired: lockedCount > 0 }
   })
 
   app.get('/likes/unread-count', async (req, reply) => {

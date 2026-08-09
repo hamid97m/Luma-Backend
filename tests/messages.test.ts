@@ -212,6 +212,11 @@ describe('POST /matches/:matchId/messages', () => {
       }),
     } as any)
 
+    // Sender's primary photo lookup — feeds the 4th arg of notifyNewMessage.
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ order: () => ({ limit: () => ({ maybeSingle: () => ({ data: { url: 'https://ali.jpg' } }) }) }) }) }),
+    } as any)
+
     const markUpdateEq = vi.fn().mockResolvedValue({ error: null })
     vi.mocked(db.from).mockReturnValueOnce({ update: () => ({ eq: markUpdateEq }) } as any)
 
@@ -223,7 +228,7 @@ describe('POST /matches/:matchId/messages', () => {
     // Flush the fire-and-forget notify chain before asserting on it.
     await new Promise((resolve) => setImmediate(resolve))
 
-    expect(notifyNewMessage).toHaveBeenCalledWith(OTHER_TELEGRAM_ID, 'Ali', 'hi')
+    expect(notifyNewMessage).toHaveBeenCalledWith(OTHER_TELEGRAM_ID, 'Ali', 'hi', 'https://ali.jpg')
     expect(markUpdateEq).toHaveBeenCalledWith('id', OTHER_ID)
   })
 

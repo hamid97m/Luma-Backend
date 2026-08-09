@@ -196,7 +196,7 @@ describe('GET /discovery', () => {
     expect(res.json()).toEqual({ profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null } })
   })
 
-  it('boosts a liker to the top of the batch, city profile second', async () => {
+  it('includes the liker, same-city, and rest profiles in the batch (order shuffled)', async () => {
     setupAuth()
 
     // viewer — has a location so the city tier runs
@@ -242,8 +242,9 @@ describe('GET /discovery', () => {
 
     expect(res.statusCode).toBe(200)
     const body = res.json()
-    // liker at position 0, city fills position 1, rest follows — no liker marker in payload
-    expect(body.profiles.map((p: any) => p.id)).toEqual(['liker-1', 'city-1', 'rest-1'])
+    // All three tiers land in the batch; order is shuffled so assert membership,
+    // not position. No liker marker leaks into the payload.
+    expect(body.profiles.map((p: any) => p.id).sort()).toEqual(['city-1', 'liker-1', 'rest-1'])
     expect(body.profiles[0]).not.toHaveProperty('likedYou')
   })
 

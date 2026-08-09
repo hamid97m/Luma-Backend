@@ -5,7 +5,9 @@ import { getSwipeLimitStatus } from '../premium/swipeLimit.js'
 
 const BATCH_SIZE = 10
 const MAX_LIKER_SLOTS = 4
-// Likers occupy the first slots of the batch (shuffled among themselves).
+// Which batch slots likers get. This only controls whether likers make it
+// *into* the 10-profile batch (they shouldn't be crowded out) — the final
+// batch is shuffled before returning, so it does not fix their display order.
 const LIKER_POSITIONS = [0, 1, 2, 3]
 // Fetch more than we show so the per-request shuffle varies *which* profiles
 // surface across refreshes, not just their order. Ordered by last_active first,
@@ -125,7 +127,9 @@ export async function discoveryRoutes(app: FastifyInstance) {
 
     if (error) return reply.status(500).send({ error: 'discovery_failed' })
 
-    const merged = interleaveBatch(likers, sameCity, shuffle(rest ?? []), BATCH_SIZE, LIKER_POSITIONS)
+    // Build the batch (likers boosted in so they're not crowded out), then
+    // shuffle the whole 10 so nobody — likers included — is pinned to the top.
+    const merged = shuffle(interleaveBatch(likers, sameCity, shuffle(rest ?? []), BATCH_SIZE, LIKER_POSITIONS))
 
     const formatted = merged.map((p: any) => ({
       id: p.id,

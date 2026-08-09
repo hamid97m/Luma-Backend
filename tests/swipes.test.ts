@@ -228,9 +228,9 @@ describe('POST /swipes — mutual like', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json().matched).toBe(true)
     expect(res.json().match.id).toBe('match-uuid')
-    // Each participant is notified about the OTHER person.
+    // Only the OTHER user (the earlier liker, away from the app) is DM'd — the
+    // active swiper already sees the match live in-app, so no self-notification.
     expect(notifyMatch).toHaveBeenCalledWith([
-      { telegramId: 1, matchName: 'Sara', matchPhoto: 'https://example.com/sara.jpg' },
       { telegramId: 2, matchName: 'Ali', matchPhoto: 'https://example.com/ali.jpg' },
     ])
     // The match path uses notifyMatch, not the new-like DM — no double notification.

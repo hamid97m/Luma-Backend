@@ -1,5 +1,8 @@
-import { Bot, Context, InlineKeyboard } from 'grammy'
+import { Bot, Context, InlineKeyboard, webhookCallback } from 'grammy'
+import { createHash } from 'crypto'
+import type { FastifyInstance } from 'fastify'
 import { db } from './db.js'
+import { WEBHOOK_ROUTE_PREFIX } from './webhookRoute.js'
 import { createTicket, shouldCaptureSupport } from './support/service.js'
 import { validatePreCheckout, handleGiftPaid } from './gifts/service.js'
 import {
@@ -19,6 +22,25 @@ let botUsername: string | null = null
 
 export function getBotUsername(): string | null {
   return botUsername
+}
+
+// The webhook lives under WEBHOOK_ROUTE_PREFIX (see webhookRoute.ts); the
+// segment after it is an unguessable, BOT_TOKEN-derived token. server.ts exempts
+// that prefix from the initData auth hook (Telegram sends no Authorization header).
+//
+// Two independent derivations from BOT_TOKEN so the value that appears in the
+// URL (and thus in access logs) is never the same as the secret-token header
+// that actually authenticates the request. No extra env var to configure.
+function derive(salt: string): string {
+  return createHash('sha256').update(`${process.env.BOT_TOKEN ?? ''}:${salt}`).digest('hex')
+}
+
+export function webhookPath(): string {
+  return `${WEBHOOK_ROUTE_PREFIX}/${derive('path').slice(0, 32)}`
+}
+
+function webhookSecretToken(): string {
+  return derive('secret')
 }
 
 async function sendStart(ctx: Context): Promise<void> {
@@ -44,8 +66,11 @@ async function promptSupport(ctx: Context): Promise<void> {
   await ctx.reply("What's the issue? Send it to me in one message and I'll open a support ticket.")
 }
 
-export function startBot(): void {
-  const bot = getBot()
+let handlersRegistered = false
+
+function registerHandlers(bot: Bot): void {
+  if (handlersRegistered) return
+  handlersRegistered = true
 
   // --- Telegram Stars payments (gifts + premium; must precede the message catch-alls) ---
   // The invoice payload routes: `premium:<txId>` -> premium, anything else -> gifts.
@@ -105,17 +130,43 @@ export function startBot(): void {
   // Any other command or message we don't explicitly support falls through
   // to here and is treated the same as /start.
   bot.on('message', sendStart)
+}
 
-  bot.start({
-    onStart: (me) => {
-      botUsername = me.username
-      console.log('[bot] polling started')
-    },
-  }).catch((err) => {
-    // 409 happens during rolling restarts — log and exit so Render restarts cleanly
-    console.error('[bot] fatal:', err.message)
-    process.exit(1)
+/**
+ * Register the Telegram webhook route on the Fastify app. Must run before
+ * `app.listen()` (Fastify won't accept new routes afterwards). This only wires
+ * up the in-process handler — no network calls; `initWebhook` tells Telegram
+ * where to POST. The route is exempt from the global rate limit because bursts
+ * of queued updates (e.g. after a restart) arrive from Telegram's IP range.
+ */
+export function mountWebhook(app: FastifyInstance): void {
+  const bot = getBot()
+  registerHandlers(bot)
+  const handler = webhookCallback(bot, 'fastify', { secretToken: webhookSecretToken() })
+  app.post(
+    webhookPath(),
+    { config: { rateLimit: false }, logLevel: 'silent' },
+    handler as never,
+  )
+}
+
+/**
+ * Initialise the bot and register the webhook with Telegram. Call AFTER
+ * `app.listen()` so the endpoint is already accepting requests. `setWebhook`
+ * also atomically disables any previous long-polling loop on Telegram's side,
+ * so switching from polling to webhooks needs no manual `deleteWebhook`.
+ */
+export async function initWebhook(publicBaseUrl: string): Promise<void> {
+  const bot = getBot()
+  await bot.init()
+  botUsername = bot.botInfo.username
+  const url = `${publicBaseUrl.replace(/\/+$/, '')}${webhookPath()}`
+  await bot.api.setWebhook(url, {
+    secret_token: webhookSecretToken(),
+    allowed_updates: ['message', 'pre_checkout_query'],
+    drop_pending_updates: false,
   })
+  console.log(`[bot] webhook set (@${botUsername})`)
 }
 
 export interface MatchNotifyRecipient {

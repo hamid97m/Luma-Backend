@@ -4,6 +4,7 @@ import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import { verifyInitData } from './auth.js'
 import { getBotUsername } from './bot.js'
+import { WEBHOOK_ROUTE_PREFIX } from './webhookRoute.js'
 import { db } from './db.js'
 import type { TelegramUser } from './types.js'
 import { authRoutes } from './routes/auth.js'
@@ -62,7 +63,12 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   // Auth middleware — skips /auth/verify and /health
   app.addHook('preHandler', async (req: FastifyRequest, reply: FastifyReply) => {
-    if (req.url === '/auth/verify' || req.url === '/health' || req.url.startsWith('/admin')) return
+    if (
+      req.url === '/auth/verify' ||
+      req.url === '/health' ||
+      req.url.startsWith('/admin') ||
+      req.url.startsWith(`${WEBHOOK_ROUTE_PREFIX}/`)
+    ) return
 
     const initData = req.headers.authorization
     if (!initData) return reply.status(401).send({ error: 'missing_auth' })

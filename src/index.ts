@@ -1,15 +1,31 @@
 import 'dotenv/config'
 import { buildApp } from './server.js'
-import { startBot } from './bot.js'
+import { mountWebhook, initWebhook } from './bot.js'
 import { runFakeLikerJob, setNextScheduledRunAt } from './jobs/fakeLiker.js'
 import { getLastFakeLikerRunAt } from './jobs/fakeLikerConfig.js'
 
 const FAKE_LIKER_FIRST_RUN_DELAY_MS = 60_000
 const FAKE_LIKER_INTERVAL_MS = 6 * 60 * 60 * 1000
 
+// The bot's own public base URL — where Telegram POSTs webhook updates.
+// PUBLIC_URL wins; otherwise fall back to the host platform's injected value.
+function resolvePublicUrl(): string {
+  const url =
+    process.env.PUBLIC_URL ||
+    process.env.RENDER_EXTERNAL_URL ||
+    (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : undefined)
+  if (!url) {
+    throw new Error(
+      'PUBLIC_URL (or RENDER_EXTERNAL_URL / RAILWAY_PUBLIC_DOMAIN) is required to register the Telegram webhook',
+    )
+  }
+  return url
+}
+
 const app = await buildApp()
 if (process.env.NODE_ENV === 'production') {
-  startBot()
+  // Route must be registered before app.listen(); initWebhook (below) runs after.
+  mountWebhook(app)
 
   const runFakeLikerSafely = async () => {
     try {
@@ -43,3 +59,14 @@ if (process.env.NODE_ENV === 'production') {
   console.log('[dev] Bot disabled (set NODE_ENV=production and a real BOT_TOKEN to enable)')
 }
 await app.listen({ port: Number(process.env.PORT ?? 3000), host: '0.0.0.0' })
+
+if (process.env.NODE_ENV === 'production') {
+  try {
+    await initWebhook(resolvePublicUrl())
+  } catch (err) {
+    // A live server with an unregistered webhook is a silently-dead bot (health
+    // check stays green), so crash to force the platform to restart and retry.
+    console.error('[bot] webhook registration failed:', (err as Error).message)
+    process.exit(1)
+  }
+}

@@ -158,11 +158,9 @@ describe('admin fake-liker stats', () => {
     headers = { authorization: `Bearer ${signAdminToken({ adminId: 'a1', username: 'root' })}` }
   })
 
-  it('returns pool size, totals (via rpc), last run, and per-fake breakdown', async () => {
+  it('returns pool size, totals (via rpc), and last run', async () => {
     vi.mocked(db.from).mockImplementation((table: string) => {
       if (table === 'users') return chainable({ data: [{ id: 'f1', name: 'Fake One' }, { id: 'f2', name: 'Fake Two' }], error: null })
-      if (table === 'swipes') return chainable({ count: 4, error: null })
-      if (table === 'matches') return chainable({ count: 2, error: null })
       return chainable({ data: null })
     })
     // Postgres bigint aggregates arrive over PostgREST as strings — assert the route coerces them.
@@ -179,10 +177,6 @@ describe('admin fake-liker stats', () => {
       totalSalamsSent: 3,
       lastRunAt: '2026-08-05T00:00:00Z',
       nextRunAt: null,
-      perFake: [
-        { id: 'f1', name: 'Fake One', likesSent: 4, matches: 2 },
-        { id: 'f2', name: 'Fake Two', likesSent: 4, matches: 2 },
-      ],
     })
     expect(db.rpc).toHaveBeenCalledWith('fake_liker_run_totals')
   })
@@ -205,7 +199,6 @@ describe('admin fake-liker stats', () => {
       totalSalamsSent: 0,
       lastRunAt: null,
       nextRunAt: null,
-      perFake: [],
     })
   })
 
@@ -228,6 +221,71 @@ describe('admin fake-liker stats', () => {
     const res = await app.inject({ method: 'GET', url: '/admin/fake-liker/stats', headers })
     expect(res.statusCode).toBe(500)
     expect(res.json()).toEqual({ error: 'stats_fetch_failed' })
+  })
+})
+
+describe('admin fake-liker fakes', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  let headers: Record<string, string>
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    process.env.ADMIN_JWT_SECRET = 'test-secret'
+    app = await buildApp()
+    headers = { authorization: `Bearer ${signAdminToken({ adminId: 'a1', username: 'root' })}` }
+  })
+
+  it('paginates the pool and shapes each row', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') return chainable({ data: [{ id: 'f1', name: 'Fake One' }, { id: 'f2', name: 'Fake Two' }], error: null })
+      if (table === 'matches') return chainable({ data: [], error: null })
+      if (table === 'swipes') return chainable({ count: 3, error: null })
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'GET', url: '/admin/fake-liker/fakes?page=1', headers })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({
+      items: [
+        { id: 'f1', name: 'Fake One', likesSent: 3, matches: 0, unreadCount: 0 },
+        { id: 'f2', name: 'Fake Two', likesSent: 3, matches: 0, unreadCount: 0 },
+      ],
+      total: 2, page: 1, pageCount: 1,
+    })
+  })
+
+  it('sorts fakes with unread chats first', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') return chainable({ data: [{ id: 'f1', name: 'Fake One' }, { id: 'f2', name: 'Fake Two' }], error: null })
+      if (table === 'matches') return chainable({ data: [{ id: 'm1', user1_id: 'f1', user2_id: 'real1' }], error: null })
+      if (table === 'messages') return chainable({ data: [{ match_id: 'm1', sender_id: 'real1' }], error: null })
+      if (table === 'swipes') return chainable({ count: 0, error: null })
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'GET', url: '/admin/fake-liker/fakes?page=1', headers })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.items[0]).toEqual({ id: 'f1', name: 'Fake One', likesSent: 0, matches: 1, unreadCount: 1 })
+    expect(body.items[1]).toEqual({ id: 'f2', name: 'Fake Two', likesSent: 0, matches: 0, unreadCount: 0 })
+  })
+
+  it('returns an empty page for an empty pool', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') return chainable({ data: [], error: null })
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'GET', url: '/admin/fake-liker/fakes', headers })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ items: [], total: 0, page: 1, pageCount: 1 })
+  })
+
+  it('500s when the pool fetch fails', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') return chainable({ data: null, error: { message: 'boom' } })
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'GET', url: '/admin/fake-liker/fakes', headers })
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toEqual({ error: 'fakes_fetch_failed' })
   })
 })
 

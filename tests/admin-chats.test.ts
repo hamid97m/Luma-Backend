@@ -224,6 +224,19 @@ describe('admin chats', () => {
       expect(res.statusCode).toBe(200)
       expect(res.json()).toEqual({ count: 0 })
     })
+
+    it('returns count 0 when the only unread message in a fake chat was sent by the seed, not the real user', async () => {
+      mockTables({
+        users: { data: [{ id: 'seed1' }], error: null },
+        matches: { data: [{ id: 'm1', user1_id: 'seed1', user2_id: 'real1' }], error: null },
+        messages: { data: [{ match_id: 'm1', sender_id: 'seed1', read_at: null }], error: null },
+      })
+
+      const res = await app.inject({ method: 'GET', url: '/admin/chats/unread-count', headers })
+
+      expect(res.statusCode).toBe(200)
+      expect(res.json()).toEqual({ count: 0 })
+    })
   })
 
   it('GET /admin/chats?filter=fake-unread returns only fake-unread matches', async () => {

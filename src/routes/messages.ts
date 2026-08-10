@@ -1,10 +1,9 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
-import { notifyNewMessage } from '../bot.js'
 import { premiumGateBlocks } from '../premium/service.js'
+import { deliverMessageNotification } from '../messaging/deliver.js'
 
 const MAX_MESSAGE_LENGTH = 2000
-const OFFLINE_THRESHOLD_MS = 10 * 60 * 1000
 
 async function getUsableMatch(matchId: string, userId: string) {
   const { data: match } = await db
@@ -103,27 +102,13 @@ export async function messagesRoutes(app: FastifyInstance) {
     const other: any = match.user1_id === req.userId ? match.user2 : match.user1
     const me: any = match.user1_id === req.userId ? match.user1 : match.user2
 
-    const isOffline = !other.last_active || Date.now() - new Date(other.last_active).getTime() > OFFLINE_THRESHOLD_MS
-    if (isOffline && !other.notified_offline_at && other.allows_write_to_pm !== false) {
-      // Sender's primary photo (lowest position) so the bot notification shows
-      // who messaged. Null when they have no photo — falls back to a text notice.
-      const { data: senderPhoto } = await db
-        .from('user_photos')
-        .select('url')
-        .eq('user_id', req.userId)
-        .order('position', { ascending: true })
-        .limit(1)
-        .maybeSingle()
-
-      // Mark notified_offline_at only after the Telegram send succeeds — a
-      // blocked bot or API hiccup shouldn't silently consume this offline
-      // stretch's one-notification allowance.
-      notifyNewMessage(other.telegram_id, me.name, trimmed, senderPhoto?.url ?? null)
-        .then(() =>
-          db.from('users').update({ notified_offline_at: new Date().toISOString() }).eq('id', other.id)
-        )
-        .catch((err) => req.log.warn({ err }, 'failed to send offline notification'))
-    }
+    void deliverMessageNotification(
+      { id: other.id, telegram_id: other.telegram_id, last_active: other.last_active, notified_offline_at: other.notified_offline_at, allows_write_to_pm: other.allows_write_to_pm },
+      req.userId,
+      me.name,
+      trimmed,
+      req.log,
+    )
 
     return {
       message: {

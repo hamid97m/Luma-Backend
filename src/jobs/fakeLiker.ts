@@ -24,6 +24,9 @@ const INCOMING_LIKE_PAGE_SIZE = 1000
 const SCAN_CAP = 2000
 const SALAM_CAP = 200
 const TARGET_LOOKING_FOR = ['women', 'both', 'everyone']
+/** A real user never accumulates more than this many fake matches — real people
+ * don't all like you back, so beyond this the liked fakes simply don't reciprocate. */
+const MAX_FAKE_MATCHES_PER_USER = 2
 
 /** Module-level concurrency guard: only one run at a time across schedule + manual triggers. */
 let running = false
@@ -284,32 +287,52 @@ export async function runFakeLikerJob(
         inOffset += INCOMING_LIKE_PAGE_SIZE
       }
 
-      // Drop pairs already matched (fake already liked them back on a prior run) —
-      // matches involving a fake, paged like the salam phase. Skipping them keeps
-      // budget for genuinely-new leads instead of burning it on 23505 retries.
+      // Existing fake matches per real user — matches involving a fake, deduped by
+      // match id (a real↔fake match sits on exactly one query's side; both-fake
+      // matches have no real side and are ignored). Feeds both the "already liked
+      // back" skip and the per-user cap.
       const matchedPairs = new Set<string>()
+      const fakeMatchCountByReal = new Map<string, number>()
+      const seenMatchIds = new Set<string>()
       for (const col of ['user1_id', 'user2_id'] as const) {
         const { data: mrows } = await db
           .from('matches')
-          .select('user1_id, user2_id')
+          .select('id, user1_id, user2_id')
           .in(col, fakeIds)
-        for (const m of (mrows ?? []) as Array<{ user1_id: string; user2_id: string }>) {
-          const fakeSide = fakeIdSet.has(m.user1_id) ? m.user1_id : m.user2_id
-          const realSide = fakeIdSet.has(m.user1_id) ? m.user2_id : m.user1_id
+        for (const m of (mrows ?? []) as Array<{ id: string; user1_id: string; user2_id: string }>) {
+          if (seenMatchIds.has(m.id)) continue
+          seenMatchIds.add(m.id)
+          const u1Fake = fakeIdSet.has(m.user1_id)
+          const u2Fake = fakeIdSet.has(m.user2_id)
+          if (u1Fake && u2Fake) continue // both-fake → no real side
+          const realSide = u1Fake ? m.user2_id : m.user1_id
+          const fakeSide = u1Fake ? m.user1_id : m.user2_id
           matchedPairs.add(`${realSide}:${fakeSide}`)
+          fakeMatchCountByReal.set(realSide, (fakeMatchCountByReal.get(realSide) ?? 0) + 1)
         }
       }
-      const pending = incoming.filter((p) => !matchedPairs.has(`${p.realId}:${p.fakeId}`))
-      if (pending.length > remainingBudget) {
+
+      // One lead per real user: their newest liked fake that isn't already matched,
+      // and only while they're under the fake-match cap. One-per-user = trickle —
+      // at most one new fake match per user per run, so matches arrive spread over
+      // days rather than all at once, and no user ever exceeds MAX_FAKE_MATCHES_PER_USER.
+      const candidateByReal = new Map<string, string>()
+      for (const { realId, fakeId } of incoming) {
+        if (candidateByReal.has(realId)) continue // already picked this user's lead (newest wins)
+        if (matchedPairs.has(`${realId}:${fakeId}`)) continue // already liked back
+        if ((fakeMatchCountByReal.get(realId) ?? 0) >= MAX_FAKE_MATCHES_PER_USER) continue // at cap
+        candidateByReal.set(realId, fakeId)
+      }
+      const leads = [...candidateByReal.entries()].map(([realId, fakeId]) => ({ realId, fakeId }))
+      if (leads.length > remainingBudget) {
         logger.info(
-          { pending: pending.length, budget: remainingBudget },
-          'fake liker: like-back backlog exceeds per-run budget; newest processed first, rest carry to next run',
+          { leads: leads.length, budget: remainingBudget },
+          'fake liker: like-back leads exceed per-run budget; rest carry to next run',
         )
       }
 
-      // Only fetch/validate the newest `remainingBudget` leads — a capped `.in()`
-      // (≤ maxTargetsPerRun ids) stays under PostgREST's max-rows cap.
-      const slice = pending.slice(0, remainingBudget)
+      // A capped `.in()` (≤ maxTargetsPerRun ids) stays under PostgREST's max-rows cap.
+      const slice = leads.slice(0, remainingBudget)
       if (slice.length > 0) {
         const realIds = [...new Set(slice.map((p) => p.realId))]
         const { data: reals, error: realsErr } = await db

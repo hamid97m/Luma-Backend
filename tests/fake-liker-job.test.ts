@@ -461,6 +461,51 @@ describe('runFakeLikerJob — like-back phase', () => {
     expect(res.matchesCreated).toBe(0)
     expect(logs.inserts.swipes).toBeUndefined()
   })
+
+  it('caps fake matches per user — a 3rd liked fake is not reciprocated once at 2 matches', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1'), mkFake('f2'), mkFake('f3'),
+        mkUser('r1', { gender: 'man', looking_for: 'both', created_at: OLD }),
+      ],
+      swipes: [
+        { swiper_id: 'f1', swiped_id: 'r1', direction: 'like' }, // received likes → not zero-liked (cold excludes r1)
+        { swiper_id: 'f2', swiped_id: 'r1', direction: 'like' },
+        { swiper_id: 'r1', swiped_id: 'f3', direction: 'like' }, // r1 now likes a 3rd fake
+      ],
+      matches: [
+        { id: 'm1', user1_id: 'f1', user2_id: 'r1' }, // already 2 fake matches
+        { id: 'm2', user1_id: 'f2', user2_id: 'r1' },
+      ],
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+
+    expect(res.matchesCreated).toBe(0) // r1 is at the cap → f3 does not like back
+    expect(logs.inserts.swipes).toBeUndefined()
+  })
+
+  it('trickles — a user who liked 3 fakes gets only ONE new match this run', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1'), mkFake('f2'), mkFake('f3'),
+        mkUser('r1', { gender: 'man', looking_for: 'both', created_at: OLD, telegram_id: 777 }),
+      ],
+      swipes: [
+        { swiper_id: 'r1', swiped_id: 'f1', direction: 'like' },
+        { swiper_id: 'r1', swiped_id: 'f2', direction: 'like' },
+        { swiper_id: 'r1', swiped_id: 'f3', direction: 'like' },
+      ],
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+
+    expect(res.likesSent).toBe(1) // one fake likes back this run, not all three
+    expect(res.matchesCreated).toBe(1)
+    expect(logs.inserts.swipes).toHaveLength(1)
+  })
 })
 
 describe('runFakeLikerJob — new-like notification', () => {

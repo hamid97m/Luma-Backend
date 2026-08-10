@@ -20,6 +20,7 @@ const FOUR_HOURS_MS = 4 * 60 * 60 * 1000
 const OFFLINE_THRESHOLD_MS = 10 * 60 * 1000
 const CANDIDATE_BATCH = 200
 const RECEIVED_LIKE_PAGE_SIZE = 1000
+const INCOMING_LIKE_PAGE_SIZE = 1000
 const SCAN_CAP = 2000
 const SALAM_CAP = 200
 const TARGET_LOOKING_FOR = ['women', 'both', 'everyone']
@@ -71,6 +72,90 @@ function pickFake(compatible: Fake[], targetLocation: string | null | undefined)
   return best
 }
 
+interface LikeTarget {
+  id: string
+  gender: string
+  telegram_id: number
+  allows_write_to_pm: boolean | null
+}
+
+/**
+ * A fake likes one target, then reconciles the outcome:
+ *   - reverse like present → create the match (sorted pair) and notify the real user
+ *   - no reverse like      → send the "someone liked you" DM
+ * Mutates `stats`. The caller is responsible for incrementing `fake.counter`
+ * before calling (so load balancing sees the assignment immediately).
+ * Shared by the like-back phase (reverse like is guaranteed) and the cold-outreach
+ * phase (reverse like is the exception) so both paths stay in lockstep.
+ */
+async function likeTargetAndMatch(
+  fake: Fake,
+  target: LikeTarget,
+  fakePhoto: (id: string) => string | null,
+  stats: RunStats,
+  logger: JobLogger,
+): Promise<void> {
+  const { error: swipeErr } = await db
+    .from('swipes')
+    .insert({ swiper_id: fake.id, swiped_id: target.id, direction: 'like' })
+
+  if ((swipeErr as any)?.code === '23505') {
+    stats.skipped++
+    return
+  }
+  if (swipeErr) {
+    stats.errors++
+    logger.warn({ err: swipeErr, fake: fake.id, target: target.id }, 'fake liker: swipe insert failed')
+    return
+  }
+  stats.likesSent++
+
+  // Reverse-like? (target already liked this fake) → it's a match.
+  const { data: reverse, error: reverseErr } = await db
+    .from('swipes')
+    .select('id')
+    .eq('swiper_id', target.id)
+    .eq('swiped_id', fake.id)
+    .eq('direction', 'like')
+    .maybeSingle()
+  if (reverseErr) {
+    // A transient error read as "no reverse like" would permanently miss the match
+    // (neither side re-swipes this pair). Skip match-creation instead.
+    stats.errors++
+    logger.warn({ err: reverseErr, fake: fake.id, target: target.id }, 'fake liker: reverse-like check failed')
+    return
+  }
+  if (!reverse) {
+    // Fake liked a real user without matching → send the "someone liked you" DM.
+    if (target.telegram_id > 0 && target.allows_write_to_pm !== false) {
+      notifyNewLike(target.telegram_id, fake.name)
+        .catch((err) => logger.warn({ err }, 'fake liker: new-like notify failed'))
+    }
+    return
+  }
+
+  const [u1, u2] = [fake.id, target.id].sort()
+  const { data: match, error: matchErr } = await db
+    .from('matches')
+    .insert({ user1_id: u1, user2_id: u2 })
+    .select('id')
+    .single()
+
+  if ((matchErr as any)?.code === '23505') return // already matched — no side effects
+  if (matchErr || !match) {
+    stats.errors++
+    logger.warn({ err: matchErr, fake: fake.id, target: target.id }, 'fake liker: match insert failed')
+    return
+  }
+  stats.matchesCreated++
+
+  // Notify the real user only (fakes have a negative sentinel telegram_id).
+  if (target.telegram_id > 0 && target.allows_write_to_pm !== false) {
+    notifyMatch([{ telegramId: target.telegram_id, matchName: fake.name, matchPhoto: fakePhoto(fake.id) }])
+      .catch((err) => logger.warn({ err }, 'fake liker: match notify failed'))
+  }
+}
+
 /**
  * Runs the fake-liker background job once. Never throws out of the entry point:
  * per-item failures are caught, counted, and logged; the run always finishes and
@@ -111,6 +196,7 @@ export async function runFakeLikerJob(
 
     const fakeIds = (pool ?? []).map((f: { id: string }) => f.id)
     if (fakeIds.length === 0) return stats // no fakes → record a zeroed run and finish
+    const fakeIdSet = new Set(fakeIds)
 
     // --- Seed per-fake like counters from history (for load balancing) ---
     // Per-fake head counts, not a raw-row fetch: an unbounded `select` over every fake
@@ -150,6 +236,117 @@ export async function runFakeLikerJob(
       location: f.location ?? null,
       counter: counters[f.id] ?? 0,
     }))
+    const fakeById = new Map(fakes.map((f) => [f.id, f]))
+
+    // Shared per-run budget: warm like-backs are spent first, then cold outreach
+    // fills whatever's left — so one run never exceeds cfg.maxTargetsPerRun total.
+    let remainingBudget = cfg.maxTargetsPerRun
+
+    // ========================================================================
+    // Phase 1 — Like-back: every real user who already liked a fake gets that
+    // SAME fake's like back, creating an instant match. These are warm leads
+    // (they expressed interest first), so they're processed before cold outreach.
+    // The cold path only reaches them by coincidence — same user happening to
+    // have zero received likes AND load-balancing happening to pick the very
+    // fake they liked — so without this pass most interested users are never
+    // matched. The salam phase downstream opens each new match with "salam".
+    // ========================================================================
+    if (remainingBudget > 0) {
+      // Real→fake incoming likes, newest first, deduped by (real, fake) pair.
+      const incoming: Array<{ realId: string; fakeId: string }> = []
+      const seenPair = new Set<string>()
+      let inScanned = 0
+      let inOffset = 0
+      while (inScanned < SCAN_CAP) {
+        const { data: batch, error: inErr } = await db
+          .from('swipes')
+          .select('swiper_id, swiped_id, created_at')
+          .in('swiped_id', fakeIds)
+          .eq('direction', 'like')
+          .order('created_at', { ascending: false })
+          .range(inOffset, inOffset + INCOMING_LIKE_PAGE_SIZE - 1)
+        if (inErr) {
+          stats.errors++
+          logger.warn({ err: inErr }, 'fake liker: incoming-like fetch failed')
+          break
+        }
+        const rows = (batch ?? []) as Array<{ swiper_id: string; swiped_id: string }>
+        if (rows.length === 0) break
+        inScanned += rows.length
+        for (const r of rows) {
+          if (fakeIdSet.has(r.swiper_id)) continue // ignore fake→fake likes
+          const key = `${r.swiper_id}:${r.swiped_id}`
+          if (seenPair.has(key)) continue
+          seenPair.add(key)
+          incoming.push({ realId: r.swiper_id, fakeId: r.swiped_id })
+        }
+        if (rows.length < INCOMING_LIKE_PAGE_SIZE) break
+        inOffset += INCOMING_LIKE_PAGE_SIZE
+      }
+
+      // Drop pairs already matched (fake already liked them back on a prior run) —
+      // matches involving a fake, paged like the salam phase. Skipping them keeps
+      // budget for genuinely-new leads instead of burning it on 23505 retries.
+      const matchedPairs = new Set<string>()
+      for (const col of ['user1_id', 'user2_id'] as const) {
+        const { data: mrows } = await db
+          .from('matches')
+          .select('user1_id, user2_id')
+          .in(col, fakeIds)
+        for (const m of (mrows ?? []) as Array<{ user1_id: string; user2_id: string }>) {
+          const fakeSide = fakeIdSet.has(m.user1_id) ? m.user1_id : m.user2_id
+          const realSide = fakeIdSet.has(m.user1_id) ? m.user2_id : m.user1_id
+          matchedPairs.add(`${realSide}:${fakeSide}`)
+        }
+      }
+      const pending = incoming.filter((p) => !matchedPairs.has(`${p.realId}:${p.fakeId}`))
+      if (pending.length > remainingBudget) {
+        logger.info(
+          { pending: pending.length, budget: remainingBudget },
+          'fake liker: like-back backlog exceeds per-run budget; newest processed first, rest carry to next run',
+        )
+      }
+
+      // Only fetch/validate the newest `remainingBudget` leads — a capped `.in()`
+      // (≤ maxTargetsPerRun ids) stays under PostgREST's max-rows cap.
+      const slice = pending.slice(0, remainingBudget)
+      if (slice.length > 0) {
+        const realIds = [...new Set(slice.map((p) => p.realId))]
+        const { data: reals, error: realsErr } = await db
+          .from('users')
+          .select('id, gender, telegram_id, allows_write_to_pm, is_seed, is_active, banned_at, deleted_at')
+          .in('id', realIds)
+        if (realsErr) {
+          stats.errors++
+          logger.warn({ err: realsErr }, 'fake liker: like-back real-user fetch failed')
+        } else {
+          const realById = new Map((reals ?? []).map((u: any) => [u.id, u]))
+          for (const { realId, fakeId } of slice) {
+            if (remainingBudget <= 0) break
+            try {
+              const real: any = realById.get(realId)
+              if (!real || real.is_seed || !real.is_active || real.banned_at || real.deleted_at) continue
+              const fake = fakeById.get(fakeId)
+              if (!fake) continue // liked fake is no longer in the active pool → skip
+              if (!fakeAllowsGender(fake.looking_for, real.gender)) continue // she isn't looking for that gender
+
+              fake.counter++ // count the assignment immediately so load stays balanced
+              await likeTargetAndMatch(
+                fake,
+                { id: real.id, gender: real.gender, telegram_id: real.telegram_id, allows_write_to_pm: real.allows_write_to_pm },
+                fakePhoto,
+                stats,
+                logger,
+              )
+              remainingBudget--
+            } catch (err) {
+              stats.errors++
+              logger.warn({ err }, 'fake liker: like-back processing failed')
+            }
+          }
+        }
+      }
+    }
 
     // --- Target selection: page through eligible candidates, exclude any with a received like ---
     const cutoff = new Date(Date.now() - FOUR_HOURS_MS).toISOString()
@@ -157,7 +354,7 @@ export async function runFakeLikerJob(
     let scanned = 0
     let offset = 0
 
-    while (targets.length < cfg.maxTargetsPerRun && scanned < SCAN_CAP) {
+    while (targets.length < remainingBudget && scanned < SCAN_CAP) {
       const { data: batch, error: batchErr } = await db
         .from('users')
         .select('id, gender, telegram_id, allows_write_to_pm, location')
@@ -215,14 +412,14 @@ export async function runFakeLikerJob(
       for (const cand of rows) {
         if (likedSet.has(cand.id)) continue
         targets.push(cand)
-        if (targets.length >= cfg.maxTargetsPerRun) break
+        if (targets.length >= remainingBudget) break
       }
 
       if (rows.length < CANDIDATE_BATCH) break
       offset += CANDIDATE_BATCH
     }
 
-    // --- Like phase: one fake likes each target; create match on reverse-like ---
+    // --- Cold-outreach like phase: one fake likes each zero-liked target ---
     for (const target of targets) {
       try {
         const compatible = fakes.filter((f) => fakeAllowsGender(f.looking_for, target.gender))
@@ -231,65 +428,7 @@ export async function runFakeLikerJob(
         const fake = pickFake(compatible, target.location)
         fake.counter++ // count the assignment immediately so load stays balanced
 
-        const { error: swipeErr } = await db
-          .from('swipes')
-          .insert({ swiper_id: fake.id, swiped_id: target.id, direction: 'like' })
-
-        if ((swipeErr as any)?.code === '23505') {
-          stats.skipped++
-          continue
-        }
-        if (swipeErr) {
-          stats.errors++
-          logger.warn({ err: swipeErr, fake: fake.id, target: target.id }, 'fake liker: swipe insert failed')
-          continue
-        }
-        stats.likesSent++
-
-        // Reverse-like? (target already liked this fake) → it's a match.
-        const { data: reverse, error: reverseErr } = await db
-          .from('swipes')
-          .select('id')
-          .eq('swiper_id', target.id)
-          .eq('swiped_id', fake.id)
-          .eq('direction', 'like')
-          .maybeSingle()
-        if (reverseErr) {
-          // A transient error read as "no reverse like" would permanently miss the match
-          // (neither side re-swipes this pair). Skip match-creation instead.
-          stats.errors++
-          logger.warn({ err: reverseErr, fake: fake.id, target: target.id }, 'fake liker: reverse-like check failed')
-          continue
-        }
-        if (!reverse) {
-          // Fake liked a real user without matching → send the "someone liked you" DM.
-          if (target.telegram_id > 0 && target.allows_write_to_pm !== false) {
-            notifyNewLike(target.telegram_id, fake.name)
-              .catch((err) => logger.warn({ err }, 'fake liker: new-like notify failed'))
-          }
-          continue
-        }
-
-        const [u1, u2] = [fake.id, target.id].sort()
-        const { data: match, error: matchErr } = await db
-          .from('matches')
-          .insert({ user1_id: u1, user2_id: u2 })
-          .select('id')
-          .single()
-
-        if ((matchErr as any)?.code === '23505') continue // already matched — no side effects
-        if (matchErr || !match) {
-          stats.errors++
-          logger.warn({ err: matchErr, fake: fake.id, target: target.id }, 'fake liker: match insert failed')
-          continue
-        }
-        stats.matchesCreated++
-
-        // Notify the real user only (fakes have a negative sentinel telegram_id).
-        if (target.telegram_id > 0 && target.allows_write_to_pm !== false) {
-          notifyMatch([{ telegramId: target.telegram_id, matchName: fake.name, matchPhoto: fakePhoto(fake.id) }])
-            .catch((err) => logger.warn({ err }, 'fake liker: match notify failed'))
-        }
+        await likeTargetAndMatch(fake, target, fakePhoto, stats, logger)
       } catch (err) {
         stats.errors++
         logger.warn({ err }, 'fake liker: target processing failed')
@@ -299,7 +438,6 @@ export async function runFakeLikerJob(
     // --- Salam phase: open every fake-involved match with "salam" if it has no messages yet ---
     // Runs every time (independent of the like phase) so it also seeds matches the real
     // swipe route created. Two `.in` queries + dedupe stand in for an OR anti-join.
-    const fakeIdSet = new Set(fakeIds)
     const matchMap = new Map<string, { id: string; user1_id: string; user2_id: string; created_at: string }>()
     for (const col of ['user1_id', 'user2_id'] as const) {
       const { data: rows } = await db

@@ -361,6 +361,108 @@ describe('runFakeLikerJob — match creation', () => {
   })
 })
 
+describe('runFakeLikerJob — like-back phase', () => {
+  it('likes back the EXACT fake a real user liked, creating a match (multi-fake, deterministic)', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1', { name: 'Ava' }),
+        mkFake('f2', { name: 'Bea' }),
+        mkUser('r1', { gender: 'man', looking_for: 'both', telegram_id: 777, last_active: RECENT }),
+      ],
+      // r1 liked f2 specifically (not f1)
+      swipes: [{ swiper_id: 'r1', swiped_id: 'f2', direction: 'like' }],
+      user_photos: [{ user_id: 'f2', url: 'https://p/f2.jpg', position: 0 }],
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    await flush()
+
+    expect(res.matchesCreated).toBe(1)
+    // f2 (the liked fake) likes r1 back — never f1
+    expect(logs.inserts.swipes).toEqual([{ swiper_id: 'f2', swiped_id: 'r1', direction: 'like' }])
+    expect(logs.inserts.matches[0]).toMatchObject({ user1_id: 'f2', user2_id: 'r1' }) // 'f2' < 'r1'
+    expect(notifyMatch).toHaveBeenCalledWith([
+      { telegramId: 777, matchName: 'Bea', matchPhoto: 'https://p/f2.jpg' },
+    ])
+  })
+
+  it('likes back even a user who already has a received like (bypasses the cold-pass exclusion)', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1', { name: 'Ava' }),
+        mkUser('r1', { gender: 'man', looking_for: 'both', telegram_id: 777 }),
+      ],
+      swipes: [
+        { swiper_id: 'r1', swiped_id: 'f1', direction: 'like' }, // r1 liked the fake
+        { swiper_id: 'other', swiped_id: 'r1', direction: 'like' }, // r1 already has a received like
+      ],
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+
+    expect(res.matchesCreated).toBe(1)
+    expect(logs.inserts.matches[0]).toMatchObject({ user1_id: 'f1', user2_id: 'r1' })
+  })
+
+  it('skips a pair already matched — no duplicate like-back', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1'),
+        mkUser('r1', { gender: 'man', looking_for: 'both' }),
+      ],
+      swipes: [
+        { swiper_id: 'r1', swiped_id: 'f1', direction: 'like' },
+        { swiper_id: 'other', swiped_id: 'r1', direction: 'like' }, // excludes r1 from cold pass too
+      ],
+      matches: [{ id: 'm1', user1_id: 'f1', user2_id: 'r1' }],
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+
+    expect(res.matchesCreated).toBe(0)
+    expect(logs.inserts.swipes).toBeUndefined() // no new like inserted at all
+  })
+
+  it('spends the shared per-run budget on warm like-backs before cold outreach', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(1), // budget of 1
+      users: [
+        mkFake('f1', { name: 'Ava' }),
+        mkUser('warm', { gender: 'man', looking_for: 'both', telegram_id: 777 }), // liked the fake
+        mkUser('cold', { gender: 'man', looking_for: 'both', created_at: OLD }), // cold-eligible, zero likes
+      ],
+      swipes: [{ swiper_id: 'warm', swiped_id: 'f1', direction: 'like' }],
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+
+    expect(res.likesSent).toBe(1)
+    // budget is exhausted by the warm lead → 'cold' is never liked this run
+    expect(logs.inserts.swipes.map((s: any) => s.swiped_id)).toEqual(['warm'])
+    expect(res.matchesCreated).toBe(1)
+  })
+
+  it('does not like back a liker whose gender the fake is not looking for', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1', { looking_for: 'men' }), // wants men only
+        mkUser('w1', { gender: 'woman', looking_for: 'both', created_at: OLD }), // a woman liked her
+      ],
+      swipes: [{ swiper_id: 'w1', swiped_id: 'f1', direction: 'like' }],
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+
+    expect(res.likesSent).toBe(0)
+    expect(res.matchesCreated).toBe(0)
+    expect(logs.inserts.swipes).toBeUndefined()
+  })
+})
+
 describe('runFakeLikerJob — new-like notification', () => {
   it('DMs a real target when the fake likes them with no reverse like', async () => {
     const store: Store = {

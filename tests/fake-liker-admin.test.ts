@@ -253,10 +253,13 @@ describe('admin fake-liker fakes', () => {
     })
   })
 
-  it('sorts fakes with unread chats first', async () => {
+  it('sorts fakes with unread chats first, overriding alphabetical order', async () => {
+    // "Aaron" sorts before "Zed" alphabetically, but only Zed has the unread
+    // chat — if the handler ever fell back to (or dropped unread-first in
+    // favor of) alphabetical order, this would fail.
     vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') return chainable({ data: [{ id: 'f1', name: 'Fake One' }, { id: 'f2', name: 'Fake Two' }], error: null })
-      if (table === 'matches') return chainable({ data: [{ id: 'm1', user1_id: 'f1', user2_id: 'real1' }], error: null })
+      if (table === 'users') return chainable({ data: [{ id: 'f1', name: 'Aaron' }, { id: 'f2', name: 'Zed' }], error: null })
+      if (table === 'matches') return chainable({ data: [{ id: 'm1', user1_id: 'f2', user2_id: 'real1' }], error: null })
       if (table === 'messages') return chainable({ data: [{ match_id: 'm1', sender_id: 'real1' }], error: null })
       if (table === 'swipes') return chainable({ count: 0, error: null })
       return chainable({ data: null })
@@ -264,8 +267,8 @@ describe('admin fake-liker fakes', () => {
     const res = await app.inject({ method: 'GET', url: '/admin/fake-liker/fakes?page=1', headers })
     expect(res.statusCode).toBe(200)
     const body = res.json()
-    expect(body.items[0]).toEqual({ id: 'f1', name: 'Fake One', likesSent: 0, matches: 1, unreadCount: 1 })
-    expect(body.items[1]).toEqual({ id: 'f2', name: 'Fake Two', likesSent: 0, matches: 0, unreadCount: 0 })
+    expect(body.items[0]).toEqual({ id: 'f2', name: 'Zed', likesSent: 0, matches: 1, unreadCount: 1 })
+    expect(body.items[1]).toEqual({ id: 'f1', name: 'Aaron', likesSent: 0, matches: 0, unreadCount: 0 })
   })
 
   it('returns an empty page for an empty pool', async () => {

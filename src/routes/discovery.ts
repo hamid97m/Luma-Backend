@@ -19,8 +19,11 @@ const PASS_RECYCLE_MS = 24 * 60 * 60 * 1000
 // not preferred here — any 500 likers is plenty to fill 4 slots.
 const MAX_LIKER_IDS = 500
 
+// user_photos!inner makes the embed an INNER JOIN, so users with zero photos
+// are excluded from discovery entirely — an incomplete/abandoned profile (no
+// photo uploaded) must never surface as a blank card.
 const PROFILE_COLUMNS =
-  'id, name, age, bio, telegram_id, interests, location, user_photos(id, url, position)'
+  'id, name, age, bio, telegram_id, interests, location, user_photos!inner(id, url, position)'
 
 export async function discoveryRoutes(app: FastifyInstance) {
   app.get('/discovery', async (req, reply) => {

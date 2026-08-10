@@ -1,6 +1,7 @@
 import { db } from '../db.js'
-import { notifyMatch, notifyNewMessage, notifyNewLike } from '../bot.js'
+import { notifyMatch, notifyNewLike } from '../bot.js'
 import { getFakeLikerConfig } from './fakeLikerConfig.js'
+import { deliverMessageNotification } from '../messaging/deliver.js'
 
 export interface RunStats {
   likesSent: number
@@ -17,7 +18,6 @@ interface JobLogger {
 }
 
 const FOUR_HOURS_MS = 4 * 60 * 60 * 1000
-const OFFLINE_THRESHOLD_MS = 10 * 60 * 1000
 const CANDIDATE_BATCH = 200
 const RECEIVED_LIKE_PAGE_SIZE = 1000
 const INCOMING_LIKE_PAGE_SIZE = 1000
@@ -540,15 +540,14 @@ export async function runFakeLikerJob(
           }
           stats.salamsSent++
 
-          // Offline-notify the real user (mirror messages route rules).
-          const isOffline = !real.last_active || Date.now() - new Date(real.last_active).getTime() > OFFLINE_THRESHOLD_MS
-          if (isOffline && !real.notified_offline_at && real.allows_write_to_pm !== false && real.telegram_id > 0) {
-            notifyNewMessage(real.telegram_id, fake.name, 'salam', fakePhoto(fakeId))
-              .then(() =>
-                db.from('users').update({ notified_offline_at: new Date().toISOString() }).eq('id', realId),
-              )
-              .catch((err) => logger.warn({ err }, 'fake liker: salam notify failed'))
-          }
+          // Offline-notify the real user (shared delivery logic).
+          void deliverMessageNotification(
+            { id: realId, telegram_id: real.telegram_id, last_active: real.last_active, notified_offline_at: real.notified_offline_at, allows_write_to_pm: real.allows_write_to_pm },
+            fakeId,
+            fake.name,
+            'salam',
+            logger,
+          )
         } catch (err) {
           stats.errors++
           logger.warn({ err }, 'fake liker: salam processing failed')

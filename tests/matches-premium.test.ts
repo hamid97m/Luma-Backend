@@ -29,7 +29,7 @@ function mockDb(opts: { enabled: boolean; myPremiumUntil: string | null; partner
   })
 }
 
-describe('GET /matches premiumRequired', () => {
+describe('GET /matches premiumRequired — chat is free for everyone', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
   beforeEach(async () => { vi.clearAllMocks(); app = await buildApp() })
 
@@ -39,10 +39,9 @@ describe('GET /matches premiumRequired', () => {
     return res.json().matches
   }
 
-  it('true when enabled, partner is a woman, and I am not premium', async () => {
+  it('always false — even when premium is enabled, partner is a woman, and I am not premium', async () => {
     mockDb({ enabled: true, myPremiumUntil: null, partnerGender: 'woman' })
-    const matches = await fetchMatches()
-    expect(matches[0].premiumRequired).toBe(true)
+    expect((await fetchMatches())[0].premiumRequired).toBe(false)
   })
 
   it('false when premium is disabled', async () => {
@@ -52,11 +51,6 @@ describe('GET /matches premiumRequired', () => {
 
   it('false when the partner is a man', async () => {
     mockDb({ enabled: true, myPremiumUntil: null, partnerGender: 'man' })
-    expect((await fetchMatches())[0].premiumRequired).toBe(false)
-  })
-
-  it('false when I have active premium', async () => {
-    mockDb({ enabled: true, myPremiumUntil: new Date(Date.now() + 86400000).toISOString(), partnerGender: 'woman' })
     expect((await fetchMatches())[0].premiumRequired).toBe(false)
   })
 

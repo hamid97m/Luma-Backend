@@ -1,6 +1,5 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
-import { premiumGateBlocks } from '../premium/service.js'
 import { deliverMessageNotification } from '../messaging/deliver.js'
 
 const MAX_MESSAGE_LENGTH = 2000
@@ -76,10 +75,8 @@ export async function messagesRoutes(app: FastifyInstance) {
     const match = await getUsableMatch(matchId, req.userId)
     if (!match) return reply.status(404).send({ error: 'match_not_found' })
 
-    const partner: any = match.user1_id === req.userId ? match.user2 : match.user1
-    if (await premiumGateBlocks(req.userId, partner?.gender ?? null)) {
-      return reply.status(403).send({ error: 'premium_required' })
-    }
+    // Chat is free for everyone — no premium gate on sending. (Premium still gates
+    // the swipe limit and the who-liked-you screen.)
 
     if (replyToMessageId) {
       const { data: parent } = await db

@@ -22,8 +22,6 @@ describe('GET /matches excludes blocked participants', () => {
       .mockReturnValueOnce({ select: () => ({ eq: () => ({ single: () => ({ data: { id: USER_ID } }) }) }) } as any)
       // blocks lookup
       .mockReturnValueOnce({ select: () => ({ or: () => ({ data: [{ blocker_id: USER_ID, blocked_id: BLOCKED_ID }] }) }) } as any)
-      // premium_config gate check (disabled: no row -> gateActive false, no follow-up users lookup)
-      .mockReturnValueOnce({ select: () => ({ eq: () => ({ single: () => ({ data: null }) }) }) } as any)
       // matches lookup
       .mockReturnValueOnce({ select: () => ({ or: () => ({ order: () => ({ data: [
         { id: 'm1', created_at: 'now', user1_id: USER_ID, user2_id: BLOCKED_ID,

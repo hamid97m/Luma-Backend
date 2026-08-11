@@ -1,6 +1,5 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
-import { isPremiumActive } from '../premium/service.js'
 
 export async function matchesRoutes(app: FastifyInstance) {
   app.get('/matches', async (req, reply) => {
@@ -15,14 +14,6 @@ export async function matchesRoutes(app: FastifyInstance) {
         b.blocker_id === req.userId ? b.blocked_id : b.blocker_id
       )
     )
-
-    // Gate check once per request: is this viewer currently subject to the premium gate?
-    const { data: cfg } = await db.from('premium_config').select('premium_enabled').eq('id', true).single()
-    let gateActive = cfg?.premium_enabled === true
-    if (gateActive) {
-      const { data: me } = await db.from('users').select('premium_until').eq('id', req.userId).single()
-      if (isPremiumActive(me?.premium_until ?? null)) gateActive = false
-    }
 
     const { data: rows } = await db
       .from('matches')
@@ -83,7 +74,8 @@ export async function matchesRoutes(app: FastifyInstance) {
             ? { body: lastMsg.body, createdAt: lastMsg.created_at, senderId: lastMsg.sender_id }
             : null,
           unreadCount: unreadCount ?? 0,
-          premiumRequired: gateActive && other.gender === 'woman',
+          // Chat is free for everyone; the client never locks a chat behind premium.
+          premiumRequired: false,
         }
       })
     )

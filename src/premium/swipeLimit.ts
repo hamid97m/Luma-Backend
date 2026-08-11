@@ -41,7 +41,7 @@ const WINDOW_COLUMNS = 'gender, looking_for, premium_until, swipe_window_started
 
 async function loadLimitedUser(userId: string, nowMs: number) {
   const { data: me, error } = await db.from('users').select(WINDOW_COLUMNS).eq('id', userId).single()
-  // Order mirrors premiumGateBlocks: cheap cohort check first, db-error fails open.
+  // Cheap cohort check first, db-error fails open.
   if (error || !me) return null
   if (!swipeLimitApplies(me.gender ?? null, me.looking_for ?? null)) return null
   if (!(await isPremiumEnabled())) return null

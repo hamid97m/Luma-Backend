@@ -151,6 +151,23 @@ export function mountWebhook(app: FastifyInstance): void {
 }
 
 /**
+ * Public-profile description shown on the bot's Telegram profile and in the
+ * empty-chat screen ("What can this bot do?"). Set once at startup via
+ * `setMyDescription`; max 512 chars per the Bot API.
+ */
+const BOT_DESCRIPTION = `Luma — Meet someone worth meeting. 💜
+
+A modern dating app built for genuine connections, meaningful conversations, and people who are actually looking to meet.
+
+✨ Discover people
+💬 Start real conversations
+❤️ Find your connection
+
+Your next story could start here.
+
+Luma — Where connections begin.`
+
+/**
  * Initialise the bot and register the webhook with Telegram. Call AFTER
  * `app.listen()` so the endpoint is already accepting requests. `setWebhook`
  * also atomically disables any previous long-polling loop on Telegram's side,
@@ -166,6 +183,7 @@ export async function initWebhook(publicBaseUrl: string): Promise<void> {
     allowed_updates: ['message', 'pre_checkout_query'],
     drop_pending_updates: false,
   })
+  await bot.api.setMyDescription(BOT_DESCRIPTION)
   console.log(`[bot] webhook set (@${botUsername})`)
 }
 

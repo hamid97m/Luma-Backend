@@ -14,7 +14,7 @@ const LIKER_POSITIONS = [0, 1, 2, 3]
 // so the pool still favours recently-active people before shuffling.
 const LIKER_POOL = 20
 const FILLER_POOL = BATCH_SIZE * 2
-const PASS_RECYCLE_MS = 24 * 60 * 60 * 1000
+const PASS_RECYCLE_MS = 9 * 24 * 60 * 60 * 1000
 // Cap the id-list sent to the liker-profiles query; the newest likes are
 // not preferred here — any 500 likers is plenty to fill 4 slots.
 const MAX_LIKER_IDS = 500
@@ -42,7 +42,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
 
     const recycleTime = new Date(Date.now() - PASS_RECYCLE_MS).toISOString()
 
-    // Swipes to exclude: all likes + recent passes (passes older than 24h are recycled)
+    // Swipes to exclude: all likes + recent passes (passes older than 9 days are recycled)
     const { data: recentSwipes, error: swipesErr } = await db
       .from('swipes')
       .select('swiped_id')

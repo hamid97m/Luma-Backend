@@ -1,0 +1,53 @@
+// Persian (fa) strings for everything the backend shows to end users:
+// Telegram bot messages, notifications, Stars invoices and pre-checkout errors.
+// To add another language later, copy this file and switch the export in i18n/index.ts.
+
+export const fa = {
+  bot: {
+    openAppButton: 'باز کردن لوما ❤️',
+    start:
+      'بیا داخل اپ → مچ‌ها منتظرتن 💫 هر وقت بخواهی می‌توانی حسابت را متوقف یا حذف کنی.',
+    description: [
+      'لوما — آشنایی با آدم‌هایی که ارزشش را دارند. 💜',
+      '',
+      'پروفایل بساز، سوایپ کن، مچ شو و گفتگو را شروع کن — همه همین داخل تلگرام.',
+      '',
+      'لوما — جایی که ارتباط‌ها شروع می‌شوند.',
+    ].join('\n'),
+  },
+  support: {
+    prompt: 'مشکلت چیه؟ در یک پیام برایم بفرست تا برایت تیکت پشتیبانی باز کنم.',
+    ticketSaved: 'ممنون — تیکتت ثبت شد. همین‌جا و داخل اپ جواب می‌دهیم.',
+    tooManyOpen:
+      'چند تیکت باز داری — لطفاً قبل از باز کردن تیکت جدید، منتظر پاسخ بمان.',
+    saveFailed: 'ببخشید، ذخیره نشد. لطفاً دوباره /support را امتحان کن.',
+    ticketReply: (preview: string, answer: string) =>
+      `📮 پاسخ پشتیبانی\n\nمشکل تو:\n«${preview}»\n\nپاسخ ما:\n${answer}`,
+  },
+  notify: {
+    match: (name: string) => `${name} لایکت کرد! لوما را باز کن ❤️`,
+    newLike: (name: string) => `${name} لایکت کرد 💛 — برای دیدن، لوما را باز کن`,
+    newMessage: (name: string, body: string) => `پیام جدید از ${name}\n${body}`,
+    giftIntro: (name: string, emoji: string) =>
+      `${name} برایت هدیه فرستاده ${emoji} — لوما را باز کن و ببین کی!`,
+    fallbackName: 'یک نفر',
+  },
+  gifts: {
+    invoiceTitle: (emoji: string) => `هدیه ${emoji}`,
+    invoiceDescription: 'ارسال هدیه',
+    sentYouGift: (emoji: string) => `برایت هدیه فرستاد ${emoji}`,
+    checkoutUnavailable: 'این هدیه دیگر موجود نیست.',
+    checkoutAlreadyProcessed: 'این هدیه قبلاً پردازش شده است.',
+    checkoutPriceMismatch: 'قیمت همخوانی ندارد.',
+    checkoutSoldOut: 'این هدیه همین الان تمام شد.',
+  },
+  premium: {
+    invoiceDescriptionFallback: (days: number) => `اشتراک پرمیوم ${days} روزه`,
+    checkoutUnavailable: 'این خرید دیگر در دسترس نیست.',
+    checkoutAlreadyProcessed: 'این خرید قبلاً پردازش شده است.',
+    checkoutPriceMismatch: 'قیمت همخوانی ندارد.',
+  },
+  chat: {
+    seedGreeting: 'سلام',
+  },
+} as const;

@@ -1,5 +1,6 @@
 import { db } from '../db.js'
 import { createPremiumInvoiceLink, refundPremiumPayment } from '../bot.js'
+import { t } from '../i18n/index.js'
 
 export const PREMIUM_PAYLOAD_PREFIX = 'premium:'
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -90,7 +91,7 @@ export async function createPremiumCheckout(userId: string, planId: string) {
   if (error || !tx) return { error: 'checkout_failed' }
 
   const invoiceLink = await createPremiumInvoiceLink(
-    tx.id, plan.title, plan.description || `Premium for ${plan.duration_days} days`, chargeStars,
+    tx.id, plan.title, plan.description || t.premium.invoiceDescriptionFallback(plan.duration_days), chargeStars,
   )
   return { transactionId: tx.id, invoiceLink }
 }
@@ -98,9 +99,9 @@ export async function createPremiumCheckout(userId: string, planId: string) {
 export async function validatePremiumPreCheckout(transactionId: string, totalAmount: number, currency: string) {
   const { data: tx } = await db
     .from('premium_transactions').select('status, price_stars').eq('id', transactionId).maybeSingle()
-  if (!tx) return { ok: false as const, reason: 'This purchase is no longer available.' }
-  if (tx.status !== 'pending_payment') return { ok: false as const, reason: 'This purchase was already processed.' }
-  if (currency !== 'XTR' || totalAmount !== tx.price_stars) return { ok: false as const, reason: 'Price mismatch.' }
+  if (!tx) return { ok: false as const, reason: t.premium.checkoutUnavailable }
+  if (tx.status !== 'pending_payment') return { ok: false as const, reason: t.premium.checkoutAlreadyProcessed }
+  if (currency !== 'XTR' || totalAmount !== tx.price_stars) return { ok: false as const, reason: t.premium.checkoutPriceMismatch }
   return { ok: true as const }
 }
 

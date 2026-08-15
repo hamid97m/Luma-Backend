@@ -4,6 +4,7 @@ import {
   getGiftCatalog, createGiftInvoiceLink, sendGiftToUser, refundGift,
   notifyNewMessage, notifyGiftIntro,
 } from '../bot.js'
+import { t } from '../i18n/index.js'
 
 const CATALOG_TTL_MS = 5 * 60 * 1000
 let catalogCache: { at: number; gifts: { id: string; emoji: string | null; starCost: number }[] } | null = null
@@ -88,7 +89,7 @@ export async function createGiftCheckout(input: {
   if (error || !tx) return { error: 'checkout_failed' }
 
   const invoiceLink = await createGiftInvoiceLink(
-    tx.id, `Gift ${gift.emoji ?? '🎁'}`, 'Send a gift', chargedStars,
+    tx.id, t.gifts.invoiceTitle(gift.emoji ?? '🎁'), t.gifts.invoiceDescription, chargedStars,
   )
   return { transactionId: tx.id, invoiceLink }
 }
@@ -96,11 +97,11 @@ export async function createGiftCheckout(input: {
 export async function validatePreCheckout(payload: string, totalAmount: number, currency: string) {
   const { data: tx } = await db
     .from('gift_transactions').select('status, charged_stars, gift_id').eq('id', payload).maybeSingle()
-  if (!tx) return { ok: false as const, reason: 'This gift is no longer available.' }
-  if (tx.status !== 'pending_payment') return { ok: false as const, reason: 'This gift was already processed.' }
-  if (currency !== 'XTR' || totalAmount !== tx.charged_stars) return { ok: false as const, reason: 'Price mismatch.' }
+  if (!tx) return { ok: false as const, reason: t.gifts.checkoutUnavailable }
+  if (tx.status !== 'pending_payment') return { ok: false as const, reason: t.gifts.checkoutAlreadyProcessed }
+  if (currency !== 'XTR' || totalAmount !== tx.charged_stars) return { ok: false as const, reason: t.gifts.checkoutPriceMismatch }
   const catalog = await loadRawCatalog()
-  if (!catalog.find((g) => g.id === tx.gift_id)) return { ok: false as const, reason: 'This gift just sold out.' }
+  if (!catalog.find((g) => g.id === tx.gift_id)) return { ok: false as const, reason: t.gifts.checkoutSoldOut }
   return { ok: true as const }
 }
 
@@ -136,14 +137,14 @@ export async function handleGiftPaid(payload: string, chargeId: string, buyerTel
     })
     if (msgErr) console.error(`[gifts] failed to insert gift message for tx ${tx.id}:`, msgErr)
     if (recipient.telegram_id) {
-      notifyNewMessage(recipient.telegram_id, buyer?.name ?? 'Someone', `sent you a gift ${tx.gift_emoji ?? '🎁'}`)
+      notifyNewMessage(recipient.telegram_id, buyer?.name ?? t.notify.fallbackName, t.gifts.sentYouGift(tx.gift_emoji ?? '🎁'))
         .catch(() => {})
     }
   } else {
     const { error: introErr } = await db.from('gift_transactions').update({ intro_status: 'pending' }).eq('id', tx.id)
     if (introErr) console.error(`[gifts] failed to set intro_status for tx ${tx.id}:`, introErr)
     if (recipient.telegram_id) {
-      notifyGiftIntro(recipient.telegram_id, buyer?.name ?? 'Someone', tx.gift_emoji ?? '🎁').catch(() => {})
+      notifyGiftIntro(recipient.telegram_id, buyer?.name ?? t.notify.fallbackName, tx.gift_emoji ?? '🎁').catch(() => {})
     }
   }
 }

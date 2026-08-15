@@ -8,6 +8,7 @@ import { validatePreCheckout, handleGiftPaid } from './gifts/service.js'
 import {
   PREMIUM_PAYLOAD_PREFIX, validatePremiumPreCheckout, handlePremiumPaid,
 } from './premium/service.js'
+import { t } from './i18n/index.js'
 
 let _bot: Bot | null = null
 
@@ -45,10 +46,10 @@ function webhookSecretToken(): string {
 
 async function sendStart(ctx: Context): Promise<void> {
   const keyboard = new InlineKeyboard().webApp(
-    'Open Luma ❤️',
+    t.bot.openAppButton,
     process.env.WEB_URL!
   )
-  await ctx.reply('Come to the app → catch matches 💫 You can pause or delete your account anytime.', {
+  await ctx.reply(t.bot.start, {
     reply_markup: keyboard,
   })
 }
@@ -63,7 +64,7 @@ async function promptSupport(ctx: Context): Promise<void> {
   if (tgId) {
     await db.from('users').update({ awaiting_support_since: new Date().toISOString() }).eq('telegram_id', tgId)
   }
-  await ctx.reply("What's the issue? Send it to me in one message and I'll open a support ticket.")
+  await ctx.reply(t.support.prompt)
 }
 
 let handlersRegistered = false
@@ -117,13 +118,13 @@ function registerHandlers(bot: Bot): void {
 
     await db.from('users').update({ awaiting_support_since: null }).eq('id', user.id)
     const result = await createTicket(user.id, text!)
-    const keyboard = new InlineKeyboard().webApp('Open Luma ❤️', process.env.WEB_URL!)
+    const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
     if (result.ok) {
-      await ctx.reply("Thanks — your ticket is in. We'll reply here and in the app.", { reply_markup: keyboard })
+      await ctx.reply(t.support.ticketSaved, { reply_markup: keyboard })
     } else if (result.error === 'too_many_open_tickets') {
-      await ctx.reply("You already have several open tickets — please wait for a reply before opening another.")
+      await ctx.reply(t.support.tooManyOpen)
     } else {
-      await ctx.reply("Sorry, I couldn't save that. Please try /support again.")
+      await ctx.reply(t.support.saveFailed)
     }
   })
 
@@ -155,17 +156,7 @@ export function mountWebhook(app: FastifyInstance): void {
  * empty-chat screen ("What can this bot do?"). Set once at startup via
  * `setMyDescription`; max 512 chars per the Bot API.
  */
-const BOT_DESCRIPTION = `Luma — Meet someone worth meeting. 💜
-
-A modern dating app built for genuine connections, meaningful conversations, and people who are actually looking to meet.
-
-✨ Discover people
-💬 Start real conversations
-❤️ Find your connection
-
-Your next story could start here.
-
-Luma — Where connections begin.`
+const BOT_DESCRIPTION = t.bot.description
 
 /**
  * Initialise the bot and register the webhook with Telegram. Call AFTER
@@ -197,8 +188,8 @@ export async function notifyMatch(recipients: MatchNotifyRecipient[]): Promise<v
   const bot = getBot()
 
   const send = ({ telegramId, matchName, matchPhoto }: MatchNotifyRecipient) => {
-    const keyboard = new InlineKeyboard().webApp('Open Luma ❤️', process.env.WEB_URL!)
-    const caption = `${matchName} just liked you! Open Luma ❤️`
+    const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
+    const caption = t.notify.match(matchName)
 
     return matchPhoto
       ? bot.api.sendPhoto(telegramId, matchPhoto, { caption, reply_markup: keyboard })
@@ -220,9 +211,9 @@ export async function notifyNewLike(
   likerName: string,
 ): Promise<void> {
   const bot = getBot()
-  const keyboard = new InlineKeyboard().webApp('Open Luma ❤️', process.env.WEB_URL!)
+  const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
   // Like DMs are text-only by design — no liker photo (the reveal happens in-app).
-  await bot.api.sendMessage(toTelegramId, `${likerName} liked you 💛 — open Luma to see`, { reply_markup: keyboard })
+  await bot.api.sendMessage(toTelegramId, t.notify.newLike(likerName), { reply_markup: keyboard })
 }
 
 export async function notifyNewMessage(
@@ -232,8 +223,8 @@ export async function notifyNewMessage(
   senderPhoto: string | null = null
 ): Promise<void> {
   const bot = getBot()
-  const keyboard = new InlineKeyboard().webApp('Open Luma ❤️', process.env.WEB_URL!)
-  const caption = `New message from ${senderName}\n${messageBody}`
+  const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
+  const caption = t.notify.newMessage(senderName, messageBody)
 
   if (senderPhoto) {
     // Telegram caps photo captions at 1024 chars; a long message body would
@@ -248,8 +239,8 @@ export async function notifyNewMessage(
 /** DM a recipient that someone sent them a gift as an intro. */
 export async function notifyGiftIntro(toTelegramId: number, senderName: string, emoji: string): Promise<void> {
   const bot = getBot()
-  const keyboard = new InlineKeyboard().webApp('Open Luma ❤️', process.env.WEB_URL!)
-  await bot.api.sendMessage(toTelegramId, `${senderName} sent you a gift ${emoji} — open Luma to see who!`, { reply_markup: keyboard })
+  const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
+  await bot.api.sendMessage(toTelegramId, t.notify.giftIntro(senderName, emoji), { reply_markup: keyboard })
 }
 
 export async function notifyTicketReply(
@@ -258,9 +249,9 @@ export async function notifyTicketReply(
   answer: string,
 ): Promise<void> {
   const bot = getBot()
-  const keyboard = new InlineKeyboard().webApp('Open Luma ❤️', process.env.WEB_URL!)
+  const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
   const preview = issuePreview.length > 200 ? `${issuePreview.slice(0, 199)}…` : issuePreview
-  const text = `📮 Support reply\n\nYour issue:\n"${preview}"\n\nOur answer:\n${answer}`
+  const text = t.support.ticketReply(preview, answer)
   const safe = text.length > 4000 ? `${text.slice(0, 3999)}…` : text
   await bot.api.sendMessage(toTelegramId, safe, { reply_markup: keyboard })
 }

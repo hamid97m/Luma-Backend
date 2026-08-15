@@ -2,6 +2,7 @@ import { db } from '../db.js'
 import { notifyMatch, notifyNewLike } from '../bot.js'
 import { getFakeLikerConfig } from './fakeLikerConfig.js'
 import { deliverMessageNotification } from '../messaging/deliver.js'
+import { t } from '../i18n/index.js'
 
 export interface RunStats {
   likesSent: number
@@ -532,7 +533,7 @@ export async function runFakeLikerJob(
 
           const { error: msgErr } = await db
             .from('messages')
-            .insert({ match_id: m.id, sender_id: fakeId, body: 'salam' })
+            .insert({ match_id: m.id, sender_id: fakeId, body: t.chat.seedGreeting })
           if (msgErr) {
             stats.errors++
             logger.warn({ err: msgErr, match: m.id }, 'fake liker: salam insert failed')
@@ -545,7 +546,7 @@ export async function runFakeLikerJob(
             { id: realId, telegram_id: real.telegram_id, last_active: real.last_active, notified_offline_at: real.notified_offline_at, allows_write_to_pm: real.allows_write_to_pm },
             fakeId,
             fake.name,
-            'salam',
+            t.chat.seedGreeting,
             logger,
           )
         } catch (err) {

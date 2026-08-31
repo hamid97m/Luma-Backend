@@ -216,6 +216,14 @@ export async function notifyNewLike(
   await bot.api.sendMessage(toTelegramId, t.notify.newLike(likerName), { reply_markup: keyboard })
 }
 
+/** DM a user that their profile was paused for photo review and a new photo is
+ * required to return to discovery. */
+export async function notifyPaused(toTelegramId: number): Promise<void> {
+  const bot = getBot()
+  const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
+  await bot.api.sendMessage(toTelegramId, t.notify.paused, { reply_markup: keyboard })
+}
+
 export async function notifyNewMessage(
   toTelegramId: number,
   senderName: string,

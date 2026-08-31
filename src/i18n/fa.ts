@@ -32,6 +32,7 @@ export const fa = {
     newMessage: (name: string, body: string) => `پیام جدید از ${name}\n${body}`,
     giftIntro: (name: string, emoji: string) =>
       `${name} برایت هدیه فرستاده ${emoji} — لوما را باز کن و ببین کی!`,
+    paused: 'پروفایلت موقتاً از نمایش خارج شد. برای بازگشت، یک عکس تازه از خودت در لوما بارگذاری کن ✨',
     fallbackName: 'یک نفر',
   },
   gifts: {

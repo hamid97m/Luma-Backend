@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
+import { maybeAutoPauseForReports } from '../moderation/autoPause.js'
 
 const REASONS = ['fake', 'inappropriate', 'harassment', 'spam', 'other'] as const
 const CONTEXTS = ['discovery', 'chat'] as const
@@ -59,6 +60,10 @@ export async function reportsRoutes(app: FastifyInstance) {
       { blocker_id: req.userId, blocked_id: reportedUserId },
       { onConflict: 'blocker_id,blocked_id', ignoreDuplicates: true }
     )
+
+    // Auto-pause the reported user for photo re-verification once they cross
+    // the admin-set report threshold. Best-effort — never fails the report.
+    await maybeAutoPauseForReports(reportedUserId)
 
     return { ok: true }
   })

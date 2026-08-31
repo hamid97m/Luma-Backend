@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
+import { chatGateContext, matchPremiumRequired } from '../premium/chatLimit.js'
 
 export async function matchesRoutes(app: FastifyInstance) {
   app.get('/matches', async (req, reply) => {
@@ -29,6 +30,13 @@ export async function matchesRoutes(app: FastifyInstance) {
       const other = row.user1_id === req.userId ? row.user2 : row.user1
       return !other.deleted_at && !blockedIds.has(other.id)
     })
+
+    // One read backs the per-match premium flag (free men seeking women get 3
+    // free chats). Non-gated viewers — and an empty list — get an empty context
+    // → every match free, and we skip the read when there's nothing to flag.
+    const gateCtx = activeRows.length
+      ? await chatGateContext(req.userId)
+      : { gated: false, chattedMatchIds: new Set<string>() }
 
     const matches = await Promise.all(
       activeRows.map(async (row: any) => {
@@ -74,8 +82,9 @@ export async function matchesRoutes(app: FastifyInstance) {
             ? { body: lastMsg.body, createdAt: lastMsg.created_at, senderId: lastMsg.sender_id }
             : null,
           unreadCount: unreadCount ?? 0,
-          // Chat is free for everyone; the client never locks a chat behind premium.
-          premiumRequired: false,
+          // Locks the composer client-side for a 4th+ new conversation; the
+          // POST /messages 403 is the real enforcement.
+          premiumRequired: matchPremiumRequired(gateCtx, row.id),
         }
       })
     )

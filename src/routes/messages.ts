@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 import { deliverMessageNotification } from '../messaging/deliver.js'
+import { chatSendBlocked } from '../premium/chatLimit.js'
 
 const MAX_MESSAGE_LENGTH = 2000
 
@@ -75,8 +76,12 @@ export async function messagesRoutes(app: FastifyInstance) {
     const match = await getUsableMatch(matchId, req.userId)
     if (!match) return reply.status(404).send({ error: 'match_not_found' })
 
-    // Chat is free for everyone — no premium gate on sending. (Premium still gates
-    // the swipe limit and the who-liked-you screen.)
+    // Free men seeking women may chat with 3 distinct people for free; starting a
+    // 4th conversation requires premium. Continuing any of their existing chats,
+    // women, premium members, and everyone while the toggle is off are unaffected.
+    if (await chatSendBlocked(req.userId, matchId)) {
+      return reply.status(403).send({ error: 'premium_required' })
+    }
 
     if (replyToMessageId) {
       const { data: parent } = await db

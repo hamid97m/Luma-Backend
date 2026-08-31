@@ -76,6 +76,15 @@ function mockUnreadCount(count: number) {
   } as any)
 }
 
+// GET /matches reads the viewer's cohort for the free-chat gate. A woman
+// short-circuits as exempt (no premium_config / messages reads), so every
+// match stays premiumRequired: false — matching these tests' expectations.
+function mockChatGateExempt() {
+  vi.mocked(db.from).mockReturnValueOnce({
+    select: () => ({ eq: () => ({ single: () => ({ data: { gender: 'woman', looking_for: 'women', premium_until: null }, error: null }) }) }),
+  } as any)
+}
+
 describe('GET /matches', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
   beforeEach(async () => { app = await buildApp() })
@@ -84,6 +93,7 @@ describe('GET /matches', () => {
     setupAuth()
     mockNoBlocks()
     mockMatchesRow()
+    mockChatGateExempt()
     mockPhotos()
     mockLastMessage({ body: 'hey there', created_at: '2026-01-02T00:00:00Z', sender_id: 'other-user' })
     mockUnreadCount(2)
@@ -109,6 +119,7 @@ describe('GET /matches', () => {
     setupAuth()
     mockNoBlocks()
     mockMatchesRow()
+    mockChatGateExempt()
     mockPhotos()
     mockLastMessage(null)
     mockUnreadCount(0)
@@ -141,6 +152,8 @@ describe('GET /matches', () => {
         }),
       }),
     } as any)
+    // activeRows is empty (counterpart deleted), so the route skips the chat-gate
+    // read entirely — no mockChatGateExempt() needed here.
 
     const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
 

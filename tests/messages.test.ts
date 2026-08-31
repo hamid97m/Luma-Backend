@@ -65,6 +65,14 @@ function mockMatchLookup(overrides: Partial<{
   } as any)
 }
 
+// POST reads the sender's cohort for the free-chat gate. A woman short-circuits
+// as exempt (no premium_config / messages reads), so sending is always allowed.
+function mockChatGateExempt() {
+  vi.mocked(db.from).mockReturnValueOnce({
+    select: () => ({ eq: () => ({ single: () => ({ data: { gender: 'woman', looking_for: 'women', premium_until: null }, error: null }) }) }),
+  } as any)
+}
+
 describe('GET /matches/:matchId/messages', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
   beforeEach(async () => { app = await buildApp() })
@@ -175,6 +183,7 @@ describe('POST /matches/:matchId/messages', () => {
   it('inserts and returns the trimmed message on success', async () => {
     setupAuth()
     mockMatchLookup()
+    mockChatGateExempt()
 
     vi.mocked(db.from).mockReturnValueOnce({
       insert: () => ({
@@ -200,6 +209,7 @@ describe('POST /matches/:matchId/messages', () => {
   it('sends an offline notification and marks notified_offline_at when the recipient is inactive and not yet notified', async () => {
     setupAuth()
     mockMatchLookup({ otherLastActive: STALE, otherNotifiedOfflineAt: null })
+    mockChatGateExempt()
 
     vi.mocked(db.from).mockReturnValueOnce({
       insert: () => ({
@@ -235,6 +245,7 @@ describe('POST /matches/:matchId/messages', () => {
   it('does not send an offline notification when the recipient is online', async () => {
     setupAuth()
     mockMatchLookup({ otherLastActive: RECENT, otherNotifiedOfflineAt: null })
+    mockChatGateExempt()
 
     vi.mocked(db.from).mockReturnValueOnce({
       insert: () => ({
@@ -259,6 +270,7 @@ describe('POST /matches/:matchId/messages', () => {
   it('inserts a reply and returns replyToMessageId when the parent is in the same match', async () => {
     setupAuth()
     mockMatchLookup()
+    mockChatGateExempt()
 
     // parent-message validation lookup: .select('id').eq().eq().maybeSingle()
     vi.mocked(db.from).mockReturnValueOnce({
@@ -289,6 +301,7 @@ describe('POST /matches/:matchId/messages', () => {
   it('returns 400 when the reply target does not belong to this match', async () => {
     setupAuth()
     mockMatchLookup()
+    mockChatGateExempt()
 
     // parent lookup finds nothing (wrong match or nonexistent)
     vi.mocked(db.from).mockReturnValueOnce({
@@ -306,6 +319,7 @@ describe('POST /matches/:matchId/messages', () => {
   it('does not notify again when the recipient was already notified during this offline stretch', async () => {
     setupAuth()
     mockMatchLookup({ otherLastActive: STALE, otherNotifiedOfflineAt: STALE })
+    mockChatGateExempt()
 
     vi.mocked(db.from).mockReturnValueOnce({
       insert: () => ({

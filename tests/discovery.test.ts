@@ -10,6 +10,7 @@ import { buildApp } from '../src/server.js'
 import { verifyInitData } from '../src/auth.js'
 import { db } from '../src/db.js'
 import { getSwipeLimitStatus } from '../src/premium/swipeLimit.js'
+import { chainable } from './admin-helpers.js'
 
 const AUTH = { authorization: 'valid_init_data' }
 const USER_ID = 'user-uuid-1'
@@ -44,22 +45,8 @@ describe('GET /discovery', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
     } as any)
-    // profiles query: eq(is_active) → eq(gender) → not(id) → order → limit
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({
-        eq: () => ({
-          is: () => ({
-            eq: () => ({
-              not: () => ({
-                order: () => ({
-                  limit: () => ({ data: [], error: null }),
-                }),
-              }),
-            }),
-          }),
-        }),
-      }),
-    } as any)
+    // profiles query — chainable tolerates the full is_active→banned→age→gender→… chain
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
 
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
 
@@ -86,37 +73,23 @@ describe('GET /discovery', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
     } as any)
-    // profiles query: eq(is_active) → eq(gender) → not(id) → order → limit
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({
-        eq: () => ({
-          is: () => ({
-            eq: () => ({
-              not: () => ({
-                order: () => ({
-                  limit: () => ({
-                    data: [
-                      {
-                        id: 'user-uuid-2',
-                        name: 'Sara',
-                        age: 27,
-                        bio: 'سلام',
-                        telegram_id: 999,
-                        user_photos: [
-                          { id: 'ph2', url: 'https://img2.jpg', position: 1 },
-                          { id: 'ph1', url: 'https://img1.jpg', position: 0 },
-                        ],
-                      },
-                    ],
-                    error: null,
-                  }),
-                }),
-              }),
-            }),
-          }),
-        }),
-      }),
-    } as any)
+    // profiles query — chainable tolerates the full is_active→banned→age→gender→… chain
+    vi.mocked(db.from).mockReturnValueOnce(chainable({
+      data: [
+        {
+          id: 'user-uuid-2',
+          name: 'Sara',
+          age: 27,
+          bio: 'سلام',
+          telegram_id: 999,
+          user_photos: [
+            { id: 'ph2', url: 'https://img2.jpg', position: 1 },
+            { id: 'ph1', url: 'https://img1.jpg', position: 0 },
+          ],
+        },
+      ],
+      error: null,
+    }))
 
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
 
@@ -173,23 +146,8 @@ describe('GET /discovery', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
     } as any)
-    // profiles query: eq(is_active) → not(id) → order → limit  (NO gender eq)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({
-        eq: () => ({
-          is: () => ({
-            not: () => ({
-              order: () => ({
-                limit: () => ({
-                  data: [],
-                  error: null,
-                }),
-              }),
-            }),
-          }),
-        }),
-      }),
-    } as any)
+    // profiles query — chainable tolerates the is_active→banned→age→(no gender)→… chain
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
 
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
     expect(res.statusCode).toBe(200)
@@ -219,24 +177,10 @@ describe('GET /discovery', () => {
       id, name: 'N', age: 25, bio: null, telegram_id: 1,
       interests: [], location, user_photos: [],
     })
-    // liker profiles: select → eq → is → eq(gender) → in → order → limit
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ is: () => ({ eq: () => ({ in: () => ({ order: () => ({
-        limit: () => ({ data: [profile('liker-1', 'Tehran')], error: null }),
-      }) }) }) }) }) }),
-    } as any)
-    // same-city profiles: select → eq → is → eq(gender) → ilike → not → order → limit
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ is: () => ({ eq: () => ({ ilike: () => ({ not: () => ({ order: () => ({
-        limit: () => ({ data: [profile('city-1', 'Tehran')], error: null }),
-      }) }) }) }) }) }) }),
-    } as any)
-    // rest profiles: select → eq → is → eq(gender) → not → order → limit
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ is: () => ({ eq: () => ({ not: () => ({ order: () => ({
-        limit: () => ({ data: [profile('rest-1', 'Mashhad')], error: null }),
-      }) }) }) }) }) }),
-    } as any)
+    // Each tier's profileQuery chain (now includes .gt('age', 0)) → chainable
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('liker-1', 'Tehran')], error: null }))
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('city-1', 'Tehran')], error: null }))
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('rest-1', 'Mashhad')], error: null }))
 
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
 
@@ -267,12 +211,8 @@ describe('GET /discovery', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ eq: () => ({ eq: () => ({ data: [{ swiper_id: 'liker-1' }], error: null }) }) }),
     } as any)
-    // rest profiles (no gender filter): select → eq → is → not → order → limit
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ is: () => ({ not: () => ({ order: () => ({
-        limit: () => ({ data: [], error: null }),
-      }) }) }) }) }),
-    } as any)
+    // rest profiles (no gender filter) — chainable tolerates the is_active→banned→age→… chain
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
 
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
 
@@ -301,22 +241,8 @@ describe('GET /discovery', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
     } as any)
-    // profiles query: eq(is_active) → eq(gender) → not(id) → order → limit
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({
-        eq: () => ({
-          is: () => ({
-            eq: () => ({
-              not: () => ({
-                order: () => ({
-                  limit: () => ({ data: [], error: null }),
-                }),
-              }),
-            }),
-          }),
-        }),
-      }),
-    } as any)
+    // profiles query — chainable tolerates the full is_active→banned→age→gender→… chain
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
 
     vi.mocked(getSwipeLimitStatus).mockResolvedValueOnce({ limited: true, resetAt: '2026-08-07T16:00:00.000Z' })
 

@@ -64,7 +64,9 @@ export async function fetchAudience(dbClient: any, filters: BroadcastFilters, no
       dbClient.from('users').select('id, telegram_id'),
       filters,
       nowMs,
-    ).range(from, from + PAGE - 1)
+    )
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1)
     const { data, error } = await query
     if (error) throw error
     if (!data?.length) break

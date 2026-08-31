@@ -23,7 +23,7 @@ describe('applyAudienceFilters', () => {
     expect(has(log, 'is', (a) => a[0] === 'deleted_at' && a[1] === null)).toBe(true)
     expect(has(log, 'gt', (a) => a[0] === 'telegram_id' && a[1] === 0)).toBe(true)
     // opted-in = null OR true (only explicit false is excluded)
-    expect(has(log, 'or', (a) => String(a[0]).includes('allows_write_to_pm'))).toBe(true)
+    expect(has(log, 'or', (a) => a[0] === 'allows_write_to_pm.is.null,allows_write_to_pm.eq.true')).toBe(true)
   })
 
   it('maps genders and lookingFor to .in()', () => {
@@ -49,6 +49,6 @@ describe('applyAudienceFilters', () => {
 
   it('premium=free requires premium_until null or past', () => {
     const log = applyWithLog({ premium: 'free' })
-    expect(has(log, 'or', (a) => String(a[0]).includes('premium_until'))).toBe(true)
+    expect(has(log, 'or', (a) => a[0] === `premium_until.is.null,premium_until.lte.${new Date(NOW).toISOString()}`)).toBe(true)
   })
 })

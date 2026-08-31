@@ -80,6 +80,11 @@ export async function discoveryRoutes(app: FastifyInstance) {
         .select(PROFILE_COLUMNS)
         .eq('is_active', true)
         .is('banned_at', null)
+        // age > 0 is the canonical "profile setup complete" signal (see
+        // profile.ts / auth.ts). New users start at age 0 with is_active
+        // defaulting true, so without this an incomplete profile (age 0)
+        // would surface as a blank/half-empty card.
+        .gt('age', 0)
       return genderFilter ? (q as any).eq('gender', genderFilter) : (q as any)
     }
 

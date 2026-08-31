@@ -7,7 +7,7 @@ const PAGE_SIZE = 20
 const MESSAGES_PAGE_SIZE = 50
 
 const MATCH_SELECT = `
-  id, created_at, user1_id, user2_id,
+  id, created_at, last_message_at, user1_id, user2_id,
   user1:users!matches_user1_id_fkey(id, name, is_seed, telegram_id, last_active, notified_offline_at, allows_write_to_pm, user_photos(url, position)),
   user2:users!matches_user2_id_fkey(id, name, is_seed, telegram_id, last_active, notified_offline_at, allows_write_to_pm, user_photos(url, position))
 `
@@ -77,9 +77,14 @@ export async function adminChatsRoutes(app: FastifyInstance) {
       const unreadIds = await fakeUnreadMatchIds()
       const total = unreadIds.length
       if (total === 0) return { items: [], total: 0, page: pageNum, pageCount: 1 }
-      const pageIds = unreadIds.slice(from, from + PAGE_SIZE)
+      // fakeUnreadMatchIds returns ids in arbitrary order; order the full set by
+      // most-recent activity before paginating so page boundaries are stable.
+      const { data: ordered, error: orderErr } = await db
+        .from('matches').select('id').in('id', unreadIds).order('last_message_at', { ascending: false })
+      if (orderErr) return reply.status(500).send({ error: 'chats_fetch_failed' })
+      const pageIds = (ordered ?? []).map((r: any) => r.id).slice(from, from + PAGE_SIZE)
       const { data: rows, error } = await db
-        .from('matches').select(MATCH_SELECT).in('id', pageIds).order('created_at', { ascending: false })
+        .from('matches').select(MATCH_SELECT).in('id', pageIds).order('last_message_at', { ascending: false })
       if (error) return reply.status(500).send({ error: 'chats_fetch_failed' })
       const items = await Promise.all((rows ?? []).map(async (row: any) => {
         const [{ count: messageCount }, { data: lastRows }] = await Promise.all([
@@ -100,7 +105,7 @@ export async function adminChatsRoutes(app: FastifyInstance) {
     const { data: rows, count, error } = await db
       .from('matches')
       .select(MATCH_SELECT, { count: 'exact' })
-      .order('created_at', { ascending: false })
+      .order('last_message_at', { ascending: false })
       .range(from, from + PAGE_SIZE - 1)
 
     if (error) return reply.status(500).send({ error: 'chats_fetch_failed' })

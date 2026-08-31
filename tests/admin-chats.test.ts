@@ -68,6 +68,20 @@ describe('admin chats', () => {
     })
   })
 
+  it('GET /admin/chats orders the list by last message time (most recent first)', async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'matches') return chainable({ data: [MATCH_ROW], count: 1, error: null }, calls)
+      return chainable({ count: 4, data: [{ body: 'hey', created_at: '2026-08-03T00:00:00Z' }], error: null })
+    })
+
+    const res = await app.inject({ method: 'GET', url: '/admin/chats', headers })
+
+    expect(res.statusCode).toBe(200)
+    const order = calls.find((c) => c.method === 'order')
+    expect(order?.args).toEqual(['last_message_at', { ascending: false }])
+  })
+
   it('GET /admin/chats/:matchId returns participants and paginated transcript', async () => {
     mockTables({
       matches: { data: MATCH_ROW, error: null },

@@ -237,3 +237,23 @@ describe('POST /swipes — mutual like', () => {
     expect(notifyNewLike).not.toHaveBeenCalled()
   })
 })
+
+describe('POST /swipes when paused', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  beforeEach(async () => { vi.clearAllMocks(); app = await buildApp() })
+
+  it('blocks a paused user with 403 account_paused', async () => {
+    vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
+    // auth preHandler: user row carries paused_at
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ single: () => ({ data: { id: 'me-1', paused_at: '2026-08-31T00:00:00Z' } }) }) }),
+    } as any)
+
+    const res = await app.inject({
+      method: 'POST', url: '/swipes', headers: AUTH,
+      payload: { targetUserId: 'them-1', direction: 'like' },
+    })
+    expect(res.statusCode).toBe(403)
+    expect(res.json()).toEqual({ error: 'account_paused' })
+  })
+})

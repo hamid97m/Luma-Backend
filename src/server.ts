@@ -25,6 +25,7 @@ declare module 'fastify' {
   interface FastifyRequest {
     userId: string | undefined
     telegramUser: TelegramUser
+    isPaused?: boolean
   }
 }
 
@@ -79,7 +80,7 @@ export async function buildApp(): Promise<FastifyInstance> {
 
     const { data } = await db
       .from('users')
-      .select('id, deleted_at, banned_at, last_active')
+      .select('id, deleted_at, banned_at, paused_at, last_active')
       .eq('telegram_id', tgUser.id)
       .single()
 
@@ -87,6 +88,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     if (data.deleted_at) return reply.status(401).send({ error: 'account_deleted' })
     if (data.banned_at) return reply.status(401).send({ error: 'account_banned', botUsername: getBotUsername() })
     req.userId = data.id
+    req.isPaused = Boolean(data.paused_at)
 
     if (data.last_active && Date.now() - new Date(data.last_active).getTime() > LAST_ACTIVE_THROTTLE_MS) {
       // Clearing notified_offline_at here means the very first request after

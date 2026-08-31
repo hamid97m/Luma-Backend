@@ -16,6 +16,9 @@ export async function swipesRoutes(app: FastifyInstance) {
 
     if (targetUserId === req.userId) return reply.status(400).send({ error: 'cannot_swipe_self' })
 
+    // A paused (photo-review) account can't act on the deck until it re-uploads.
+    if (req.isPaused) return reply.status(403).send({ error: 'account_paused' })
+
     const limit = await checkAndCountSwipe(req.userId)
     if (limit.blocked) return reply.status(403).send({ error: 'swipe_limit', resetAt: limit.resetAt })
     // Spread into every success payload so the client can flip to the limited

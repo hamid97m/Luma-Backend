@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../../db.js'
 import { notifyPaused } from '../../bot.js'
+import { deleteAllPhotosForUser } from '../../photos/deleteAllPhotosForUser.js'
 
 export const PAGE_SIZE = 20
 
@@ -328,6 +329,11 @@ export async function adminUsersRoutes(app: FastifyInstance) {
       .select('telegram_id, allows_write_to_pm')
       .single()
     if (error || !data) return reply.status(404).send({ error: 'user_not_found' })
+
+    // Pausing for photo review means the user must re-upload from scratch;
+    // best-effort by construction, never blocks the pause response.
+    if (pausedAt) await deleteAllPhotosForUser(id)
+
     // Warn the user only when pausing (not on resume), and only if bot DMs are
     // not explicitly declined.
     if (pausedAt && data.telegram_id > 0 && data.allows_write_to_pm !== false) {

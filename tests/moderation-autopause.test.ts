@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
+vi.mock('../src/db.js', () => ({ db: { from: vi.fn(), storage: { from: vi.fn() } } }))
 vi.mock('../src/bot.js', () => ({ notifyPaused: vi.fn() }))
 
 import { db } from '../src/db.js'
@@ -10,27 +10,39 @@ import { chainable } from './admin-helpers.js'
 
 const REPORTED = 'reported-1'
 
-function mockDb({ threshold, pendingCount, updateData }: {
+function mockDb({ threshold, pendingCount, updateData, photos }: {
   threshold: number
   pendingCount: number
   updateData: unknown
+  photos?: Array<{ id: string }>
 }) {
   vi.mocked(db.from).mockImplementation((table: string) => {
     if (table === 'moderation_config') return chainable({ data: { photo_report_threshold: threshold }, error: null })
     if (table === 'reports') return chainable({ count: pendingCount, error: null })
     if (table === 'users') return chainable({ data: updateData, error: null })
+    if (table === 'user_photos') return chainable({ data: photos ?? null, error: null })
     return chainable({ data: null, error: null })
   })
+  const remove = vi.fn().mockResolvedValue({ error: null })
+  vi.mocked(db.storage.from).mockImplementation(() => ({ remove } as any))
+  return { storageRemove: remove }
 }
 
 describe('maybeAutoPauseForReports', () => {
   beforeEach(() => vi.clearAllMocks())
 
   it('pauses and notifies once the pending count reaches the threshold', async () => {
-    mockDb({ threshold: 3, pendingCount: 3, updateData: { telegram_id: 100, allows_write_to_pm: true } })
+    const { storageRemove } = mockDb({
+      threshold: 3,
+      pendingCount: 3,
+      updateData: { telegram_id: 100, allows_write_to_pm: true },
+      photos: [{ id: 'photo-1' }, { id: 'photo-2' }],
+    })
     const paused = await maybeAutoPauseForReports(REPORTED)
     expect(paused).toBe(true)
     expect(notifyPaused).toHaveBeenCalledWith(100)
+    expect(db.storage.from).toHaveBeenCalledWith('profile-photos')
+    expect(storageRemove).toHaveBeenCalledWith([`${REPORTED}/photo-1`, `${REPORTED}/photo-2`])
   })
 
   it('does nothing below the threshold', async () => {

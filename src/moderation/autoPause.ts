@@ -1,5 +1,6 @@
 import { db } from '../db.js'
 import { notifyPaused } from '../bot.js'
+import { deleteAllPhotosForUser } from '../photos/deleteAllPhotosForUser.js'
 
 /** Pending-report count that triggers an automatic photo-review pause. 0 = off. */
 export async function getPhotoReportThreshold(): Promise<number> {
@@ -41,6 +42,8 @@ export async function maybeAutoPauseForReports(reportedUserId: string): Promise<
       .select('telegram_id, allows_write_to_pm')
       .maybeSingle()
     if (!data) return false
+
+    await deleteAllPhotosForUser(reportedUserId)
 
     // Telegram rejects DMs from bots the user never granted write access to;
     // a false flag means an explicit decline, so skip it (null = unknown, try).

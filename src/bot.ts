@@ -224,6 +224,14 @@ export async function notifyPaused(toTelegramId: number): Promise<void> {
   await bot.api.sendMessage(toTelegramId, t.notify.paused, { reply_markup: keyboard })
 }
 
+/** Raw admin broadcast DM. Throws on Telegram errors so the broadcast runner
+ * can count failures / react to 403 (blocked) and 429 (rate limit). */
+export async function sendBroadcastMessage(toTelegramId: number, text: string): Promise<void> {
+  const bot = getBot()
+  const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
+  await bot.api.sendMessage(toTelegramId, text, { reply_markup: keyboard })
+}
+
 export async function notifyNewMessage(
   toTelegramId: number,
   senderName: string,

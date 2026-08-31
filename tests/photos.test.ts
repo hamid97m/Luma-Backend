@@ -67,7 +67,7 @@ describe('POST /profile/me/photos/confirm', () => {
   it('returns 400 when user already has 6 photos', async () => {
     setupAuth()
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ data: new Array(6).fill({ id: 'x' }), error: null }) }),
+      select: () => ({ eq: () => ({ order: () => ({ data: new Array(6).fill({ id: 'x', position: 0 }), error: null }) }) }),
     } as any)
 
     const res = await app.inject({
@@ -82,7 +82,7 @@ describe('POST /profile/me/photos/confirm', () => {
   it('returns 409 when photoId already confirmed', async () => {
     setupAuth()
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ data: [{ id: 'existing-uuid' }], error: null }) }),
+      select: () => ({ eq: () => ({ order: () => ({ data: [{ id: 'existing-uuid', position: 0 }], error: null }) }) }),
     } as any)
 
     const res = await app.inject({
@@ -98,7 +98,7 @@ describe('POST /profile/me/photos/confirm', () => {
     setupAuth()
 
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ data: [{ id: 'old-photo' }], error: null }) }),
+      select: () => ({ eq: () => ({ order: () => ({ data: [{ id: 'old-photo', position: 0 }], error: null }) }) }),
     } as any)
 
     vi.mocked(db.from).mockReturnValueOnce({

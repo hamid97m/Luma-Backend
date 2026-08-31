@@ -18,7 +18,7 @@ export async function photosRoutes(app: FastifyInstance) {
       .select('id')
       .eq('user_id', req.userId)
 
-    if ((existing?.length ?? 0) >= MAX_PHOTOS) {
+    if (!req.isPaused && (existing?.length ?? 0) >= MAX_PHOTOS) {
       return reply.status(400).send({ error: 'max_photos_reached' })
     }
 
@@ -119,10 +119,12 @@ export async function photosRoutes(app: FastifyInstance) {
 
     const { data: existing } = await db
       .from('user_photos')
-      .select('id')
+      .select('id, position')
       .eq('user_id', req.userId)
+      .order('position', { ascending: true })
 
-    if ((existing?.length ?? 0) >= MAX_PHOTOS) {
+    const count = existing?.length ?? 0
+    if (count >= MAX_PHOTOS && !req.isPaused) {
       return reply.status(400).send({ error: 'max_photos_reached' })
     }
 
@@ -131,7 +133,17 @@ export async function photosRoutes(app: FastifyInstance) {
       return reply.status(409).send({ error: 'photo_already_confirmed' })
     }
 
-    const nextPosition = existing?.length ?? 0
+    // A paused user re-verifying at the photo cap: evict their oldest photo
+    // (lowest position) so the fresh photo can land — and lift the pause —
+    // instead of hitting max_photos_reached. Reuse the freed slot's position.
+    let nextPosition = count
+    if (count >= MAX_PHOTOS && req.isPaused && existing && existing.length > 0) {
+      const oldest = existing[0]
+      await db.from('user_photos').delete().eq('id', oldest.id)
+      await db.storage.from('profile-photos').remove([`${req.userId}/${oldest.id}`])
+      nextPosition = oldest.position
+    }
+
     const path = `${req.userId}/${photoId}`
     const publicUrl = db.storage.from('profile-photos').getPublicUrl(path).data.publicUrl
 

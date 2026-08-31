@@ -4,7 +4,7 @@ import { db } from '../db.js'
 export async function getProfileWithPhotos(userId: string) {
   const { data: user, error } = await db
     .from('users')
-    .select('id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt, icebreaker_answer, is_active')
+    .select('id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt, icebreaker_answer, is_active, paused_at')
     .eq('id', userId)
     .single()
   if (error || !user) return null
@@ -17,7 +17,7 @@ export async function getProfileWithPhotos(userId: string) {
 
   const setupComplete = user.age > 0
 
-  return { ...user, photos: photos ?? [], setupComplete }
+  return { ...user, photos: photos ?? [], setupComplete, paused: Boolean(user.paused_at) }
 }
 
 export async function profileRoutes(app: FastifyInstance) {

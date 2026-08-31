@@ -144,6 +144,25 @@ export async function photosRoutes(app: FastifyInstance) {
 
     if (insertErr) return reply.status(500).send({ error: 'photo_confirm_failed' })
 
+    // A fresh photo lifts a photo-review pause. The .not() guard makes this a
+    // no-op for the common (non-paused) upload; when it does match, resolve the
+    // pending reports that triggered the pause so the count resets and the user
+    // is not immediately re-paused.
+    const { data: resumed } = await db
+      .from('users')
+      .update({ paused_at: null })
+      .eq('id', req.userId)
+      .not('paused_at', 'is', null)
+      .select('id')
+      .maybeSingle()
+    if (resumed) {
+      await db
+        .from('reports')
+        .update({ status: 'resolved_reuploaded', resolved_at: new Date().toISOString() })
+        .eq('reported_id', req.userId)
+        .eq('status', 'pending')
+    }
+
     return { photo: { id: photoId, url: publicUrl, position: nextPosition } }
   })
 }

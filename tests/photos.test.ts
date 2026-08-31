@@ -105,6 +105,11 @@ describe('POST /profile/me/photos/confirm', () => {
       insert: () => ({ data: null, error: null }),
     } as any)
 
+    // Resume check: user was not paused, so the .not() guard yields no row.
+    vi.mocked(db.from).mockReturnValueOnce({
+      update: () => ({ eq: () => ({ not: () => ({ select: () => ({ maybeSingle: () => ({ data: null }) }) }) }) }),
+    } as any)
+
     const PUBLIC_URL = 'https://supabase.example.com/public/profile-photos/user-uuid-1/new-uuid'
     vi.mocked(db.storage.from).mockReturnValue({
       getPublicUrl: () => ({ data: { publicUrl: PUBLIC_URL } }),

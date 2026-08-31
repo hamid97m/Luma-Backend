@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../../db.js'
+import { notifyPaused } from '../../bot.js'
 
 export const PAGE_SIZE = 20
 
@@ -18,6 +19,7 @@ export function toListItem(u: any) {
     isActive: u.is_active,
     isSeed: u.is_seed,
     bannedAt: u.banned_at,
+    pausedAt: u.paused_at,
     deletedAt: u.deleted_at,
     createdAt: u.created_at,
     lastActive: u.last_active,
@@ -33,7 +35,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     let q: any = db
       .from('users')
       .select(
-        'id, telegram_id, username, name, age, gender, looking_for, is_active, is_seed, banned_at, deleted_at, created_at, last_active',
+        'id, telegram_id, username, name, age, gender, looking_for, is_active, is_seed, banned_at, paused_at, deleted_at, created_at, last_active',
         { count: 'exact' }
       )
 
@@ -316,6 +318,33 @@ export async function adminUsersRoutes(app: FastifyInstance) {
   app.post('/users/:id/unban', async (req, reply) => {
     const { id } = req.params as { id: string }
     return setBanned(id, null, reply)
+  })
+
+  const setPaused = async (id: string, pausedAt: string | null, reply: any) => {
+    const { data, error } = await db
+      .from('users')
+      .update({ paused_at: pausedAt })
+      .eq('id', id)
+      .select('telegram_id, allows_write_to_pm')
+      .single()
+    if (error || !data) return reply.status(404).send({ error: 'user_not_found' })
+    // Warn the user only when pausing (not on resume), and only if bot DMs are
+    // not explicitly declined.
+    if (pausedAt && data.telegram_id > 0 && data.allows_write_to_pm !== false) {
+      notifyPaused(data.telegram_id).catch((err) =>
+        console.error('[admin] notifyPaused failed:', err?.message ?? err))
+    }
+    return { ok: true }
+  }
+
+  app.post('/users/:id/pause', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    return setPaused(id, new Date().toISOString(), reply)
+  })
+
+  app.post('/users/:id/unpause', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    return setPaused(id, null, reply)
   })
 }
 

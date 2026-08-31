@@ -51,6 +51,14 @@ export async function photosRoutes(app: FastifyInstance) {
 
     if (error || !photo) return reply.status(404).send({ error: 'photo_not_found' })
 
+    // Don't allow deleting the last remaining photo — a profile must keep at least one.
+    const { count } = await db
+      .from('user_photos')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', req.userId)
+
+    if ((count ?? 0) <= 1) return reply.status(409).send({ error: 'last_photo' })
+
     await db.from('user_photos').delete().eq('id', photoId)
     await db.storage.from('profile-photos').remove([`${req.userId}/${photoId}`])
 

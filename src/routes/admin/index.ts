@@ -9,6 +9,7 @@ import { adminSupportRoutes } from './support.js'
 import { adminGiftsRoutes } from './gifts.js'
 import { adminPremiumRoutes } from './premium.js'
 import { adminFakeLikerRoutes } from './fake-liker.js'
+import { adminModerationRoutes } from './moderation.js'
 import { adminUploadsRoutes } from './uploads.js'
 
 declare module 'fastify' {
@@ -45,5 +46,6 @@ export async function adminRoutes(app: FastifyInstance) {
   await app.register(adminGiftsRoutes)
   await app.register(adminPremiumRoutes)
   await app.register(adminFakeLikerRoutes)
+  await app.register(adminModerationRoutes)
   await app.register(adminUploadsRoutes)
 }

@@ -109,6 +109,38 @@ describe('GET /discovery', () => {
     })
   })
 
+  it('filters candidates to those whose looking_for includes the viewer gender', async () => {
+    setupAuth()
+
+    // viewer — a man who looks for everyone (no viewer-side gender filter)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'everyone', gender: 'man', location: null }, error: null }) }) }),
+    } as any)
+    // recent swipes — empty
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
+    } as any)
+    // blocks — empty
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ or: () => ({ data: [], error: null }) }),
+    } as any)
+    // liker swipes — nobody has liked the viewer
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+    } as any)
+    // rest-tier profile query — capture the chain calls
+    const log: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }, log))
+
+    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    // A man-viewer must only see candidates whose looking_for includes men.
+    const inCall = log.find((c) => c.method === 'in' && c.args[0] === 'looking_for')
+    expect(inCall).toBeDefined()
+    expect(inCall!.args[1]).toEqual(['men', 'everyone', 'both'])
+  })
+
   it('returns 401 when no auth header', async () => {
     const res = await app.inject({ method: 'GET', url: '/discovery' })
     expect(res.statusCode).toBe(401)

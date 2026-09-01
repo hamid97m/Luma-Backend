@@ -29,10 +29,10 @@ export async function discoveryRoutes(app: FastifyInstance) {
   app.get('/discovery', async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
-    // Get viewer's preference and city
+    // Get viewer's preference, gender and city
     const { data: viewer } = await db
       .from('users')
-      .select('looking_for, location')
+      .select('looking_for, gender, location')
       .eq('id', req.userId)
       .single()
 
@@ -74,8 +74,18 @@ export async function discoveryRoutes(app: FastifyInstance) {
       viewer.looking_for === 'men' ? 'man' :
       viewer.looking_for === 'women' ? 'woman' : null
 
+    // Reciprocal filter: only surface candidates whose own looking_for includes
+    // the viewer's gender. Without this a candidate who isn't interested in the
+    // viewer (e.g. a man who only seeks women) still shows up in the viewer's
+    // feed — most visibly when the viewer looks for 'everyone'/'both' and gets
+    // no viewer-side gender filter at all. 'everyone'/'both' candidates match
+    // any viewer gender.
+    const interestedIn =
+      viewer.gender === 'man' ? ['men', 'everyone', 'both'] :
+      viewer.gender === 'woman' ? ['women', 'everyone', 'both'] : null
+
     const profileQuery = () => {
-      const q = db
+      let q: any = db
         .from('users')
         .select(PROFILE_COLUMNS)
         .eq('is_active', true)
@@ -86,7 +96,9 @@ export async function discoveryRoutes(app: FastifyInstance) {
         // defaulting true, so without this an incomplete profile (age 0)
         // would surface as a blank/half-empty card.
         .gt('age', 0)
-      return genderFilter ? (q as any).eq('gender', genderFilter) : (q as any)
+      if (genderFilter) q = q.eq('gender', genderFilter)
+      if (interestedIn) q = q.in('looking_for', interestedIn)
+      return q
     }
 
     // Tier 1: people who already liked the viewer (uses idx_swipes_match_check)

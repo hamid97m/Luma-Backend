@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../../db.js'
-import { notifyPaused } from '../../bot.js'
+import { notifyPaused, sendBroadcastMessage } from '../../bot.js'
 import { deleteAllPhotosForUser } from '../../photos/deleteAllPhotosForUser.js'
 
 export const PAGE_SIZE = 20
@@ -351,6 +351,43 @@ export async function adminUsersRoutes(app: FastifyInstance) {
   app.post('/users/:id/unpause', async (req, reply) => {
     const { id } = req.params as { id: string }
     return setPaused(id, null, reply)
+  })
+
+  // Send a one-off bot DM to a single user (admin override: reaches opted-out
+  // and paused/banned users; only seed/fake users with no real Telegram chat
+  // are rejected).
+  app.post('/users/:id/message', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { text } = req.body as { text?: string }
+    const trimmed = (text ?? '').trim()
+    if (!trimmed) return reply.status(400).send({ error: 'empty_message' })
+    if (trimmed.length > 4096) return reply.status(400).send({ error: 'message_too_long' })
+
+    const { data: user, error } = await db
+      .from('users')
+      .select('telegram_id, is_seed')
+      .eq('id', id)
+      .single()
+    if (error && (error as any).code !== 'PGRST116') {
+      req.log.error({ err: error }, 'user lookup failed')
+      return reply.status(500).send({ error: 'user_fetch_failed' })
+    }
+    if (!user) return reply.status(404).send({ error: 'user_not_found' })
+    if ((user as any).is_seed || (user as any).telegram_id <= 0) {
+      return reply.status(400).send({ error: 'not_messageable' })
+    }
+
+    try {
+      await sendBroadcastMessage((user as any).telegram_id, trimmed)
+      return { ok: true }
+    } catch (err: any) {
+      // 403 = the user has blocked the bot. Surface it; leave allows_write_to_pm as-is.
+      if (err?.error_code === 403) {
+        return reply.status(409).send({ error: 'user_blocked_bot' })
+      }
+      req.log.error({ err }, 'admin user message send failed')
+      return reply.status(502).send({ error: 'send_failed' })
+    }
   })
 }
 

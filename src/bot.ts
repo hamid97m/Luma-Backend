@@ -9,6 +9,7 @@ import {
   PREMIUM_PAYLOAD_PREFIX, validatePremiumPreCheckout, handlePremiumPaid,
 } from './premium/service.js'
 import { t } from './i18n/index.js'
+import type { MessageButton } from './messaging/messageButton.js'
 
 let _bot: Bot | null = null
 
@@ -224,12 +225,28 @@ export async function notifyPaused(toTelegramId: number): Promise<void> {
   await bot.api.sendMessage(toTelegramId, t.notify.paused, { reply_markup: keyboard })
 }
 
-/** Raw admin broadcast DM. Throws on Telegram errors so the broadcast runner
- * can count failures / react to 403 (blocked) and 429 (rate limit). */
-export async function sendBroadcastMessage(toTelegramId: number, text: string): Promise<void> {
+/** Build the optional inline keyboard for an admin message. Returns undefined
+ * when no button is configured — the message then goes out with no keyboard.
+ * Exported for unit testing of the url/screen/none branches. */
+export function buildMessageKeyboard(button?: MessageButton): InlineKeyboard | undefined {
+  if (!button) return undefined
+  if (button.kind === 'url') return new InlineKeyboard().url(button.title, button.url)
+  // screen → open the mini app at a specific tab via a query param.
+  const url = `${process.env.WEB_URL!}?screen=${encodeURIComponent(button.screen)}`
+  return new InlineKeyboard().webApp(button.title, url)
+}
+
+/** Raw admin DM (broadcast or single user). Optionally attaches one inline
+ * button (url link or mini-app screen deep link); no button → no keyboard.
+ * Throws on Telegram errors so the caller can react to 403/429. */
+export async function sendBroadcastMessage(
+  toTelegramId: number,
+  text: string,
+  button?: MessageButton,
+): Promise<void> {
   const bot = getBot()
-  const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
-  await bot.api.sendMessage(toTelegramId, text, { reply_markup: keyboard })
+  const keyboard = buildMessageKeyboard(button)
+  await bot.api.sendMessage(toTelegramId, text, keyboard ? { reply_markup: keyboard } : {})
 }
 
 export async function notifyNewMessage(

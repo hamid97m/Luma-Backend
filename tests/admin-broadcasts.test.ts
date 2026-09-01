@@ -88,6 +88,12 @@ describe('admin broadcasts', () => {
     expect(res.json().broadcast.status).toBe('running')
   })
 
+  it('POST /admin/broadcasts rejects an invalid button', async () => {
+    const res = await app.inject({ method: 'POST', url: '/admin/broadcasts', headers, payload: { message: 'hi', filters: {}, button: { title: 'Go', kind: 'url', url: 'bad' } } })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('button_url_invalid')
+  })
+
   it('requires auth', async () => {
     const res = await app.inject({ method: 'GET', url: '/admin/broadcasts' })
     expect(res.statusCode).toBe(401)

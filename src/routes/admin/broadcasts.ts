@@ -3,6 +3,7 @@ import { db } from '../../db.js'
 import { countAudience, fetchAudience, type BroadcastFilters } from '../../messaging/audience.js'
 import { runBroadcast } from '../../messaging/broadcast.js'
 import { sendBroadcastMessage } from '../../bot.js'
+import { validateButton, type MessageButton } from '../../messaging/messageButton.js'
 
 const MAX_MESSAGE_LEN = 4096
 
@@ -23,10 +24,10 @@ function serialize(row: any) {
 }
 
 /** Fire-and-forget: run the send loop and keep the job row in sync. */
-async function executeBroadcast(id: string, message: string, targets: { id: string; telegram_id: number }[], log: any) {
+async function executeBroadcast(id: string, message: string, targets: { id: string; telegram_id: number }[], log: any, button?: MessageButton) {
   try {
     const { sent, failed } = await runBroadcast(message, targets, {
-      send: sendBroadcastMessage,
+      send: (telegramId, text) => sendBroadcastMessage(telegramId, text, button),
       onOptOut: async (userId) => {
         await db.from('users').update({ allows_write_to_pm: false }).eq('id', userId)
       },
@@ -53,10 +54,13 @@ export async function adminBroadcastsRoutes(app: FastifyInstance) {
   })
 
   app.post('/broadcasts', async (req, reply) => {
-    const { message, filters } = req.body as { message?: string; filters?: BroadcastFilters }
+    const { message, filters, button } = req.body as { message?: string; filters?: BroadcastFilters; button?: unknown }
     const trimmed = (message ?? '').trim()
     if (!trimmed) return reply.status(400).send({ error: 'empty_message' })
     if (trimmed.length > MAX_MESSAGE_LEN) return reply.status(400).send({ error: 'message_too_long' })
+
+    const btn = validateButton(button)
+    if (!btn.ok) return reply.status(400).send({ error: btn.error })
 
     const f = filters ?? {}
     const targets = await fetchAudience(db, f)
@@ -75,7 +79,7 @@ export async function adminBroadcastsRoutes(app: FastifyInstance) {
       return reply.status(500).send({ error: 'broadcast_create_failed' })
     }
 
-    void executeBroadcast(row.id, trimmed, targets, req.log)
+    void executeBroadcast(row.id, trimmed, targets, req.log, btn.button)
     return { broadcast: serialize(row) }
   })
 

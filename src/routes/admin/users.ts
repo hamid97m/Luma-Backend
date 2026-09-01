@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify'
 import { db } from '../../db.js'
 import { notifyPaused, sendBroadcastMessage } from '../../bot.js'
 import { deleteAllPhotosForUser } from '../../photos/deleteAllPhotosForUser.js'
+import { validateButton } from '../../messaging/messageButton.js'
 
 export const PAGE_SIZE = 20
 
@@ -358,10 +359,13 @@ export async function adminUsersRoutes(app: FastifyInstance) {
   // are rejected).
   app.post('/users/:id/message', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const { text } = req.body as { text?: string }
+    const { text, button } = req.body as { text?: string; button?: unknown }
     const trimmed = (text ?? '').trim()
     if (!trimmed) return reply.status(400).send({ error: 'empty_message' })
     if (trimmed.length > 4096) return reply.status(400).send({ error: 'message_too_long' })
+
+    const btn = validateButton(button)
+    if (!btn.ok) return reply.status(400).send({ error: btn.error })
 
     const { data: user, error } = await db
       .from('users')
@@ -378,7 +382,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     }
 
     try {
-      await sendBroadcastMessage((user as any).telegram_id, trimmed)
+      await sendBroadcastMessage((user as any).telegram_id, trimmed, btn.button)
       return { ok: true }
     } catch (err: any) {
       // 403 = the user has blocked the bot. Surface it; leave allows_write_to_pm as-is.

@@ -33,7 +33,7 @@ describe('admin user message (single-user bot DM)', () => {
     const res = await app.inject({ method: 'POST', url: '/admin/users/u1/message', headers, payload: { text: 'hello there' } })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ ok: true })
-    expect(sendBroadcastMessage).toHaveBeenCalledWith(555, 'hello there')
+    expect(sendBroadcastMessage).toHaveBeenCalledWith(555, 'hello there', undefined)
   })
 
   it('rejects an empty message', async () => {
@@ -85,6 +85,29 @@ describe('admin user message (single-user bot DM)', () => {
     const res = await app.inject({ method: 'POST', url: '/admin/users/u1/message', headers, payload: { text: 'hi' } })
     expect(res.statusCode).toBe(502)
     expect(res.json().error).toBe('send_failed')
+  })
+
+  it('passes a valid screen button through to the bot', async () => {
+    mockUser({ telegram_id: 555, is_seed: false })
+    const button = { title: 'See likes', kind: 'screen', screen: 'likes' }
+    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/message', headers, payload: { text: 'hi', button } })
+    expect(res.statusCode).toBe(200)
+    expect(sendBroadcastMessage).toHaveBeenCalledWith(555, 'hi', { title: 'See likes', kind: 'screen', screen: 'likes' })
+  })
+
+  it('sends with no button when none is provided (undefined third arg)', async () => {
+    mockUser({ telegram_id: 555, is_seed: false })
+    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/message', headers, payload: { text: 'hi' } })
+    expect(res.statusCode).toBe(200)
+    expect(sendBroadcastMessage).toHaveBeenCalledWith(555, 'hi', undefined)
+  })
+
+  it('rejects an invalid button (400) before sending', async () => {
+    mockUser({ telegram_id: 555, is_seed: false })
+    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/message', headers, payload: { text: 'hi', button: { title: 'Go', kind: 'url', url: 'not-a-url' } } })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('button_url_invalid')
+    expect(sendBroadcastMessage).not.toHaveBeenCalled()
   })
 
   it('requires auth', async () => {

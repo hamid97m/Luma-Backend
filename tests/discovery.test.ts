@@ -105,6 +105,7 @@ describe('GET /discovery', () => {
       telegramId: 999,
       interests: [],
       location: null,
+      nearby: false,
       photos: ['https://img1.jpg', 'https://img2.jpg'],
     })
   })

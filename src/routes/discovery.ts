@@ -152,6 +152,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
     // shuffle the whole 10 so nobody — likers included — is pinned to the top.
     const merged = shuffle(interleaveBatch(likers, sameCity, shuffle(rest ?? []), BATCH_SIZE, LIKER_POSITIONS))
 
+    const cityLower = city.toLowerCase()
     const formatted = merged.map((p: any) => ({
       id: p.id,
       name: p.name,
@@ -160,6 +161,10 @@ export async function discoveryRoutes(app: FastifyInstance) {
       telegramId: p.telegram_id,
       interests: p.interests ?? [],
       location: p.location ?? null,
+      // "همین نزدیکی" badge only when the candidate shares the viewer's city
+      // (case-insensitive exact match on the free-text location, mirroring the
+      // tier-2 same-city query). Empty viewer city → never nearby.
+      nearby: cityLower.length > 0 && (p.location ?? '').trim().toLowerCase() === cityLower,
       photos: (p.user_photos as any[])
         .sort((a, b) => a.position - b.position)
         .map((ph: any) => ph.url),

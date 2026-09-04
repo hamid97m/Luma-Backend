@@ -77,7 +77,7 @@ describe('POST /discovery/direct-chat', () => {
     vi.mocked(checkAndCountDirectChat).mockResolvedValue({ gate: 'quota', blocked: false, remaining: 2, resetAt: RESET_AT } as any)
     const res = await post()
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ created: true, match: { id: MATCH_ID, user: { id: TARGET_ID, name: 'Sara', telegramId: 99, username: 'sara' } } })
+    expect(res.json()).toEqual({ created: true, match: { id: MATCH_ID, user: { id: TARGET_ID, name: 'Sara', telegramId: 99, username: 'sara' } }, directChat: { remaining: 2, resetAt: RESET_AT } })
   })
 
   it('404 when the target is missing/deleted', async () => {

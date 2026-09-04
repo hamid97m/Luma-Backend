@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 import { randomUUID } from 'crypto'
+import { fetchTelegramProfilePhoto } from '../bot.js'
 
 const MAX_PHOTOS = 6
 
@@ -239,5 +240,89 @@ export async function photosRoutes(app: FastifyInstance) {
     }
 
     return { photo: { id: newPhotoId, url: publicUrl, position: oldPhoto.position } }
+  })
+
+  // Import the user's current Telegram profile photo as a profile photo. Fetches
+  // the bytes server-side (via the bot) and uploads them into the same storage
+  // path used by the client-upload flow, then inserts a user_photos row —
+  // mirroring /confirm's cap check, paused-eviction and pause-lift logic.
+  app.post('/profile/me/photos/from-telegram', {
+    config: { rateLimit: { max: 10, timeWindow: '1 hour' } },
+  }, async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+
+    const { data: u } = await db
+      .from('users')
+      .select('telegram_id')
+      .eq('id', req.userId)
+      .single()
+
+    if (!u || !u.telegram_id || u.telegram_id <= 0) {
+      return reply.status(409).send({ error: 'no_telegram_photo' })
+    }
+
+    const { data: existing } = await db
+      .from('user_photos')
+      .select('id, position')
+      .eq('user_id', req.userId)
+      .order('position', { ascending: true })
+
+    const count = existing?.length ?? 0
+    if (count >= MAX_PHOTOS && !req.isPaused) {
+      return reply.status(400).send({ error: 'max_photos_reached' })
+    }
+
+    const photo = await fetchTelegramProfilePhoto(u.telegram_id)
+    if (!photo) return reply.status(409).send({ error: 'no_telegram_photo' })
+
+    const photoId = randomUUID()
+
+    // A paused user re-verifying at the photo cap: evict their oldest photo
+    // (lowest position) so the fresh photo can land — and lift the pause —
+    // instead of hitting max_photos_reached. Reuse the freed slot's position.
+    let nextPosition = count
+    if (count >= MAX_PHOTOS && req.isPaused && existing && existing.length > 0) {
+      const oldest = existing[0]
+      await db.from('user_photos').delete().eq('id', oldest.id)
+      await db.storage.from('profile-photos').remove([`${req.userId}/${oldest.id}`])
+      nextPosition = oldest.position
+    }
+
+    const path = `${req.userId}/${photoId}`
+
+    const { error: uploadErr } = await db.storage
+      .from('profile-photos')
+      .upload(path, photo.buffer, { contentType: photo.mime, upsert: true })
+
+    if (uploadErr) return reply.status(500).send({ error: 'upload_failed' })
+
+    const publicUrl = db.storage.from('profile-photos').getPublicUrl(path).data.publicUrl
+
+    const { error: insertErr } = await db.from('user_photos').insert({
+      id: photoId,
+      user_id: req.userId,
+      url: publicUrl,
+      position: nextPosition,
+    })
+
+    if (insertErr) return reply.status(500).send({ error: 'photo_confirm_failed' })
+
+    // A fresh photo lifts a photo-review pause (same as /confirm).
+    const { data: resumed } = await db
+      .from('users')
+      .update({ paused_at: null })
+      .eq('id', req.userId)
+      .not('paused_at', 'is', null)
+      .select('id')
+      .maybeSingle()
+    if (resumed) {
+      await db
+        .from('reports')
+        .update({ status: 'resolved_reuploaded', resolved_at: new Date().toISOString() })
+        .eq('reported_id', req.userId)
+        .eq('status', 'pending')
+    }
+
+    return { photo: { id: photoId, url: publicUrl, position: nextPosition } }
   })
 }

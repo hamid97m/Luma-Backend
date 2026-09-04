@@ -337,3 +337,41 @@ export async function createPremiumInvoiceLink(
 export async function refundPremiumPayment(telegramId: number, chargeId: string): Promise<void> {
   await getBot().api.refundStarPayment(telegramId, chargeId)
 }
+
+/**
+ * Fetch the user's current Telegram profile photo (server-side) as raw bytes.
+ * Returns null when the user has no profile photo, or on any Telegram/network
+ * failure — callers treat that as "no photo available" rather than an error.
+ *
+ * Telegram stores profile photos at ~640px max, so the largest available size
+ * (the last / widest `PhotoSize` in the group) is the best resolution we can
+ * get — there is no higher-res original to request.
+ */
+export async function fetchTelegramProfilePhoto(
+  telegramId: number
+): Promise<{ buffer: Buffer; mime: string } | null> {
+  const bot = getBot()
+  try {
+    const photos = await bot.api.getUserProfilePhotos(telegramId, { limit: 1 })
+    if (photos.total_count === 0 || photos.photos.length === 0) return null
+
+    // photos.photos[0] is a PhotoSize[] sorted small→large; pick the largest.
+    const group = photos.photos[0]
+    const largest = group.reduce((a, b) => (b.width > a.width ? b : a))
+
+    const file = await bot.api.getFile(largest.file_id)
+    if (!file.file_path) return null
+
+    const url = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`
+    const res = await fetch(url)
+    if (!res.ok) return null
+
+    const buffer = Buffer.from(await res.arrayBuffer())
+    // Telegram profile photos are jpeg; fall back to the header if present.
+    const mime = res.headers.get('content-type') || 'image/jpeg'
+    return { buffer, mime }
+  } catch (err) {
+    console.error(`[bot] fetchTelegramProfilePhoto(${telegramId}) failed:`, (err as any)?.message ?? err)
+    return null
+  }
+}

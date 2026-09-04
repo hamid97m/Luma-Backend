@@ -11,14 +11,18 @@ export async function photosRoutes(app: FastifyInstance) {
   }, async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
-    const { contentType } = req.body as { contentType: string }
+    const { contentType, replacePhotoId } = req.body as { contentType: string; replacePhotoId?: string }
 
     const { data: existing } = await db
       .from('user_photos')
       .select('id')
       .eq('user_id', req.userId)
 
-    if (!req.isPaused && (existing?.length ?? 0) >= MAX_PHOTOS) {
+    // A replace keeps the net photo count unchanged (the old photo is removed as
+    // the new one lands), so the cap must not block it — even at MAX_PHOTOS.
+    const isReplace = !!replacePhotoId && (existing?.some((p) => p.id === replacePhotoId) ?? false)
+
+    if (!req.isPaused && !isReplace && (existing?.length ?? 0) >= MAX_PHOTOS) {
       return reply.status(400).send({ error: 'max_photos_reached' })
     }
 
@@ -176,5 +180,64 @@ export async function photosRoutes(app: FastifyInstance) {
     }
 
     return { photo: { id: photoId, url: publicUrl, position: nextPosition } }
+  })
+
+  // Replace a photo in place: the client uploads a fresh object (new photoId) to
+  // storage first, then calls this to swap it into the old photo's slot. The old
+  // row+object are removed and the new row is inserted at the same position, so
+  // the net count is unchanged and "main" (position 0) stays put when swapped.
+  app.post('/profile/me/photos/:photoId/replace', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+
+    const { photoId } = req.params as { photoId: string }
+    const { newPhotoId } = req.body as { newPhotoId: string }
+
+    if (!newPhotoId || typeof newPhotoId !== 'string' || newPhotoId === photoId) {
+      return reply.status(400).send({ error: 'invalid_photo_id' })
+    }
+
+    const { data: oldPhoto, error } = await db
+      .from('user_photos')
+      .select('id, position')
+      .eq('id', photoId)
+      .eq('user_id', req.userId)
+      .single()
+
+    if (error || !oldPhoto) return reply.status(404).send({ error: 'photo_not_found' })
+
+    // Remove the old row + storage object, then insert the fresh one at the freed
+    // position (mirrors the paused-eviction path in /confirm).
+    await db.from('user_photos').delete().eq('id', photoId)
+    await db.storage.from('profile-photos').remove([`${req.userId}/${photoId}`])
+
+    const path = `${req.userId}/${newPhotoId}`
+    const publicUrl = db.storage.from('profile-photos').getPublicUrl(path).data.publicUrl
+
+    const { error: insertErr } = await db.from('user_photos').insert({
+      id: newPhotoId,
+      user_id: req.userId,
+      url: publicUrl,
+      position: oldPhoto.position,
+    })
+
+    if (insertErr) return reply.status(500).send({ error: 'photo_replace_failed' })
+
+    // A fresh photo lifts a photo-review pause (same as /confirm).
+    const { data: resumed } = await db
+      .from('users')
+      .update({ paused_at: null })
+      .eq('id', req.userId)
+      .not('paused_at', 'is', null)
+      .select('id')
+      .maybeSingle()
+    if (resumed) {
+      await db
+        .from('reports')
+        .update({ status: 'resolved_reuploaded', resolved_at: new Date().toISOString() })
+        .eq('reported_id', req.userId)
+        .eq('status', 'pending')
+    }
+
+    return { photo: { id: newPhotoId, url: publicUrl, position: oldPhoto.position } }
   })
 }

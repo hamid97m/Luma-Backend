@@ -294,9 +294,7 @@ export async function photosRoutes(app: FastifyInstance) {
       .from('profile-photos')
       .upload(path, photo.buffer, { contentType: photo.mime, upsert: true })
 
-    // Temporary: surface the real Supabase storage error so a field failure is
-    // diagnosable instead of an opaque upload_failed.
-    if (uploadErr) return reply.status(500).send({ error: 'upload_failed', detail: uploadErr.message, mime: photo.mime })
+    if (uploadErr) return reply.status(500).send({ error: 'upload_failed' })
 
     const publicUrl = db.storage.from('profile-photos').getPublicUrl(path).data.publicUrl
 

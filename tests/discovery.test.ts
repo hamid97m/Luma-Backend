@@ -5,12 +5,17 @@ vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/premium/swipeLimit.js', () => ({
   getSwipeLimitStatus: vi.fn().mockResolvedValue({ limited: false, resetAt: null }),
 }))
+vi.mock('../src/premium/directChatLimit.js', () => ({
+  getDirectChatStatus: vi.fn().mockResolvedValue({ gate: 'free', remaining: 3, limit: 3, resetAt: null }),
+}))
 
 import { buildApp } from '../src/server.js'
 import { verifyInitData } from '../src/auth.js'
 import { db } from '../src/db.js'
 import { getSwipeLimitStatus } from '../src/premium/swipeLimit.js'
 import { chainable } from './admin-helpers.js'
+
+const DIRECT_CHAT_DEFAULT = { gate: 'free', remaining: 3, limit: 3, resetAt: null }
 
 const AUTH = { authorization: 'valid_init_data' }
 const USER_ID = 'user-uuid-1'
@@ -51,7 +56,7 @@ describe('GET /discovery', () => {
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
 
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null } })
+    expect(res.json()).toEqual({ profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null }, directChat: DIRECT_CHAT_DEFAULT })
   })
 
   it('returns profiles with photos sorted by position', async () => {
@@ -184,7 +189,7 @@ describe('GET /discovery', () => {
 
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null } })
+    expect(res.json()).toEqual({ profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null }, directChat: DIRECT_CHAT_DEFAULT })
   })
 
   it('includes the liker, same-city, and rest profiles in the batch (order shuffled)', async () => {
@@ -250,7 +255,7 @@ describe('GET /discovery', () => {
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
 
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null } })
+    expect(res.json()).toEqual({ profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null }, directChat: DIRECT_CHAT_DEFAULT })
     // auth + viewer + swipes + blocks + likerSwipes + rest = exactly 6 db calls
     expect(vi.mocked(db.from)).toHaveBeenCalledTimes(6)
   })

@@ -31,6 +31,45 @@ function mockUserRow(row: Record<string, unknown> | null, opts?: { selectError?:
   }) as any)
 }
 
+/**
+ * users-select then a guarded-update chain whose select() result is driven
+ * by a per-call sequence — lets tests simulate a first update losing the
+ * optimistic-concurrency race and a retry re-read seeing a fresh count.
+ * (mirrors swipe-limit-service.test.ts's mockUserRowSequence)
+ */
+function mockUserRowSequence(
+  selects: Array<Record<string, unknown> | null>,
+  updates: Array<{ data: Array<{ id: string }> | null; error?: { message: string } | null }>,
+) {
+  let selectCall = 0
+  let updateCall = 0
+  vi.mocked(db.from).mockImplementation(((table: string) => {
+    if (table !== 'users') throw new Error(`unexpected table ${table}`)
+    return {
+      select: () => ({
+        eq: () => ({
+          single: () => {
+            const row = selects[Math.min(selectCall, selects.length - 1)]
+            selectCall++
+            return { data: row, error: null }
+          },
+        }),
+      }),
+      update: () => ({
+        eq: () => ({
+          eq: () => ({
+            select: () => {
+              const res = updates[Math.min(updateCall, updates.length - 1)]
+              updateCall++
+              return { data: res.data, error: res.error ?? null }
+            },
+          }),
+        }),
+      }),
+    }
+  }) as any)
+}
+
 const QUOTA_USER = {
   gender: 'man', looking_for: 'women', premium_until: iso(NOW + 86_400_000),
   direct_chat_window_started_at: null, direct_chat_window_count: 0,
@@ -98,6 +137,66 @@ describe('checkAndCountDirectChat', () => {
   it('fails open to free on db error', async () => {
     mockUserRow(null, { selectError: true })
     expect(await checkAndCountDirectChat('u1', NOW)).toEqual({ gate: 'free' })
+  })
+
+  describe('optimistic-concurrency retry', () => {
+    const start = iso(NOW - 60_000)
+
+    it('retries and succeeds when the guarded update loses the race once', async () => {
+      // Initial read sees count=1; a concurrent writer bumps it to 2 before
+      // our guarded update runs, so the first attempt (expecting 1) loses.
+      // The retry re-read sees 2, re-evaluates (still under the limit), and
+      // the second guarded update (expecting 2) succeeds.
+      mockUserRowSequence(
+        [{ ...QUOTA_USER, direct_chat_window_started_at: start, direct_chat_window_count: 1 },
+         { ...QUOTA_USER, direct_chat_window_started_at: start, direct_chat_window_count: 2 }],
+        [{ data: [] }, { data: [{ id: 'u1' }] }],
+      )
+      vi.mocked(isPremiumEnabled).mockResolvedValue(true)
+      const res = await checkAndCountDirectChat('u1', NOW)
+      expect(res).toEqual({
+        gate: 'quota', blocked: false,
+        remaining: DIRECT_CHAT_LIMIT - 3, resetAt: iso(NOW - 60_000 + DIRECT_CHAT_WINDOW_MS),
+      })
+    })
+
+    it('fails open when the guarded update loses the race twice', async () => {
+      mockUserRowSequence(
+        [{ ...QUOTA_USER, direct_chat_window_started_at: start, direct_chat_window_count: 1 },
+         { ...QUOTA_USER, direct_chat_window_started_at: start, direct_chat_window_count: 2 }],
+        [{ data: [] }, { data: [] }],
+      )
+      vi.mocked(isPremiumEnabled).mockResolvedValue(true)
+      const res = await checkAndCountDirectChat('u1', NOW)
+      expect(res).toEqual({
+        gate: 'quota', blocked: false,
+        remaining: DIRECT_CHAT_LIMIT - 3, resetAt: iso(NOW - 60_000 + DIRECT_CHAT_WINDOW_MS),
+      })
+    })
+
+    it('blocks when the retry re-read shows the count now at the cap', async () => {
+      // Initial read sees count=2 (one direct chat left); a concurrent writer
+      // pushes it to the cap (3) before our guarded update lands, so the
+      // retry re-evaluation blocks instead of attempting a second update.
+      mockUserRowSequence(
+        [{ ...QUOTA_USER, direct_chat_window_started_at: start, direct_chat_window_count: 2 },
+         { ...QUOTA_USER, direct_chat_window_started_at: start, direct_chat_window_count: 3 }],
+        [{ data: [] }],
+      )
+      vi.mocked(isPremiumEnabled).mockResolvedValue(true)
+      const res = await checkAndCountDirectChat('u1', NOW)
+      expect(res).toEqual({ gate: 'quota', blocked: true, resetAt: iso(NOW - 60_000 + DIRECT_CHAT_WINDOW_MS) })
+    })
+
+    it('fails open (allows) when the first guarded update errors', async () => {
+      mockUserRow(QUOTA_USER, { updateError: true })
+      vi.mocked(isPremiumEnabled).mockResolvedValue(true)
+      const res = await checkAndCountDirectChat('u1', NOW)
+      expect(res).toEqual({
+        gate: 'quota', blocked: false,
+        remaining: DIRECT_CHAT_LIMIT - 1, resetAt: iso(NOW + DIRECT_CHAT_WINDOW_MS),
+      })
+    })
   })
 })
 

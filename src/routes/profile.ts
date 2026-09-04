@@ -52,6 +52,15 @@ export async function profileRoutes(app: FastifyInstance) {
       updates.name = trimmed
     }
 
+    // Age is required and must be a whole number in [18, 99].
+    if ('age' in updates) {
+      const age = Number(updates.age)
+      if (!Number.isInteger(age) || age < 18 || age > 99) {
+        return reply.status(400).send({ error: 'invalid_age' })
+      }
+      updates.age = age
+    }
+
     const { data: user, error } = await db
       .from('users')
       .update({ ...updates, last_active: new Date().toISOString() })

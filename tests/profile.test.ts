@@ -125,6 +125,34 @@ describe('PUT /profile/me', () => {
     expect(res.json().name).toBe('Ali')
   })
 
+  it('rejects an out-of-range age with 400 invalid_age', async () => {
+    setupAuth()
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/profile/me',
+      headers: AUTH,
+      payload: { age: 12 },
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_age' })
+  })
+
+  it('rejects a non-numeric/empty age with 400 invalid_age', async () => {
+    setupAuth()
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/profile/me',
+      headers: AUTH,
+      payload: { age: '' },
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_age' })
+  })
+
   it('pauses the account by setting is_active to false', async () => {
     setupAuth()
 

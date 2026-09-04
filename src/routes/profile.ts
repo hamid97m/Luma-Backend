@@ -42,6 +42,16 @@ export async function profileRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'no_fields' })
     }
 
+    // A name must be at least 2 chars and contain no digits — Latin (0-9),
+    // Persian (۰-۹) or Arabic-Indic (٠-٩). Mirrors the client-side rule.
+    if ('name' in updates) {
+      const trimmed = typeof updates.name === 'string' ? updates.name.trim() : ''
+      if (trimmed.length < 2 || /[0-9۰-۹٠-٩]/.test(trimmed)) {
+        return reply.status(400).send({ error: 'invalid_name' })
+      }
+      updates.name = trimmed
+    }
+
     const { data: user, error } = await db
       .from('users')
       .update({ ...updates, last_active: new Date().toISOString() })

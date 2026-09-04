@@ -75,6 +75,56 @@ describe('PUT /profile/me', () => {
     expect(res.json().bio).toBe('سلام')
   })
 
+  it('rejects a numeric name with 400 invalid_name', async () => {
+    setupAuth()
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/profile/me',
+      headers: AUTH,
+      payload: { name: '12345' },
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_name' })
+  })
+
+  it('rejects a Persian-digit name with 400 invalid_name', async () => {
+    setupAuth()
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/profile/me',
+      headers: AUTH,
+      payload: { name: '۱۲۳' },
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_name' })
+  })
+
+  it('accepts and trims a valid name', async () => {
+    setupAuth()
+
+    vi.mocked(db.from)
+      .mockReturnValueOnce({
+        update: () => ({ eq: () => ({ select: () => ({ single: () => ({ data: { id: USER_ID, name: 'Ali', age: 25, gender: 'man', looking_for: 'women', bio: null }, error: null }) }) }) }),
+      } as any)
+      .mockReturnValueOnce({
+        select: () => ({ eq: () => ({ order: () => ({ data: [], error: null }) }) }),
+      } as any)
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/profile/me',
+      headers: AUTH,
+      payload: { name: '  Ali  ' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().name).toBe('Ali')
+  })
+
   it('pauses the account by setting is_active to false', async () => {
     setupAuth()
 

@@ -367,8 +367,16 @@ export async function fetchTelegramProfilePhoto(
     if (!res.ok) return null
 
     const buffer = Buffer.from(await res.arrayBuffer())
-    // Telegram profile photos are jpeg; fall back to the header if present.
-    const mime = res.headers.get('content-type') || 'image/jpeg'
+    // Derive the mime from the file extension, NOT the download response header:
+    // Telegram's file server returns application/octet-stream for photo downloads,
+    // which our storage bucket's allowed_mime_types (jpeg/png/webp/heic) rejects.
+    // Profile photos are effectively always jpeg.
+    const p = file.file_path.toLowerCase()
+    const mime = p.endsWith('.png')
+      ? 'image/png'
+      : p.endsWith('.webp')
+        ? 'image/webp'
+        : 'image/jpeg'
     return { buffer, mime }
   } catch (err) {
     console.error(`[bot] fetchTelegramProfilePhoto(${telegramId}) failed:`, (err as any)?.message ?? err)

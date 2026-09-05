@@ -2,8 +2,9 @@ import { db } from '../db.js'
 import { computeCharge } from './pricing.js'
 import {
   getGiftCatalog, createGiftInvoiceLink, sendGiftToUser, refundGift,
-  notifyNewMessage, notifyGiftIntro,
+  notifyNewMessage, notifyGiftIntro, notifyPaymentChannel,
 } from '../bot.js'
+import { formatGiftPaidNotice } from '../payments/paymentNotify.js'
 import { t } from '../i18n/index.js'
 
 const CATALOG_TTL_MS = 5 * 60 * 1000
@@ -105,7 +106,7 @@ export async function validatePreCheckout(payload: string, totalAmount: number, 
   return { ok: true as const }
 }
 
-export async function handleGiftPaid(payload: string, chargeId: string, buyerTelegramId: number) {
+export async function handleGiftPaid(payload: string, chargeId: string, buyerTelegramId: number, amountStars: number) {
   // Idempotency: only a still-pending row proceeds (guards double delivery on update replays).
   const { data: tx } = await db
     .from('gift_transactions')
@@ -130,6 +131,16 @@ export async function handleGiftPaid(payload: string, chargeId: string, buyerTel
     const { error: sentErr } = await db.from('gift_transactions').update({ status: 'sent', sent_at: new Date().toISOString() }).eq('id', tx.id)
     if (sentErr) console.error(`[gifts] failed to mark tx ${tx.id} as sent:`, sentErr)
   }
+
+  // Gift delivered — post an ops notice (best-effort; never blocks the payment).
+  notifyPaymentChannel(formatGiftPaidNotice({
+    buyerName: buyer?.name ?? null,
+    recipientName: recipient.name ?? null,
+    giftEmoji: tx.gift_emoji ?? null,
+    amountStars,
+    chargeId,
+    at: new Date().toISOString(),
+  })).catch(() => {})
 
   if (tx.context === 'chat' && tx.match_id) {
     const { error: msgErr } = await db.from('messages').insert({

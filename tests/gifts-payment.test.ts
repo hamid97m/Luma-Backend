@@ -4,9 +4,10 @@ vi.mock('../src/bot.js', () => ({
   getGiftCatalog: vi.fn(), createGiftInvoiceLink: vi.fn(), sendGiftToUser: vi.fn(),
   refundGift: vi.fn().mockResolvedValue(undefined), notifyNewMessage: vi.fn().mockResolvedValue(undefined),
   notifyGiftIntro: vi.fn().mockResolvedValue(undefined),
+  notifyPaymentChannel: vi.fn().mockResolvedValue(undefined),
 }))
 import { db } from '../src/db.js'
-import { sendGiftToUser, refundGift, notifyGiftIntro } from '../src/bot.js'
+import { sendGiftToUser, refundGift, notifyGiftIntro, notifyPaymentChannel } from '../src/bot.js'
 import { handleGiftPaid } from '../src/gifts/service.js'
 
 const CLAIM_TX = {
@@ -53,7 +54,7 @@ describe('handleGiftPaid', () => {
       updateSpyStep((p) => sentUpdates.push(p)),              // 4. mark sent
       insertSpyStep((p) => inserts.push(p)),                  // 5. insert gift message
     ])
-    await handleGiftPaid('tx1', 'charge_1', 111)
+    await handleGiftPaid('tx1', 'charge_1', 111, 75)
 
     expect(sendGiftToUser).toHaveBeenCalledWith(999, 'g', undefined)
     expect(refundGift).not.toHaveBeenCalled()
@@ -65,6 +66,16 @@ describe('handleGiftPaid', () => {
     expect(inserts[0]).toMatchObject({
       type: 'gift', gift_transaction_id: 'tx1', sender_id: 'b', match_id: 'm1', body: null,
     })
+
+    // posts the ops notice with buyer/recipient/gift/amount/charge on delivery
+    expect(notifyPaymentChannel).toHaveBeenCalledTimes(1)
+    const notice = vi.mocked(notifyPaymentChannel).mock.calls[0][0]
+    expect(notice).toContain('🎁 Gift sent')
+    expect(notice).toContain('Ali')
+    expect(notice).toContain('Sara')
+    expect(notice).toContain('🌹')
+    expect(notice).toContain('75 ⭐')
+    expect(notice).toContain('charge_1')
   })
 
   it('refunds when sendGift fails', async () => {
@@ -76,7 +87,7 @@ describe('handleGiftPaid', () => {
       lookupStep({ name: 'Ali' }),
       updateSpyStep((p) => refundUpdates.push(p)), // refunded status update
     ])
-    await handleGiftPaid('tx1', 'charge_1', 111)
+    await handleGiftPaid('tx1', 'charge_1', 111, 75)
 
     expect(refundGift).toHaveBeenCalledWith(111, 'charge_1')
     expect(refundUpdates).toHaveLength(1)
@@ -93,7 +104,7 @@ describe('handleGiftPaid', () => {
       lookupStep({ name: 'Ali' }),
       updateSpyStep((p) => updates.push(p)), // send_failed status update
     ])
-    await handleGiftPaid('tx1', 'charge_1', 111)
+    await handleGiftPaid('tx1', 'charge_1', 111, 75)
 
     expect(refundGift).toHaveBeenCalledWith(111, 'charge_1')
     expect(updates).toHaveLength(1)
@@ -102,7 +113,7 @@ describe('handleGiftPaid', () => {
 
   it('is idempotent when the tx is not pending (replay)', async () => {
     scriptDb([claimStep(null)])
-    await handleGiftPaid('tx1', 'charge_1', 111)
+    await handleGiftPaid('tx1', 'charge_1', 111, 75)
     expect(sendGiftToUser).not.toHaveBeenCalled()
   })
 
@@ -115,7 +126,7 @@ describe('handleGiftPaid', () => {
       updateSpyStep(() => {}),                          // 4. mark sent
       updateSpyStep((p) => introUpdates.push(p)),       // 5. set intro_status
     ])
-    await handleGiftPaid('tx1', 'charge_1', 111)
+    await handleGiftPaid('tx1', 'charge_1', 111, 75)
 
     expect(sendGiftToUser).toHaveBeenCalledWith(999, 'g', undefined)
     expect(introUpdates).toHaveLength(1)

@@ -87,8 +87,8 @@ function registerHandlers(bot: Bot): void {
   bot.on('message:successful_payment', async (ctx) => {
     const sp = ctx.message.successful_payment
     const run = sp.invoice_payload.startsWith(PREMIUM_PAYLOAD_PREFIX)
-      ? handlePremiumPaid(sp.invoice_payload.slice(PREMIUM_PAYLOAD_PREFIX.length), sp.telegram_payment_charge_id, ctx.from.id)
-      : handleGiftPaid(sp.invoice_payload, sp.telegram_payment_charge_id, ctx.from.id)
+      ? handlePremiumPaid(sp.invoice_payload.slice(PREMIUM_PAYLOAD_PREFIX.length), sp.telegram_payment_charge_id, ctx.from.id, sp.total_amount)
+      : handleGiftPaid(sp.invoice_payload, sp.telegram_payment_charge_id, ctx.from.id, sp.total_amount)
     await run.catch((err) => console.error('[bot] payment handler failed:', err?.message ?? err))
   })
 
@@ -215,6 +215,30 @@ export async function notifyNewLike(
   const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
   // Like DMs are text-only by design — no liker photo (the reveal happens in-app).
   await bot.api.sendMessage(toTelegramId, t.notify.newLike(likerName), { reply_markup: keyboard })
+}
+
+// Channel that receives an ops notification on every confirmed Stars purchase.
+// Defaults to the internal payments channel; overridable via env so the target
+// can be changed without a code edit. Set to an empty string to disable.
+const DEFAULT_PAYMENT_NOTIFY_CHAT_ID = '-1004417654720'
+
+function paymentNotifyChatId(): string | null {
+  const id = process.env.PAYMENT_NOTIFY_CHAT_ID ?? DEFAULT_PAYMENT_NOTIFY_CHAT_ID
+  const trimmed = id.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+/** Post a payment-success notice to the ops channel. No-ops when the channel is
+ * unconfigured (e.g. tests/local). Never throws — a notification failure must
+ * not affect the payment flow; it only logs. */
+export async function notifyPaymentChannel(text: string): Promise<void> {
+  const chatId = paymentNotifyChatId()
+  if (!chatId) return
+  try {
+    await getBot().api.sendMessage(chatId, text)
+  } catch (err) {
+    console.error('[bot] payment channel notify failed:', (err as Error)?.message ?? err)
+  }
 }
 
 /** DM a user that their profile was paused for photo review and a new photo is

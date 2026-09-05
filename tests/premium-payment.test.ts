@@ -3,9 +3,10 @@ vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/bot.js', () => ({
   createPremiumInvoiceLink: vi.fn(),
   refundPremiumPayment: vi.fn().mockResolvedValue(undefined),
+  notifyPaymentChannel: vi.fn().mockResolvedValue(undefined),
 }))
 import { db } from '../src/db.js'
-import { refundPremiumPayment } from '../src/bot.js'
+import { refundPremiumPayment, notifyPaymentChannel } from '../src/bot.js'
 import { validatePremiumPreCheckout, handlePremiumPaid } from '../src/premium/service.js'
 
 /** Claim step: update -> eq -> eq -> select -> maybeSingle, returning `data`. */
@@ -59,17 +60,25 @@ describe('handlePremiumPaid', () => {
       lookupStep({ premium_until: null }),      // 2. current expiry lookup
       updateSpyStep((p) => userUpdates.push(p)),// 3. users.premium_until update
     ])
-    await handlePremiumPaid('tx1', 'charge_1', 111)
+    await handlePremiumPaid('tx1', 'charge_1', 111, 100)
     expect(refundPremiumPayment).not.toHaveBeenCalled()
     expect(userUpdates).toHaveLength(1)
     const until = new Date(userUpdates[0].premium_until).getTime()
     expect(until).toBeGreaterThan(Date.now() + 29 * 24 * 60 * 60 * 1000)
+    // posts the ops notice with buyer/duration/amount/charge on confirmed grant
+    expect(notifyPaymentChannel).toHaveBeenCalledTimes(1)
+    const notice = vi.mocked(notifyPaymentChannel).mock.calls[0][0]
+    expect(notice).toContain('💎 Premium purchased')
+    expect(notice).toContain('30 days')
+    expect(notice).toContain('100 ⭐')
+    expect(notice).toContain('charge_1')
   })
 
   it('is idempotent on replays (claim misses)', async () => {
     scriptDb([claimStep(null)])
-    await handlePremiumPaid('tx1', 'charge_1', 111)
+    await handlePremiumPaid('tx1', 'charge_1', 111, 100)
     expect(refundPremiumPayment).not.toHaveBeenCalled()
+    expect(notifyPaymentChannel).not.toHaveBeenCalled()
   })
 
   it('refunds and marks refunded when the user update fails', async () => {
@@ -80,9 +89,10 @@ describe('handlePremiumPaid', () => {
       updateSpyStep(() => {}, { message: 'db down' }), // users update errors
       updateSpyStep((p) => txUpdates.push(p)),         // tx -> refunded
     ])
-    await handlePremiumPaid('tx1', 'charge_1', 111)
+    await handlePremiumPaid('tx1', 'charge_1', 111, 100)
     expect(refundPremiumPayment).toHaveBeenCalledWith(111, 'charge_1')
     expect(txUpdates[0]).toMatchObject({ status: 'refunded' })
+    expect(notifyPaymentChannel).not.toHaveBeenCalled()
   })
 
   it('refunds when the user row is missing', async () => {
@@ -92,8 +102,9 @@ describe('handlePremiumPaid', () => {
       lookupStep(null),                        // user gone
       updateSpyStep((p) => txUpdates.push(p)), // tx -> refunded
     ])
-    await handlePremiumPaid('tx1', 'charge_1', 111)
+    await handlePremiumPaid('tx1', 'charge_1', 111, 100)
     expect(refundPremiumPayment).toHaveBeenCalledWith(111, 'charge_1')
     expect(txUpdates[0]).toMatchObject({ status: 'refunded' })
+    expect(notifyPaymentChannel).not.toHaveBeenCalled()
   })
 })

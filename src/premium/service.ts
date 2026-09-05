@@ -1,5 +1,6 @@
 import { db } from '../db.js'
-import { createPremiumInvoiceLink, refundPremiumPayment } from '../bot.js'
+import { createPremiumInvoiceLink, refundPremiumPayment, notifyPaymentChannel } from '../bot.js'
+import { formatPremiumPaidNotice } from '../payments/paymentNotify.js'
 import { t } from '../i18n/index.js'
 
 export const PREMIUM_PAYLOAD_PREFIX = 'premium:'
@@ -105,7 +106,7 @@ export async function validatePremiumPreCheckout(transactionId: string, totalAmo
   return { ok: true as const }
 }
 
-export async function handlePremiumPaid(transactionId: string, chargeId: string, buyerTelegramId: number) {
+export async function handlePremiumPaid(transactionId: string, chargeId: string, buyerTelegramId: number, amountStars: number) {
   // Idempotency: only a still-pending row proceeds (guards Telegram update replays).
   const { data: tx } = await db
     .from('premium_transactions')
@@ -114,7 +115,7 @@ export async function handlePremiumPaid(transactionId: string, chargeId: string,
     .select('id, user_id, duration_days').maybeSingle()
   if (!tx) return // already handled or unknown
 
-  const { data: user } = await db.from('users').select('premium_until').eq('id', tx.user_id).single()
+  const { data: user } = await db.from('users').select('premium_until, name').eq('id', tx.user_id).single()
   if (!user) { await failAndRefund(tx.id, buyerTelegramId, chargeId); return }
 
   const { error: updErr } = await db
@@ -122,6 +123,15 @@ export async function handlePremiumPaid(transactionId: string, chargeId: string,
     .update({ premium_until: extendPremiumUntil(user.premium_until ?? null, tx.duration_days) })
     .eq('id', tx.user_id)
   if (updErr) { await failAndRefund(tx.id, buyerTelegramId, chargeId); return }
+
+  // Confirmed grant — post an ops notice (best-effort; never blocks the payment).
+  notifyPaymentChannel(formatPremiumPaidNotice({
+    buyerName: user.name ?? null,
+    durationDays: tx.duration_days,
+    amountStars,
+    chargeId,
+    at: new Date().toISOString(),
+  })).catch(() => {})
 }
 
 /** Buyer paid but we couldn't grant time: refund the Stars and mark the tx.

@@ -19,6 +19,7 @@ import { messagesRoutes } from './routes/messages.js'
 import { giftsRoutes } from './routes/gifts.js'
 import { premiumRoutes } from './routes/premium.js'
 import { reportsRoutes } from './routes/reports.js'
+import { blockRoutes } from './routes/block.js'
 import { supportRoutes } from './routes/support.js'
 import { adminRoutes } from './routes/admin/index.js'
 
@@ -118,6 +119,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(giftsRoutes)
   await app.register(premiumRoutes)
   await app.register(reportsRoutes)
+  await app.register(blockRoutes)
   await app.register(supportRoutes)
   await app.register(adminRoutes, { prefix: '/admin' })
 

@@ -22,6 +22,18 @@ async function getUsableMatch(matchId: string, userId: string) {
   const other: any = match.user1_id === userId ? match.user2 : match.user1
   if (other?.deleted_at) return null
 
+  // A block in either direction ends the conversation for both sides. The match
+  // list already hides blocked pairs, but a stale/open client could still hit
+  // these endpoints — enforce it server-side so a blocked user can't keep
+  // sending or reading messages.
+  const { data: block } = await db
+    .from('blocks')
+    .select('id')
+    .or(`and(blocker_id.eq.${userId},blocked_id.eq.${other.id}),and(blocker_id.eq.${other.id},blocked_id.eq.${userId})`)
+    .limit(1)
+    .maybeSingle()
+  if (block) return null
+
   return match
 }
 

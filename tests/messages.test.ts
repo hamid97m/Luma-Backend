@@ -30,6 +30,7 @@ function mockMatchLookup(overrides: Partial<{
   otherDeletedAt: string | null
   otherLastActive: string | null
   otherNotifiedOfflineAt: string | null
+  blocked: boolean
 }> = {}) {
   const {
     user1_id = USER_ID,
@@ -37,6 +38,7 @@ function mockMatchLookup(overrides: Partial<{
     otherDeletedAt = null,
     otherLastActive = RECENT,
     otherNotifiedOfflineAt = null,
+    blocked = false,
   } = overrides
   vi.mocked(db.from).mockReturnValueOnce({
     select: () => ({
@@ -63,6 +65,16 @@ function mockMatchLookup(overrides: Partial<{
       }),
     }),
   } as any)
+  // getUsableMatch's block lookup (either direction) runs only when the match
+  // exists, the requester participates, and the other side isn't deleted — so
+  // only enqueue its mock in those cases, or an unconsumed mock would leak into
+  // the next test (vi.clearAllMocks does not drain the mockReturnValueOnce queue).
+  const reachesBlockCheck = (user1_id === USER_ID || user2_id === USER_ID) && !otherDeletedAt
+  if (reachesBlockCheck) {
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ or: () => ({ limit: () => ({ maybeSingle: () => ({ data: blocked ? { id: 'blk-1' } : null, error: null }) }) }) }),
+    } as any)
+  }
 }
 
 // POST reads the sender's cohort for the free-chat gate. A woman short-circuits
@@ -97,6 +109,15 @@ describe('GET /matches/:matchId/messages', () => {
 
     const res = await app.inject({ method: 'GET', url: `/matches/${MATCH_ID}/messages`, headers: AUTH })
     expect(res.statusCode).toBe(404)
+  })
+
+  it('returns 404 when one of the two users has blocked the other', async () => {
+    setupAuth()
+    mockMatchLookup({ blocked: true })
+
+    const res = await app.inject({ method: 'GET', url: `/matches/${MATCH_ID}/messages`, headers: AUTH })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'match_not_found' })
   })
 
   it('returns the thread ordered oldest-first and marks the other side read', async () => {
@@ -178,6 +199,17 @@ describe('POST /matches/:matchId/messages', () => {
       method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi' },
     })
     expect(res.statusCode).toBe(404)
+  })
+
+  it('returns 404 when the pair is blocked', async () => {
+    setupAuth()
+    mockMatchLookup({ blocked: true })
+
+    const res = await app.inject({
+      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi' },
+    })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'match_not_found' })
   })
 
   it('inserts and returns the trimmed message on success', async () => {

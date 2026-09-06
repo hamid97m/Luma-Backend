@@ -228,7 +228,7 @@ export async function adminChatsRoutes(app: FastifyInstance) {
         last_active: picked.recipient.last_active, notified_offline_at: picked.recipient.notified_offline_at,
         allows_write_to_pm: picked.recipient.allows_write_to_pm,
       },
-      picked.fake.id, picked.fake.name, trimmed, req.log,
+      picked.fake.id, picked.fake.name, trimmed, matchId, req.log,
     )
 
     return { message: { id: message.id, senderId: message.sender_id, body: message.body, createdAt: message.created_at, readAt: null } }

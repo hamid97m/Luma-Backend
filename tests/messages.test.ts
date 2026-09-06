@@ -270,7 +270,8 @@ describe('POST /matches/:matchId/messages', () => {
     // Flush the fire-and-forget notify chain before asserting on it.
     await new Promise((resolve) => setImmediate(resolve))
 
-    expect(notifyNewMessage).toHaveBeenCalledWith(OTHER_TELEGRAM_ID, 'Ali', 'hi', 'https://ali.jpg')
+    // 5th arg is the matchId so the DM button deep-links straight to this chat.
+    expect(notifyNewMessage).toHaveBeenCalledWith(OTHER_TELEGRAM_ID, 'Ali', 'hi', 'https://ali.jpg', MATCH_ID)
     expect(markUpdateEq).toHaveBeenCalledWith('id', OTHER_ID)
   })
 

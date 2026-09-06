@@ -16,6 +16,7 @@ export async function deliverMessageNotification(
   senderId: string,
   senderName: string,
   body: string,
+  matchId: string,
   log?: { warn: (...a: any[]) => void },
 ): Promise<void> {
   try {
@@ -31,7 +32,7 @@ export async function deliverMessageNotification(
 
     // Stamp notified_offline_at only after the send resolves — a blocked bot
     // shouldn't consume this offline stretch's one-notification allowance.
-    await notifyNewMessage(recipient.telegram_id as number, senderName, body, senderPhoto?.url ?? null)
+    await notifyNewMessage(recipient.telegram_id as number, senderName, body, senderPhoto?.url ?? null, matchId)
     await db.from('users').update({ notified_offline_at: new Date().toISOString() }).eq('id', recipient.id)
   } catch (err) {
     log?.warn({ err }, 'failed to send offline notification')

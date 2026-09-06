@@ -121,6 +121,7 @@ export async function messagesRoutes(app: FastifyInstance) {
       req.userId,
       me.name,
       trimmed,
+      matchId,
       req.log,
     )
 

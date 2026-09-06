@@ -5,6 +5,8 @@
 export const fa = {
   bot: {
     openAppButton: 'باز کردن لوما ❤️',
+    // New-message notification button — deep-links straight into the chat.
+    replyButton: 'پاسخ دادن',
     start:
       'بیا داخل اپ → مچ‌ها منتظرتن 💫 هر وقت بخواهی می‌توانی حسابت را متوقف یا حذف کنی.',
     description: [

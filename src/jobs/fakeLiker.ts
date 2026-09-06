@@ -547,6 +547,7 @@ export async function runFakeLikerJob(
             fakeId,
             fake.name,
             t.chat.seedGreeting,
+            m.id,
             logger,
           )
         } catch (err) {

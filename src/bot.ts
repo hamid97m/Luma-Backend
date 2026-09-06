@@ -277,10 +277,20 @@ export async function notifyNewMessage(
   toTelegramId: number,
   senderName: string,
   messageBody: string,
-  senderPhoto: string | null = null
+  senderPhoto: string | null = null,
+  matchId?: string
 ): Promise<void> {
   const bot = getBot()
-  const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
+  // Deep-link the button straight to this chat (screen=matches + chat=<id>), so
+  // tapping the notification opens the conversation, not the app's home tab.
+  // Falls back to the app root when no matchId is supplied.
+  const url = matchId
+    ? `${process.env.WEB_URL!}?screen=matches&chat=${encodeURIComponent(matchId)}`
+    : process.env.WEB_URL!
+  // "پاسخ دادن" (Reply) when we can open the chat directly; the generic
+  // "open app" label only when there's no matchId to deep-link to.
+  const buttonLabel = matchId ? t.bot.replyButton : t.bot.openAppButton
+  const keyboard = new InlineKeyboard().webApp(buttonLabel, url)
   const caption = t.notify.newMessage(senderName, messageBody)
 
   if (senderPhoto) {

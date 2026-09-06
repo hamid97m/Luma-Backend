@@ -86,7 +86,10 @@ export async function discoveryRoutes(app: FastifyInstance) {
       viewer.gender === 'man' ? ['men', 'everyone', 'both'] :
       viewer.gender === 'woman' ? ['women', 'everyone', 'both'] : null
 
-    const profileQuery = () => {
+    // includeSeed=false (default) excludes fake/seed profiles so real people are
+    // ranked and surfaced first. Seeds are only pulled in as a tail filler once
+    // real candidates run low (see the seed top-up below).
+    const profileQuery = (includeSeed = false) => {
       let q: any = db
         .from('users')
         .select(PROFILE_COLUMNS)
@@ -98,6 +101,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
         // defaulting true, so without this an incomplete profile (age 0)
         // would surface as a blank/half-empty card.
         .gt('age', 0)
+      if (!includeSeed) q = q.eq('is_seed', false)
       if (genderFilter) q = q.eq('gender', genderFilter)
       if (interestedIn) q = q.in('looking_for', interestedIn)
       return q
@@ -154,8 +158,24 @@ export async function discoveryRoutes(app: FastifyInstance) {
     // shuffle the whole 10 so nobody — likers included — is pinned to the top.
     const merged = shuffle(interleaveBatch(likers, sameCity, shuffle(rest ?? []), BATCH_SIZE, LIKER_POSITIONS))
 
+    // Seed/fake profiles come last: only when real candidates can't fill the
+    // batch do we top up with seeds, appended at the tail (never shuffled in
+    // among real profiles). Since swiped users are excluded each request, real
+    // people deplete over time and seeds only surface once they're exhausted.
+    let batch = merged
+    if (batch.length < BATCH_SIZE) {
+      const seedExcludeIds = [...excludeIds, ...batch.map((p: any) => p.id)]
+      const { data: seeds, error: seedErr } = await profileQuery(true)
+        .eq('is_seed', true)
+        .not('id', 'in', `(${seedExcludeIds.join(',')})`)
+        .order('last_active', { ascending: false })
+        .limit(BATCH_SIZE - batch.length)
+      if (seedErr) return reply.status(500).send({ error: 'discovery_failed' })
+      batch = [...batch, ...shuffle(seeds ?? [])]
+    }
+
     const cityLower = city.toLowerCase()
-    const formatted = merged.map((p: any) => ({
+    const formatted = batch.map((p: any) => ({
       id: p.id,
       name: p.name,
       age: p.age,

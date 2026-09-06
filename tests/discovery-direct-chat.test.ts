@@ -51,6 +51,8 @@ describe('GET /discovery — directChat gate', () => {
     } as any)
     // tier-3 profiles query — chainable tolerates the full query-builder chain
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
+    // seed top-up query (real batch < BATCH_SIZE) — fresh db.from call, no seeds
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
 
     vi.mocked(getDirectChatStatus).mockResolvedValue({
       gate: 'quota',

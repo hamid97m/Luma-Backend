@@ -20,6 +20,13 @@ const DIRECT_CHAT_DEFAULT = { gate: 'free', remaining: 3, limit: 3, resetAt: nul
 const AUTH = { authorization: 'valid_init_data' }
 const USER_ID = 'user-uuid-1'
 
+// Seed top-up query runs whenever the real-user batch is under BATCH_SIZE (10),
+// which is every case here — it's a fresh db.from('users') call, so it needs its
+// own queued mock after the real-profile tier(s). Fake/seed users rank last.
+function mockSeedTopUp(data: unknown[] = []) {
+  vi.mocked(db.from).mockReturnValueOnce(chainable({ data, error: null }))
+}
+
 function setupAuth() {
   vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
   vi.mocked(db.from).mockReturnValueOnce({
@@ -52,6 +59,8 @@ describe('GET /discovery', () => {
     } as any)
     // profiles query — chainable tolerates the full is_active→banned→age→gender→… chain
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
+    // seed top-up — no seeds either
+    mockSeedTopUp()
 
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
 
@@ -95,6 +104,8 @@ describe('GET /discovery', () => {
       ],
       error: null,
     }))
+    // seed top-up — one real profile (< 10) still triggers the query; no seeds
+    mockSeedTopUp()
 
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
 
@@ -137,6 +148,8 @@ describe('GET /discovery', () => {
     // rest-tier profile query — capture the chain calls
     const log: Array<{ method: string; args: unknown[] }> = []
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }, log))
+    // seed top-up — separate query, not part of the captured rest-tier log
+    mockSeedTopUp()
 
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
 
@@ -186,6 +199,8 @@ describe('GET /discovery', () => {
     } as any)
     // profiles query — chainable tolerates the is_active→banned→age→(no gender)→… chain
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
+    // seed top-up — no seeds
+    mockSeedTopUp()
 
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
     expect(res.statusCode).toBe(200)
@@ -219,6 +234,9 @@ describe('GET /discovery', () => {
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('liker-1', 'Tehran')], error: null }))
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('city-1', 'Tehran')], error: null }))
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('rest-1', 'Mashhad')], error: null }))
+    // seed top-up — 3 real profiles (< 10) still triggers it; no seeds so the
+    // batch stays real-only. Seeds would otherwise land at the tail.
+    mockSeedTopUp()
 
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
 
@@ -228,6 +246,41 @@ describe('GET /discovery', () => {
     // not position. No liker marker leaks into the payload.
     expect(body.profiles.map((p: any) => p.id).sort()).toEqual(['city-1', 'liker-1', 'rest-1'])
     expect(body.profiles[0]).not.toHaveProperty('likedYou')
+  })
+
+  it('appends seed/fake profiles at the tail when real users run low', async () => {
+    setupAuth()
+
+    // viewer — no location so only the rest tier runs for real users
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women', location: null }, error: null }) }) }),
+    } as any)
+    // recent swipes — empty
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
+    } as any)
+    // blocks — empty
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ or: () => ({ data: [], error: null }) }),
+    } as any)
+    // liker swipes — nobody has liked the viewer
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+    } as any)
+    const profile = (id: string) => ({
+      id, name: 'N', age: 25, bio: null, telegram_id: 1, interests: [], location: null, user_photos: [],
+    })
+    // rest tier — one real user
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('real-1')], error: null }))
+    // seed top-up — one seed user fills the tail
+    mockSeedTopUp([profile('seed-1')])
+
+    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    // Real user first, seed appended at the tail (never shuffled among reals).
+    expect(body.profiles.map((p: any) => p.id)).toEqual(['real-1', 'seed-1'])
   })
 
   it('excludes already-swiped likers and skips the city tier without a location', async () => {
@@ -251,13 +304,15 @@ describe('GET /discovery', () => {
     } as any)
     // rest profiles (no gender filter) — chainable tolerates the is_active→banned→age→… chain
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
+    // seed top-up — no seeds
+    mockSeedTopUp()
 
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null }, directChat: DIRECT_CHAT_DEFAULT })
-    // auth + viewer + swipes + blocks + likerSwipes + rest = exactly 6 db calls
-    expect(vi.mocked(db.from)).toHaveBeenCalledTimes(6)
+    // auth + viewer + swipes + blocks + likerSwipes + rest + seed = exactly 7 db calls
+    expect(vi.mocked(db.from)).toHaveBeenCalledTimes(7)
   })
 
   it('includes swipeLimit status in the response', async () => {
@@ -281,6 +336,8 @@ describe('GET /discovery', () => {
     } as any)
     // profiles query — chainable tolerates the full is_active→banned→age→gender→… chain
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
+    // seed top-up — no seeds
+    mockSeedTopUp()
 
     vi.mocked(getSwipeLimitStatus).mockResolvedValueOnce({ limited: true, resetAt: '2026-08-07T16:00:00.000Z' })
 

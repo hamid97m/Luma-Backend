@@ -22,6 +22,11 @@ describe('validateButton', () => {
       .toEqual({ ok: true, button: { title: 'See likes', kind: 'screen', screen: 'likes' } })
   })
 
+  it('accepts the plans (paywall) screen button', () => {
+    expect(validateButton({ title: 'Get premium', kind: 'screen', screen: 'plans' }))
+      .toEqual({ ok: true, button: { title: 'Get premium', kind: 'screen', screen: 'plans' } })
+  })
+
   it('trims the title', () => {
     const r = validateButton({ title: '  Open  ', kind: 'screen', screen: 'matches' })
     expect(r).toEqual({ ok: true, button: { title: 'Open', kind: 'screen', screen: 'matches' } })

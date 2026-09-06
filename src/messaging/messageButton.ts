@@ -2,7 +2,9 @@
 // single-user DM). Either a plain URL link, or a webApp button that opens the
 // mini app on a specific tab.
 
-export const BUTTON_SCREENS = ['discovery', 'likes', 'matches', 'profile'] as const
+// 'plans' opens the premium plans sheet (paywall) on launch — see the frontend
+// readDeepLinkPlans() handler for WEB_URL?screen=plans.
+export const BUTTON_SCREENS = ['discovery', 'likes', 'matches', 'profile', 'plans'] as const
 export type ButtonScreen = (typeof BUTTON_SCREENS)[number]
 
 export type MessageButton =

@@ -273,6 +273,46 @@ export async function sendBroadcastMessage(
   await bot.api.sendMessage(toTelegramId, text, keyboard ? { reply_markup: keyboard } : {})
 }
 
+// Telegram chat ids may be given as a numeric string ('-100…') or a '@username'.
+// forwardMessage wants a number for the former, so coerce numeric-looking ids.
+function toChatId(id: string | number): string | number {
+  if (typeof id === 'number') return id
+  return /^-?\d+$/.test(id) ? Number(id) : id
+}
+
+/** Forward a channel message to one recipient (broadcast delivery). Shows the
+ * native "Forwarded from …" header. Throws on Telegram errors so the broadcast
+ * loop can react to 403/429 exactly like the text path. */
+export async function forwardBroadcastMessage(
+  toTelegramId: number,
+  fromChatId: string | number,
+  messageId: number,
+): Promise<void> {
+  const bot = getBot()
+  await bot.api.forwardMessage(toTelegramId, toChatId(fromChatId), messageId)
+}
+
+// Chat used to pre-flight a forward broadcast: dedicated override, else the ops
+// payments channel (the bot is already an admin there). Empty disables it.
+function forwardPreviewChatId(): string | null {
+  const id = process.env.BROADCAST_PREVIEW_CHAT_ID ?? process.env.PAYMENT_NOTIFY_CHAT_ID ?? DEFAULT_PAYMENT_NOTIFY_CHAT_ID
+  const trimmed = id.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+/** Prove the bot can forward the given source message BEFORE spamming every
+ * recipient: forward it once to the preview chat, then delete that copy. Throws
+ * the Telegram error if the message is unreachable (bot not in the channel,
+ * wrong id, deleted). Returns false (skips) when no preview chat is configured. */
+export async function verifyForwardSource(fromChatId: string | number, messageId: number): Promise<boolean> {
+  const previewChat = forwardPreviewChatId()
+  if (!previewChat) return false
+  const bot = getBot()
+  const sent = await bot.api.forwardMessage(toChatId(previewChat), toChatId(fromChatId), messageId)
+  try { await bot.api.deleteMessage(toChatId(previewChat), sent.message_id) } catch { /* best-effort cleanup */ }
+  return true
+}
+
 export async function notifyNewMessage(
   toTelegramId: number,
   senderName: string,

@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
-vi.mock('../src/bot.js', () => ({ sendBroadcastMessage: vi.fn().mockResolvedValue(undefined) }))
+vi.mock('../src/bot.js', () => ({
+  sendBroadcastMessage: vi.fn().mockResolvedValue(undefined),
+  forwardBroadcastMessage: vi.fn().mockResolvedValue(undefined),
+  verifyForwardSource: vi.fn().mockResolvedValue(true),
+}))
 vi.mock('../src/messaging/broadcast.js', async (orig) => ({
   ...(await orig<typeof import('../src/messaging/broadcast.js')>()),
   runBroadcast: vi.fn().mockResolvedValue({ sent: 0, failed: 0 }),
@@ -9,6 +13,7 @@ vi.mock('../src/messaging/broadcast.js', async (orig) => ({
 
 import { buildApp } from '../src/server.js'
 import { db } from '../src/db.js'
+import { verifyForwardSource } from '../src/bot.js'
 import { signAdminToken } from '../src/routes/admin/auth-utils.js'
 import { chainable } from './admin-helpers.js'
 
@@ -86,6 +91,33 @@ describe('admin broadcasts', () => {
     const res = await app.inject({ method: 'GET', url: '/admin/broadcasts/b1', headers })
     expect(res.statusCode).toBe(200)
     expect(res.json().broadcast.status).toBe('running')
+  })
+
+  it('POST /admin/broadcasts (forward) rejects an invalid link', async () => {
+    const res = await app.inject({ method: 'POST', url: '/admin/broadcasts', headers, payload: { kind: 'forward', link: 'not a link', filters: {} } })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('invalid_link')
+  })
+
+  it('POST /admin/broadcasts (forward) 400s when the source is unreachable', async () => {
+    vi.mocked(verifyForwardSource).mockRejectedValueOnce(
+      Object.assign(new Error('Bad Request: message to forward not found'), { description: 'Bad Request: message to forward not found' }),
+    )
+    const res = await app.inject({ method: 'POST', url: '/admin/broadcasts', headers, payload: { kind: 'forward', link: 'https://t.me/mychannel/123', filters: {} } })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('forward_source_unreachable')
+  })
+
+  it('POST /admin/broadcasts (forward) creates a forward job row', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') return chainable({ data: [{ id: 'u0', telegram_id: 1 }, { id: 'u1', telegram_id: 2 }], error: null })
+      if (table === 'broadcasts') return chainable({ data: { ...BROADCAST_ROW, kind: 'forward', message: 'https://t.me/mychannel/123' }, error: null })
+      return chainable(null)
+    })
+    const res = await app.inject({ method: 'POST', url: '/admin/broadcasts', headers, payload: { kind: 'forward', link: 'https://t.me/mychannel/123', filters: {} } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().broadcast.kind).toBe('forward')
+    expect(verifyForwardSource).toHaveBeenCalledWith('@mychannel', 123)
   })
 
   it('POST /admin/broadcasts rejects an invalid button', async () => {

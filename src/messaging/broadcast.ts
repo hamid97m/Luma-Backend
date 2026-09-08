@@ -1,8 +1,10 @@
 import type { BroadcastTarget } from './audience.js'
 
 export interface RunBroadcastOptions {
-  /** Deliver one message; should throw on Telegram errors (403/429/etc). */
-  send: (telegramId: number, text: string) => Promise<void>
+  /** Deliver to one recipient; should throw on Telegram errors (403/429/etc).
+   * The actual payload (composed text, forwarded message, …) is captured by the
+   * caller's closure, so delivery is uniform whatever the broadcast kind. */
+  send: (telegramId: number) => Promise<void>
   /** Called with the user id when a send fails with 403 (bot blocked). */
   onOptOut: (userId: string) => Promise<void>
   /** Called after each batch with running totals so the caller can persist them. */
@@ -26,11 +28,10 @@ function retryAfterMs(err: any): number | undefined {
 }
 
 /**
- * Send `message` to every target, throttled in batches. Never throws for a
- * single failed recipient — counts it and moves on. Returns final tallies.
+ * Deliver to every target, throttled in batches. Never throws for a single
+ * failed recipient — counts it and moves on. Returns final tallies.
  */
 export async function runBroadcast(
-  message: string,
   targets: BroadcastTarget[],
   opts: RunBroadcastOptions,
 ): Promise<{ sent: number; failed: number }> {
@@ -42,7 +43,7 @@ export async function runBroadcast(
 
   const deliver = async (target: BroadcastTarget): Promise<void> => {
     try {
-      await opts.send(target.telegram_id, message)
+      await opts.send(target.telegram_id)
       sent++
     } catch (err) {
       // Honor a single 429 backoff-and-retry before giving up on this recipient.
@@ -50,7 +51,7 @@ export async function runBroadcast(
       if (backoff != null) {
         await sleep(backoff)
         try {
-          await opts.send(target.telegram_id, message)
+          await opts.send(target.telegram_id)
           sent++
           return
         } catch (err2) {

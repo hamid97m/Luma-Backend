@@ -5,8 +5,21 @@ import { runBroadcast } from '../../messaging/broadcast.js'
 import { sendBroadcastMessage, forwardBroadcastMessage, verifyForwardSource } from '../../bot.js'
 import { validateButton } from '../../messaging/messageButton.js'
 import { parseChannelMessageLink } from '../../messaging/channelLink.js'
+import { getPurchaseMessageConfig, updatePurchaseMessageConfig, type PurchaseMessageConfig } from '../../jobs/purchaseMessageConfig.js'
 
 const MAX_MESSAGE_LEN = 4096
+
+function serializePurchaseConfig(cfg: PurchaseMessageConfig | null, sentCount: number) {
+  return {
+    enabled: cfg?.enabled ?? false,
+    kind: cfg?.kind ?? 'text',
+    // For forward, `message` holds the t.me link the admin pasted; for text, the body.
+    message: cfg?.message ?? '',
+    button: cfg?.button ?? null,
+    activeSince: cfg?.activeSince ?? null,
+    sentCount,
+  }
+}
 
 function serialize(row: any) {
   return {
@@ -132,6 +145,67 @@ export async function adminBroadcastsRoutes(app: FastifyInstance) {
   app.get('/broadcasts', async () => {
     const { data } = await db.from('broadcasts').select('*').order('created_at', { ascending: false }).limit(100)
     return { items: (data ?? []).map(serialize) }
+  })
+
+  // --- Abandoned-checkout auto-message config (a 30-min job does the sending) ---
+
+  async function purchaseSentCount(): Promise<number> {
+    const { count } = await db
+      .from('purchase_message_sends')
+      .select('user_id', { count: 'exact', head: true })
+    return count ?? 0
+  }
+
+  app.get('/broadcasts/purchase-message', async () => {
+    const cfg = await getPurchaseMessageConfig(db)
+    return { config: serializePurchaseConfig(cfg, await purchaseSentCount()) }
+  })
+
+  app.put('/broadcasts/purchase-message', async (req, reply) => {
+    const body = req.body as {
+      enabled?: boolean; kind?: string; message?: string; link?: string; button?: unknown
+    }
+    const enabled = !!body.enabled
+    const isForward = body.kind === 'forward'
+
+    const patch: Parameters<typeof updatePurchaseMessageConfig>[0] = { enabled }
+
+    if (isForward) {
+      const parsed = parseChannelMessageLink(body.link ?? '')
+      if (!parsed) return reply.status(400).send({ error: 'invalid_link' })
+      // Only pay the pre-flight cost (and block a save) when this will actually send.
+      if (enabled) {
+        try {
+          await verifyForwardSource(parsed.chatId, parsed.messageId)
+        } catch (err: any) {
+          req.log.warn({ err }, 'purchase-message forward verification failed')
+          return reply.status(400).send({
+            error: 'forward_source_unreachable',
+            detail: String(err?.description ?? err?.message ?? err),
+          })
+        }
+      }
+      patch.kind = 'forward'
+      patch.message = (body.link ?? '').trim()
+      patch.sourceChatId = parsed.chatId
+      patch.sourceMessageId = parsed.messageId
+      patch.button = null
+    } else {
+      const trimmed = (body.message ?? '').trim()
+      if (enabled && !trimmed) return reply.status(400).send({ error: 'empty_message' })
+      if (trimmed.length > MAX_MESSAGE_LEN) return reply.status(400).send({ error: 'message_too_long' })
+      const btn = validateButton(body.button)
+      if (!btn.ok) return reply.status(400).send({ error: btn.error })
+      patch.kind = 'text'
+      patch.message = trimmed
+      patch.sourceChatId = null
+      patch.sourceMessageId = null
+      patch.button = btn.button ?? null
+    }
+
+    const cfg = await updatePurchaseMessageConfig(patch, db)
+    if (!cfg) return reply.status(500).send({ error: 'purchase_message_update_failed' })
+    return { config: serializePurchaseConfig(cfg, await purchaseSentCount()) }
   })
 
   app.get('/broadcasts/:id', async (req, reply) => {

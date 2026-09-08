@@ -4,11 +4,12 @@ vi.mock('../src/db.js', () => ({ db: { from: vi.fn(), storage: { from: vi.fn() }
 vi.mock('../src/bot.js', () => ({
   notifyPaused: vi.fn(() => Promise.resolve()),
   sendBroadcastMessage: vi.fn(() => Promise.resolve()),
+  forwardBroadcastMessage: vi.fn(() => Promise.resolve()),
 }))
 
 import { buildApp } from '../src/server.js'
 import { db } from '../src/db.js'
-import { sendBroadcastMessage } from '../src/bot.js'
+import { sendBroadcastMessage, forwardBroadcastMessage } from '../src/bot.js'
 import { signAdminToken } from '../src/routes/admin/auth-utils.js'
 import { chainable } from './admin-helpers.js'
 
@@ -108,6 +109,30 @@ describe('admin user message (single-user bot DM)', () => {
     expect(res.statusCode).toBe(400)
     expect(res.json().error).toBe('button_url_invalid')
     expect(sendBroadcastMessage).not.toHaveBeenCalled()
+  })
+
+  it('forwards a channel message to the user', async () => {
+    mockUser({ telegram_id: 555, is_seed: false })
+    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/message', headers, payload: { kind: 'forward', link: 'https://t.me/mychannel/123' } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ ok: true })
+    expect(forwardBroadcastMessage).toHaveBeenCalledWith(555, '@mychannel', 123)
+    expect(sendBroadcastMessage).not.toHaveBeenCalled()
+  })
+
+  it('rejects an invalid forward link (400) before any lookup', async () => {
+    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/message', headers, payload: { kind: 'forward', link: 'not a link' } })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('invalid_link')
+    expect(forwardBroadcastMessage).not.toHaveBeenCalled()
+  })
+
+  it('surfaces user_blocked_bot when a forward hits a Telegram 403', async () => {
+    mockUser({ telegram_id: 555, is_seed: false })
+    vi.mocked(forwardBroadcastMessage).mockRejectedValueOnce(Object.assign(new Error('Forbidden'), { error_code: 403 }))
+    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/message', headers, payload: { kind: 'forward', link: 'https://t.me/mychannel/123' } })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().error).toBe('user_blocked_bot')
   })
 
   it('requires auth', async () => {

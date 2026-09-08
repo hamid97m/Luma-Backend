@@ -1,8 +1,9 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../../db.js'
-import { notifyPaused, sendBroadcastMessage } from '../../bot.js'
+import { notifyPaused, sendBroadcastMessage, forwardBroadcastMessage } from '../../bot.js'
 import { deleteAllPhotosForUser } from '../../photos/deleteAllPhotosForUser.js'
 import { validateButton } from '../../messaging/messageButton.js'
+import { parseChannelMessageLink } from '../../messaging/channelLink.js'
 
 export const PAGE_SIZE = 20
 
@@ -359,13 +360,24 @@ export async function adminUsersRoutes(app: FastifyInstance) {
   // are rejected).
   app.post('/users/:id/message', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const { text, button } = req.body as { text?: string; button?: unknown }
-    const trimmed = (text ?? '').trim()
-    if (!trimmed) return reply.status(400).send({ error: 'empty_message' })
-    if (trimmed.length > 4096) return reply.status(400).send({ error: 'message_too_long' })
+    const body = req.body as { kind?: string; text?: string; link?: string; button?: unknown }
+    const isForward = body.kind === 'forward'
 
-    const btn = validateButton(button)
-    if (!btn.ok) return reply.status(400).send({ error: btn.error })
+    // Validate the payload (per kind) and build the per-user delivery closure
+    // before we touch the DB, so a bad request never does a pointless lookup.
+    let deliver: (telegramId: number) => Promise<void>
+    if (isForward) {
+      const parsed = parseChannelMessageLink(body.link ?? '')
+      if (!parsed) return reply.status(400).send({ error: 'invalid_link' })
+      deliver = (telegramId) => forwardBroadcastMessage(telegramId, parsed.chatId, parsed.messageId)
+    } else {
+      const trimmed = (body.text ?? '').trim()
+      if (!trimmed) return reply.status(400).send({ error: 'empty_message' })
+      if (trimmed.length > 4096) return reply.status(400).send({ error: 'message_too_long' })
+      const btn = validateButton(body.button)
+      if (!btn.ok) return reply.status(400).send({ error: btn.error })
+      deliver = (telegramId) => sendBroadcastMessage(telegramId, trimmed, btn.button)
+    }
 
     const { data: user, error } = await db
       .from('users')
@@ -382,7 +394,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     }
 
     try {
-      await sendBroadcastMessage((user as any).telegram_id, trimmed, btn.button)
+      await deliver((user as any).telegram_id)
       return { ok: true }
     } catch (err: any) {
       // 403 = the user has blocked the bot. Surface it; leave allows_write_to_pm as-is.

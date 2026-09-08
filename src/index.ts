@@ -3,11 +3,14 @@ import { buildApp } from './server.js'
 import { mountWebhook, initWebhook } from './bot.js'
 import { runFakeLikerJob, setNextScheduledRunAt } from './jobs/fakeLiker.js'
 import { getLastFakeLikerRunAt } from './jobs/fakeLikerConfig.js'
+import { runPurchaseMessageJob } from './jobs/purchaseMessage.js'
 import { cleanupInterruptedBroadcasts } from './messaging/broadcast.js'
 import { db } from './db.js'
 
 const FAKE_LIKER_FIRST_RUN_DELAY_MS = 60_000
 const FAKE_LIKER_INTERVAL_MS = 6 * 60 * 60 * 1000
+const PURCHASE_MSG_FIRST_RUN_DELAY_MS = 90_000
+const PURCHASE_MSG_INTERVAL_MS = 30 * 60 * 1000
 
 // The bot's own public base URL — where Telegram POSTs webhook updates.
 // PUBLIC_URL wins; otherwise fall back to the host platform's injected value.
@@ -60,6 +63,21 @@ if (process.env.NODE_ENV === 'production') {
       )
     : FAKE_LIKER_FIRST_RUN_DELAY_MS
   scheduleFakeLikerRun(firstRunDelayMs)
+
+  // Abandoned-checkout nudge: every 30 min, message users who started a premium
+  // purchase but never completed it (once each). Idempotent via purchase_message_sends,
+  // so re-firing shortly after a deploy is harmless — no last-run resume needed.
+  const schedulePurchaseMessageRun = (delayMs: number) => {
+    setTimeout(async () => {
+      try {
+        await runPurchaseMessageJob({ log: app.log })
+      } catch (err) {
+        app.log.warn({ err }, 'purchase-message: scheduled run failed')
+      }
+      schedulePurchaseMessageRun(PURCHASE_MSG_INTERVAL_MS)
+    }, delayMs)
+  }
+  schedulePurchaseMessageRun(PURCHASE_MSG_FIRST_RUN_DELAY_MS)
 } else {
   // Skip bot in dev — fake BOT_TOKEN would crash the process
   console.log('[dev] Bot disabled (set NODE_ENV=production and a real BOT_TOKEN to enable)')

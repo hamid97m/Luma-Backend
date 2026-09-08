@@ -130,4 +130,54 @@ describe('admin broadcasts', () => {
     const res = await app.inject({ method: 'GET', url: '/admin/broadcasts' })
     expect(res.statusCode).toBe(401)
   })
+
+  // --- Abandoned-checkout auto-message config ---
+
+  const PURCHASE_CFG_ROW = {
+    enabled: true, kind: 'text', message: 'come back', button: null,
+    source_chat_id: null, source_message_id: null, active_since: '2026-09-09T00:00:00Z',
+  }
+  function mockPurchaseTables() {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'purchase_message_config') return chainable({ data: PURCHASE_CFG_ROW, error: null })
+      if (table === 'purchase_message_sends') return chainable({ count: 5, error: null })
+      return chainable(null)
+    })
+  }
+
+  it('GET /admin/broadcasts/purchase-message returns config + sent count', async () => {
+    mockPurchaseTables()
+    const res = await app.inject({ method: 'GET', url: '/admin/broadcasts/purchase-message', headers })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().config.enabled).toBe(true)
+    expect(res.json().config.sentCount).toBe(5)
+  })
+
+  it('PUT /admin/broadcasts/purchase-message saves a text message', async () => {
+    mockPurchaseTables()
+    const res = await app.inject({ method: 'PUT', url: '/admin/broadcasts/purchase-message', headers, payload: { enabled: true, kind: 'text', message: 'come back' } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().config.kind).toBe('text')
+  })
+
+  it('PUT purchase-message rejects an empty message when enabled', async () => {
+    const res = await app.inject({ method: 'PUT', url: '/admin/broadcasts/purchase-message', headers, payload: { enabled: true, kind: 'text', message: '  ' } })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('empty_message')
+  })
+
+  it('PUT purchase-message rejects an invalid forward link', async () => {
+    const res = await app.inject({ method: 'PUT', url: '/admin/broadcasts/purchase-message', headers, payload: { enabled: true, kind: 'forward', link: 'nope' } })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('invalid_link')
+  })
+
+  it('PUT purchase-message 400s when the forward source is unreachable', async () => {
+    vi.mocked(verifyForwardSource).mockRejectedValueOnce(
+      Object.assign(new Error('Bad Request: chat not found'), { description: 'Bad Request: chat not found' }),
+    )
+    const res = await app.inject({ method: 'PUT', url: '/admin/broadcasts/purchase-message', headers, payload: { enabled: true, kind: 'forward', link: 'https://t.me/mychannel/9' } })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('forward_source_unreachable')
+  })
 })

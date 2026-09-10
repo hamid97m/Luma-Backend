@@ -10,7 +10,10 @@ import { db } from './db.js'
 const FAKE_LIKER_FIRST_RUN_DELAY_MS = 60_000
 const FAKE_LIKER_INTERVAL_MS = 6 * 60 * 60 * 1000
 const PURCHASE_MSG_FIRST_RUN_DELAY_MS = 90_000
-const PURCHASE_MSG_INTERVAL_MS = 30 * 60 * 1000
+// Backstop only — the primary nudge is a per-payment 5-min timer scheduled at
+// checkout (see jobs/purchaseMessage.schedulePurchaseCheckoutFollowup). This
+// sweep just mops up checks lost to a sleep/restart during the 5-min window.
+const PURCHASE_MSG_INTERVAL_MS = 15 * 60 * 1000
 
 // The bot's own public base URL — where Telegram POSTs webhook updates.
 // PUBLIC_URL wins; otherwise fall back to the host platform's injected value.
@@ -64,8 +67,8 @@ if (process.env.NODE_ENV === 'production') {
     : FAKE_LIKER_FIRST_RUN_DELAY_MS
   scheduleFakeLikerRun(firstRunDelayMs)
 
-  // Abandoned-checkout nudge: every 30 min, message users who started a premium
-  // purchase but never completed it (once each). Idempotent via purchase_message_sends,
+  // Abandoned-checkout backstop: every 15 min, mop up any per-payment follow-up
+  // checks that were lost to a restart/sleep. Idempotent via purchase_message_sends,
   // so re-firing shortly after a deploy is harmless — no last-run resume needed.
   const schedulePurchaseMessageRun = (delayMs: number) => {
     setTimeout(async () => {

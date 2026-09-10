@@ -1,6 +1,7 @@
 import { db } from '../db.js'
 import { createPremiumInvoiceLink, refundPremiumPayment, notifyPaymentChannel } from '../bot.js'
 import { formatPremiumPaidNotice } from '../payments/paymentNotify.js'
+import { schedulePurchaseCheckoutFollowup } from '../jobs/purchaseMessage.js'
 import { t } from '../i18n/index.js'
 
 export const PREMIUM_PAYLOAD_PREFIX = 'premium:'
@@ -94,6 +95,12 @@ export async function createPremiumCheckout(userId: string, planId: string) {
   const invoiceLink = await createPremiumInvoiceLink(
     tx.id, plan.title, plan.description || t.premium.invoiceDescriptionFallback(plan.duration_days), chargeStars,
   )
+
+  // Per-payment abandoned-checkout nudge: check back in ~5 min and, if this is
+  // still unpaid and the user has never been messaged, DM them once. Cheap
+  // fire-and-forget; the periodic backstop sweep covers checks lost to a restart.
+  schedulePurchaseCheckoutFollowup(userId)
+
   return { transactionId: tx.id, invoiceLink }
 }
 

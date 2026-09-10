@@ -31,7 +31,7 @@ export function toListItem(u: any) {
 
 export async function adminUsersRoutes(app: FastifyInstance) {
   app.get('/users', async (req, reply) => {
-    const { query = '', status = 'all', page = '1' } = req.query as Record<string, string>
+    const { query = '', status = 'all', gender = 'all', page = '1' } = req.query as Record<string, string>
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const from = (pageNum - 1) * PAGE_SIZE
 
@@ -46,6 +46,8 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     else if (status === 'banned') q = q.not('banned_at', 'is', null)
     else if (status === 'deleted') q = q.not('deleted_at', 'is', null)
     else if (status === 'seed') q = q.eq('is_seed', true)
+
+    if (GENDERS.includes(gender)) q = q.eq('gender', gender)
 
     const search = query.trim().replace(/[,()"\\]/g, ' ').replace(/\s+/g, ' ').trim()
     if (search) {

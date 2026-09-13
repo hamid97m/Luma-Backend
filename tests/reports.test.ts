@@ -28,7 +28,7 @@ describe('POST /reports', () => {
     const insert = vi.fn(() => ({ error: null }))
     const upsert = vi.fn(() => ({ error: null }))
     vi.mocked(db.from)
-      .mockReturnValueOnce({ select: () => ({ eq: () => ({ single: () => ({ data: { id: REPORTED_ID } }) }) }) } as any) // reported exists
+      .mockReturnValueOnce({ select: () => ({ eq: () => ({ single: () => ({ data: { id: REPORTED_ID, deleted_at: null } }) }) }) } as any) // reported exists
       .mockReturnValueOnce({ insert } as any)   // reports
       .mockReturnValueOnce({ upsert } as any)   // blocks
 
@@ -70,7 +70,7 @@ describe('POST /reports', () => {
     const insert = vi.fn(() => ({ error: { code: '23505', message: 'duplicate key' } }))
     const upsert = vi.fn(() => ({ error: null }))
     vi.mocked(db.from)
-      .mockReturnValueOnce({ select: () => ({ eq: () => ({ single: () => ({ data: { id: REPORTED_ID } }) }) }) } as any)
+      .mockReturnValueOnce({ select: () => ({ eq: () => ({ single: () => ({ data: { id: REPORTED_ID, deleted_at: null } }) }) }) } as any)
       .mockReturnValueOnce({ insert } as any)
       .mockReturnValueOnce({ upsert } as any)
 
@@ -82,12 +82,29 @@ describe('POST /reports', () => {
     expect(res.json()).toEqual({ ok: true })
   })
 
+  it('returns 404 when the reported user is soft-deleted', async () => {
+    setupAuth()
+    const insert = vi.fn(() => ({ error: null }))
+    vi.mocked(db.from)
+      .mockReturnValueOnce({
+        select: () => ({ eq: () => ({ single: () => ({ data: { id: REPORTED_ID, deleted_at: '2026-09-01T00:00:00Z' } }) }) }),
+      } as any) // reported exists but is soft-deleted
+
+    const res = await app.inject({
+      method: 'POST', url: '/reports', headers: AUTH,
+      payload: { reportedUserId: REPORTED_ID, context: 'discovery', reason: 'fake' },
+    })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'user_not_found' })
+    expect(insert).not.toHaveBeenCalled()
+  })
+
   it('ignores a matchId the reporter is not part of (stores null)', async () => {
     setupAuth()
     const insert = vi.fn(() => ({ error: null }))
     const upsert = vi.fn(() => ({ error: null }))
     vi.mocked(db.from)
-      .mockReturnValueOnce({ select: () => ({ eq: () => ({ single: () => ({ data: { id: REPORTED_ID } }) }) }) } as any) // reported exists
+      .mockReturnValueOnce({ select: () => ({ eq: () => ({ single: () => ({ data: { id: REPORTED_ID, deleted_at: null } }) }) }) } as any) // reported exists
       .mockReturnValueOnce({ select: () => ({ eq: () => ({ single: () => ({ data: { user1_id: 'x', user2_id: 'y' } }) }) }) } as any) // match, not a participant
       .mockReturnValueOnce({ insert } as any)
       .mockReturnValueOnce({ upsert } as any)

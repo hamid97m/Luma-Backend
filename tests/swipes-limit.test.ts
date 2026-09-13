@@ -25,12 +25,21 @@ function setupAuth() {
   } as any)
 }
 
+// Target existence/soft-delete lookup — runs before the limit check so an
+// invalid target never burns quota.
+function mockTarget() {
+  vi.mocked(db.from).mockReturnValueOnce({
+    select: () => ({ eq: () => ({ single: () => ({ data: { id: TARGET_ID, deleted_at: null }, error: null }) }) }),
+  } as any)
+}
+
 describe('POST /swipes — swipe limit', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
   beforeEach(async () => { vi.clearAllMocks(); app = await buildApp() })
 
   it('403s with swipe_limit and resetAt when blocked, without recording the swipe', async () => {
     setupAuth()
+    mockTarget()
     vi.mocked(checkAndCountSwipe).mockResolvedValue({ blocked: true, resetAt: RESET_AT })
 
     const res = await app.inject({
@@ -41,12 +50,13 @@ describe('POST /swipes — swipe limit', () => {
     expect(res.statusCode).toBe(403)
     expect(res.json()).toEqual({ error: 'swipe_limit', resetAt: RESET_AT })
     expect(checkAndCountSwipe).toHaveBeenCalledWith(USER_ID)
-    // db.from was called once for auth only — the swipes upsert never ran.
-    expect(vi.mocked(db.from)).toHaveBeenCalledTimes(1)
+    // db.from was called for auth + target lookup only — the swipes upsert never ran.
+    expect(vi.mocked(db.from)).toHaveBeenCalledTimes(2)
   })
 
   it('includes swipeLimit in the response for a limited (but not blocked) user', async () => {
     setupAuth()
+    mockTarget()
     vi.mocked(checkAndCountSwipe).mockResolvedValue({
       blocked: false, swipeLimit: { remaining: 0, resetAt: RESET_AT },
     })
@@ -65,6 +75,7 @@ describe('POST /swipes — swipe limit', () => {
 
   it('omits swipeLimit entirely for exempt users', async () => {
     setupAuth()
+    mockTarget()
     vi.mocked(checkAndCountSwipe).mockResolvedValue({ blocked: false, swipeLimit: null })
     vi.mocked(db.from).mockReturnValueOnce({
       upsert: vi.fn().mockReturnValue({ error: null }),
@@ -81,6 +92,7 @@ describe('POST /swipes — swipe limit', () => {
 
   it('includes swipeLimit in the response for a like with no reverse swipe (no match)', async () => {
     setupAuth()
+    mockTarget()
     vi.mocked(checkAndCountSwipe).mockResolvedValue({
       blocked: false, swipeLimit: { remaining: 0, resetAt: RESET_AT },
     })

@@ -57,6 +57,32 @@ describe('GET /admin/users/:id', () => {
     ])
   })
 
+  it('filters out matches whose counterpart is soft-deleted and keeps counts consistent', async () => {
+    const deletedMatch = {
+      id: 'm2', created_at: '2026-08-03T00:00:00Z', user1_id: 'u1', user2_id: 'u3',
+      user1: { id: 'u1', name: 'Sara', user_photos: [] },
+      user2: { id: 'u3', name: 'Ghost', deleted_at: '2026-09-01T00:00:00Z', user_photos: [] },
+    }
+    mockTables({
+      users: { data: USER_ROW, error: null },
+      user_photos: { data: [], error: null },
+      swipes: { count: 0, error: null },
+      messages: { count: 0, error: null },
+      matches: { data: [deletedMatch, MATCH_ROW], error: null },
+    })
+
+    const res = await app.inject({ method: 'GET', url: '/admin/users/u1', headers })
+
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    // The deleted counterpart's match is hidden, and counts.matches follows the
+    // filtered list — not the raw row count.
+    expect(body.matches).toEqual([
+      { matchId: 'm1', matchedAt: '2026-08-02T00:00:00Z', user: { id: 'u2', name: 'Ali', photo: 'https://a.jpg' } },
+    ])
+    expect(body.counts.matches).toBe(1)
+  })
+
   it('returns 404 for an unknown user', async () => {
     mockTables({ users: { data: null, error: { message: 'not found' } } })
     const res = await app.inject({ method: 'GET', url: '/admin/users/nope', headers })

@@ -10,7 +10,7 @@ vi.mock('../src/gifts/service.js', () => ({
 import { buildApp } from '../src/server.js'
 import { verifyInitData } from '../src/auth.js'
 import { db } from '../src/db.js'
-import { createGiftCheckout } from '../src/gifts/service.js'
+import { createGiftCheckout, acceptIntro } from '../src/gifts/service.js'
 
 function auth() {
   vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
@@ -49,5 +49,26 @@ describe('POST /gifts/checkout', () => {
       payload: { context: 'nope', giftId: 'g1' },
     })
     expect(res.statusCode).toBe(400)
+  })
+})
+
+describe('POST /gifts/intros/:id/accept', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  beforeEach(async () => { vi.clearAllMocks(); app = await buildApp() })
+
+  it('returns the matchId on success', async () => {
+    auth()
+    vi.mocked(acceptIntro).mockResolvedValue({ matchId: 'match1' })
+    const res = await app.inject({ method: 'POST', url: '/gifts/intros/tx1/accept', headers: { authorization: 'x' } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ matchId: 'match1' })
+  })
+
+  it('returns 400 buyer_unavailable when the buyer account is gone', async () => {
+    auth()
+    vi.mocked(acceptIntro).mockResolvedValue({ error: 'buyer_unavailable' })
+    const res = await app.inject({ method: 'POST', url: '/gifts/intros/tx1/accept', headers: { authorization: 'x' } })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'buyer_unavailable' })
   })
 })

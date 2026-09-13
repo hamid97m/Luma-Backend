@@ -26,12 +26,20 @@ function setupAuth() {
   } as any)
 }
 
+// Target existence/soft-delete lookup — runs before every swipe is recorded.
+function mockTarget(row: { id: string; deleted_at: string | null } | null = { id: TARGET_ID, deleted_at: null }) {
+  vi.mocked(db.from).mockReturnValueOnce({
+    select: () => ({ eq: () => ({ single: () => ({ data: row, error: row ? null : { message: 'not found' } }) }) }),
+  } as any)
+}
+
 describe('POST /swipes — pass', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
   beforeEach(async () => { app = await buildApp() })
 
   it('returns matched: false and does not check for reverse', async () => {
     setupAuth()
+    mockTarget()
 
     vi.mocked(db.from).mockReturnValueOnce({
       upsert: vi.fn().mockReturnValue({ error: null }),
@@ -56,6 +64,7 @@ describe('POST /swipes — like with no reverse', () => {
 
   it('returns matched: false', async () => {
     setupAuth()
+    mockTarget()
 
     // upsert swipe OK
     vi.mocked(db.from).mockReturnValueOnce({
@@ -85,6 +94,7 @@ describe('POST /swipes — like with no reverse', () => {
 
   it('DMs the liked user when a like does not match', async () => {
     setupAuth()
+    mockTarget()
 
     // upsert swipe OK
     vi.mocked(db.from).mockReturnValueOnce({
@@ -115,6 +125,7 @@ describe('POST /swipes — like with no reverse', () => {
 
   it('does not DM when the target has not granted bot write access', async () => {
     setupAuth()
+    mockTarget()
 
     // upsert swipe OK
     vi.mocked(db.from).mockReturnValueOnce({
@@ -149,6 +160,7 @@ describe('POST /swipes — liking someone previously passed on', () => {
 
   it('upserts on the (swiper_id, swiped_id) pair instead of no-op-ing on conflict', async () => {
     setupAuth()
+    mockTarget()
 
     const upsert = vi.fn().mockReturnValue({ error: null })
     vi.mocked(db.from).mockReturnValueOnce({ upsert } as any)
@@ -188,6 +200,7 @@ describe('POST /swipes — mutual like', () => {
 
   it('creates match and calls notifyMatch', async () => {
     setupAuth()
+    mockTarget()
 
     // upsert swipe
     vi.mocked(db.from).mockReturnValueOnce({
@@ -235,6 +248,45 @@ describe('POST /swipes — mutual like', () => {
     ])
     // The match path uses notifyMatch, not the new-like DM — no double notification.
     expect(notifyNewLike).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /swipes — missing or soft-deleted target', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  beforeEach(async () => { vi.clearAllMocks(); app = await buildApp() })
+
+  it('404s target_not_found when the target does not exist, without recording the swipe', async () => {
+    setupAuth()
+    mockTarget(null)
+
+    const res = await app.inject({
+      method: 'POST', url: '/swipes', headers: AUTH,
+      payload: { targetUserId: TARGET_ID, direction: 'like' },
+    })
+
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'target_not_found' })
+    // auth + target lookup only — the swipes upsert never ran.
+    expect(vi.mocked(db.from)).toHaveBeenCalledTimes(2)
+    expect(notifyNewLike).not.toHaveBeenCalled()
+    expect(notifyMatch).not.toHaveBeenCalled()
+  })
+
+  it('404s target_not_found when the target is soft-deleted, without recording the swipe', async () => {
+    setupAuth()
+    mockTarget({ id: TARGET_ID, deleted_at: '2026-09-01T00:00:00Z' })
+
+    const res = await app.inject({
+      method: 'POST', url: '/swipes', headers: AUTH,
+      payload: { targetUserId: TARGET_ID, direction: 'like' },
+    })
+
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'target_not_found' })
+    // auth + target lookup only — no upsert, no match, no DM to a dead account.
+    expect(vi.mocked(db.from)).toHaveBeenCalledTimes(2)
+    expect(notifyNewLike).not.toHaveBeenCalled()
+    expect(notifyMatch).not.toHaveBeenCalled()
   })
 })
 

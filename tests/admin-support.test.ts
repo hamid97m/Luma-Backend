@@ -21,15 +21,16 @@ describe('admin support', () => {
   })
 
   it('lists open tickets with a needsReply flag', async () => {
+    const ticketsLog: Array<{ method: string; args: unknown[] }> = []
     vi.mocked(db.from).mockImplementation((table: string) => {
       if (table === 'support_tickets') {
         return chainable({
           data: [{
             id: 't1', status: 'open', last_sender: 'user', last_message_at: 'now', created_at: 'then',
-            user: { id: 'u1', name: 'Sara', user_photos: [{ url: 'p.jpg', position: 0 }] },
+            user: { id: 'u1', name: 'Sara', deleted_at: null, user_photos: [{ url: 'p.jpg', position: 0 }] },
           }],
           count: 1, error: null,
-        })
+        }, ticketsLog)
       }
       if (table === 'support_messages') {
         return chainable({ data: [{ ticket_id: 't1', body: 'help me', created_at: 'then' }], error: null })
@@ -42,6 +43,11 @@ describe('admin support', () => {
     const body = res.json()
     expect(body.total).toBe(1)
     expect(body.items[0]).toMatchObject({ id: 't1', needsReply: true, user: { id: 'u1', name: 'Sara' } })
+    // Soft-deleted users are excluded DB-side via an inner-join embed filter.
+    const select = ticketsLog.find((c) => c.method === 'select')
+    expect(select?.args[0]).toContain('users!support_tickets_user_id_fkey!inner')
+    expect(select?.args[0]).toContain('deleted_at')
+    expect(ticketsLog).toContainEqual({ method: 'is', args: ['user.deleted_at', null] })
   })
 
   it('replies, stamps admin_id, flips last_sender, and notifies', async () => {
@@ -74,6 +80,37 @@ describe('admin support', () => {
     expect((msgInsert.mock.calls[0][0] as any)).toMatchObject({ ticket_id: 't1', sender: 'admin', admin_id: 'a1', body: 'hi' })
     expect((ticketUpdate.mock.calls[0][0] as any)).toMatchObject({ last_sender: 'admin', status: 'open' })
     expect(notifyTicketReply).toHaveBeenCalledWith(555, 'help me', 'hi')
+  })
+
+  it('records a reply to a deleted user\'s ticket but does not notify', async () => {
+    const msgInsert = vi.fn(() => chainable({ data: { id: 'm1', sender: 'admin', body: 'hi', created_at: 'now' }, error: null }))
+    const ticketUpdate = vi.fn(() => chainable({ error: null }))
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'support_tickets') {
+        return {
+          select: () => chainable({
+            data: { id: 't1', user: { telegram_id: 555, allows_write_to_pm: true, deleted_at: '2026-09-01T00:00:00Z' } },
+            error: null,
+          }),
+          update: ticketUpdate,
+        } as any
+      }
+      if (table === 'support_messages') {
+        return {
+          insert: msgInsert,
+          select: () => chainable({ data: { body: 'help me' }, error: null }),
+        } as any
+      }
+      return chainable({ error: null })
+    })
+
+    const res = await app.inject({
+      method: 'POST', url: '/admin/support/tickets/t1/reply', headers, payload: { body: 'hi' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect((msgInsert.mock.calls[0][0] as any)).toMatchObject({ ticket_id: 't1', sender: 'admin', body: 'hi' })
+    expect(ticketUpdate).toHaveBeenCalled()
+    expect(notifyTicketReply).not.toHaveBeenCalled()
   })
 
   it('rejects an empty reply', async () => {

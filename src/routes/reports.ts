@@ -24,8 +24,12 @@ export async function reportsRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'invalid_report' })
     }
 
-    const { data: reported } = await db.from('users').select('id').eq('id', reportedUserId).single()
-    if (!reported) return reply.status(404).send({ error: 'user_not_found' })
+    const { data: reported } = await db
+      .from('users')
+      .select('id, deleted_at')
+      .eq('id', reportedUserId)
+      .single()
+    if (!reported || reported.deleted_at) return reply.status(404).send({ error: 'user_not_found' })
 
     // Only trust matchId if the reporter actually participates in that match.
     let matchId: string | null = null

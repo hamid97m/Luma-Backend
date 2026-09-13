@@ -180,20 +180,24 @@ export async function getTransactionStatus(txId: string, userId: string) {
 export async function listPendingIntros(userId: string) {
   const { data } = await db
     .from('gift_transactions')
-    .select('id, note, gift_emoji, created_at, buyer:users!gift_transactions_buyer_id_fkey(id, name, user_photos(url, position))')
+    .select('id, note, gift_emoji, created_at, buyer:users!gift_transactions_buyer_id_fkey(id, name, deleted_at, banned_at, user_photos(url, position))')
     .eq('recipient_id', userId).eq('context', 'discovery').eq('intro_status', 'pending')
     .order('created_at', { ascending: false })
-  return (data ?? []).map((r: any) => ({
-    id: r.id,
-    buyer: {
-      id: r.buyer?.id,
-      name: r.buyer?.name ?? '',
-      photo: (r.buyer?.user_photos ?? []).sort((a: any, b: any) => a.position - b.position)[0]?.url ?? null,
-    },
-    emoji: r.gift_emoji ?? null,
-    note: r.note ?? null,
-    createdAt: r.created_at,
-  }))
+  return (data ?? [])
+    // Hide intros from buyers who deleted their account or got banned since sending
+    // (same availability rule as resolveRecipient).
+    .filter((r: any) => r.buyer && !r.buyer.deleted_at && !r.buyer.banned_at)
+    .map((r: any) => ({
+      id: r.id,
+      buyer: {
+        id: r.buyer?.id,
+        name: r.buyer?.name ?? '',
+        photo: (r.buyer?.user_photos ?? []).sort((a: any, b: any) => a.position - b.position)[0]?.url ?? null,
+      },
+      emoji: r.gift_emoji ?? null,
+      note: r.note ?? null,
+      createdAt: r.created_at,
+    }))
 }
 
 /** Determine why a claim update matched nothing: unknown/foreign tx vs. already-handled. */
@@ -223,6 +227,16 @@ export async function acceptIntro(introId: string, userId: string) {
     .eq('id', introId).eq('recipient_id', userId).eq('intro_status', 'pending')
     .select('id, buyer_id, recipient_id').maybeSingle()
   if (!claimed) return resolveClaimMiss(introId, userId)
+
+  // The buyer may have soft-deleted their account (or been banned) since sending the
+  // intro — never create a match with an unavailable user (same rule as resolveRecipient).
+  // Retire the claimed intro like a decline so it never resurfaces in the inbox.
+  const { data: buyer } = await db
+    .from('users').select('deleted_at, banned_at').eq('id', claimed.buyer_id).maybeSingle()
+  if (!buyer || buyer.deleted_at || buyer.banned_at) {
+    await db.from('gift_transactions').update({ intro_status: 'dismissed' }).eq('id', claimed.id)
+    return { error: 'buyer_unavailable' }
+  }
 
   // Normalise pair order to satisfy UNIQUE(user1_id, user2_id).
   const [u1, u2] = [claimed.buyer_id, claimed.recipient_id].sort()

@@ -19,10 +19,11 @@ export async function adminReportsRoutes(app: FastifyInstance) {
         .from('reports')
         .select(
           'id, reported_id, reason, context, status, created_at, resolved_at, ' +
-          'reported:users!reports_reported_id_fkey(id, name)',
+          'reported:users!reports_reported_id_fkey!inner(id, name, deleted_at)',
           { count: 'exact' }
         )
         .in('status', ['resolved_banned', 'dismissed'])
+        .is('reported.deleted_at', null)
         .order('resolved_at', { ascending: false })
         .range(from, from + PAGE_SIZE - 1)
       if (error) return reply.status(500).send({ error: 'reports_fetch_failed' })
@@ -93,7 +94,7 @@ export async function adminReportsRoutes(app: FastifyInstance) {
     const { data: reports, error } = await db
       .from('reports')
       .select('id, reporter_id, context, reason, note, match_id, status, created_at, ' +
-              'reporter:users!reports_reporter_id_fkey(id, name)')
+              'reporter:users!reports_reporter_id_fkey(id, name, deleted_at)')
       .eq('reported_id', userId)
       .order('status', { ascending: true })   // 'pending' sorts before 'resolved_*'/'dismissed'
       .order('created_at', { ascending: false })
@@ -108,7 +109,8 @@ export async function adminReportsRoutes(app: FastifyInstance) {
         bio: user.bio, username: user.username, telegramId: user.telegram_id,
         bannedAt: user.banned_at, deletedAt: user.deleted_at, photos,
       },
-      reports: (reports ?? []).map((r: any) => ({
+      // Reports filed by soft-deleted reporters are hidden from the history.
+      reports: (reports ?? []).filter((r: any) => !r.reporter?.deleted_at).map((r: any) => ({
         id: r.id,
         reporterId: r.reporter_id,
         reporterName: r.reporter?.name ?? '',

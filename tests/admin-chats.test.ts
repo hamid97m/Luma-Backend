@@ -82,6 +82,45 @@ describe('admin chats', () => {
     expect(order?.args).toEqual(['last_message_at', { ascending: false }])
   })
 
+  it('GET /admin/chats excludes soft-deleted participants DB-side (inner embeds + is-null filters)', async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'matches') return chainable({ data: [MATCH_ROW], count: 1, error: null }, calls)
+      return chainable({ count: 4, data: [{ body: 'hey', created_at: '2026-08-03T00:00:00Z' }], error: null })
+    })
+
+    const res = await app.inject({ method: 'GET', url: '/admin/chats', headers })
+
+    expect(res.statusCode).toBe(200)
+    const select = calls.find((c) => c.method === 'select')
+    expect(select?.args[0]).toContain('users!matches_user1_id_fkey!inner')
+    expect(select?.args[0]).toContain('users!matches_user2_id_fkey!inner')
+    expect(select?.args[0]).toContain('deleted_at')
+    const isCalls = calls.filter((c) => c.method === 'is').map((c) => c.args)
+    expect(isCalls).toContainEqual(['user1.deleted_at', null])
+    expect(isCalls).toContainEqual(['user2.deleted_at', null])
+  })
+
+  it('GET /admin/chats?filter=fake-unread applies deleted-participant filters on the match fetch', async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') return chainable({ data: [{ id: 'seed1' }], error: null })
+      if (table === 'matches') return chainable({ data: [FAKE_MATCH_ROW], error: null }, calls)
+      return chainable({
+        data: [{ match_id: 'm1', sender_id: 'real1', body: 'hi', created_at: '2026-08-06T00:00:00Z' }],
+        count: 1,
+        error: null,
+      })
+    })
+
+    const res = await app.inject({ method: 'GET', url: '/admin/chats?filter=fake-unread', headers })
+
+    expect(res.statusCode).toBe(200)
+    const isCalls = calls.filter((c) => c.method === 'is').map((c) => c.args)
+    expect(isCalls).toContainEqual(['user1.deleted_at', null])
+    expect(isCalls).toContainEqual(['user2.deleted_at', null])
+  })
+
   it('GET /admin/chats/:matchId returns participants and paginated transcript', async () => {
     mockTables({
       matches: { data: MATCH_ROW, error: null },
@@ -108,6 +147,25 @@ describe('admin chats', () => {
     mockTables({ matches: { data: null, error: { code: 'PGRST116', message: 'not found' } } })
     const res = await app.inject({ method: 'GET', url: '/admin/chats/nope', headers })
     expect(res.statusCode).toBe(404)
+  })
+
+  it('GET /admin/chats/:matchId applies deleted-participant filters and 404s when the row is filtered out', async () => {
+    // With !inner embeds + is-null filters, a match whose participant is
+    // soft-deleted yields no row (PGRST116), which must surface as 404.
+    const calls: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'matches')
+        return chainable({ data: null, error: { code: 'PGRST116', message: 'not found' } }, calls)
+      return chainable({ data: [], count: 0, error: null })
+    })
+
+    const res = await app.inject({ method: 'GET', url: '/admin/chats/m1', headers })
+
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'match_not_found' })
+    const isCalls = calls.filter((c) => c.method === 'is').map((c) => c.args)
+    expect(isCalls).toContainEqual(['user1.deleted_at', null])
+    expect(isCalls).toContainEqual(['user2.deleted_at', null])
   })
 
   it('returns 500 when a chats sub-query fails', async () => {
@@ -214,6 +272,27 @@ describe('admin chats', () => {
       expect(res.statusCode).toBe(404)
       expect(res.json()).toEqual({ error: 'match_not_found' })
     })
+
+    it('applies deleted-participant filters and 404s when the match row is filtered out (no DM to deleted users)', async () => {
+      const calls: Array<{ method: string; args: unknown[] }> = []
+      vi.mocked(db.from).mockImplementation((table: string) => {
+        if (table === 'matches')
+          return chainable({ data: null, error: { code: 'PGRST116', message: 'not found' } }, calls)
+        return chainable({ data: [], count: 0, error: null })
+      })
+
+      const res = await app.inject({
+        method: 'POST', url: '/admin/chats/m1/messages', headers, payload: { body: 'hi' },
+      })
+
+      expect(res.statusCode).toBe(404)
+      expect(res.json()).toEqual({ error: 'match_not_found' })
+      const isCalls = calls.filter((c) => c.method === 'is').map((c) => c.args)
+      expect(isCalls).toContainEqual(['user1.deleted_at', null])
+      expect(isCalls).toContainEqual(['user2.deleted_at', null])
+      // No message insert happened.
+      expect(calls.some((c) => c.method === 'insert')).toBe(false)
+    })
   })
 
   describe('GET /admin/chats/unread-count', () => {
@@ -250,6 +329,36 @@ describe('admin chats', () => {
 
       expect(res.statusCode).toBe(200)
       expect(res.json()).toEqual({ count: 0 })
+    })
+
+    it('excludes deleted seeds and ignores matches whose real participant is deleted', async () => {
+      // users is queried twice: (1) seed list, (2) hydrate of real participant ids.
+      let usersCall = 0
+      const seedCalls: Array<{ method: string; args: unknown[] }> = []
+      vi.mocked(db.from).mockImplementation((table: string) => {
+        if (table === 'users') {
+          usersCall += 1
+          if (usersCall === 1) return chainable({ data: [{ id: 'seed1' }], error: null }, seedCalls)
+          return chainable({
+            data: [{ id: 'real1', deleted_at: '2026-09-01T00:00:00Z' }],
+            error: null,
+          })
+        }
+        if (table === 'matches')
+          return chainable({ data: [{ id: 'm1', user1_id: 'seed1', user2_id: 'real1' }], error: null })
+        // messages should never be reached: guard by returning an unread row
+        // that would otherwise count.
+        return chainable({ data: [{ match_id: 'm1', sender_id: 'real1' }], error: null })
+      })
+
+      const res = await app.inject({ method: 'GET', url: '/admin/chats/unread-count', headers })
+
+      expect(res.statusCode).toBe(200)
+      expect(res.json()).toEqual({ count: 0 })
+      // Seed query itself must exclude soft-deleted seed users.
+      expect(seedCalls.filter((c) => c.method === 'is').map((c) => c.args)).toContainEqual([
+        'deleted_at', null,
+      ])
     })
   })
 

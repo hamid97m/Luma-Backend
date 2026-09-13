@@ -19,6 +19,19 @@ export async function swipesRoutes(app: FastifyInstance) {
     // A paused (photo-review) account can't act on the deck until it re-uploads.
     if (req.isPaused) return reply.status(403).send({ error: 'account_paused' })
 
+    // Never act on a missing or soft-deleted target (stale deck cards): the
+    // upsert would otherwise record a like against a ghost, which can create
+    // an invisible match and DM an account that no longer exists. Checked
+    // before the swipe limit so an invalid target never burns quota.
+    const { data: target } = await db
+      .from('users')
+      .select('id, deleted_at')
+      .eq('id', targetUserId)
+      .single()
+    if (!target || target.deleted_at) {
+      return reply.status(404).send({ error: 'target_not_found' })
+    }
+
     const limit = await checkAndCountSwipe(req.userId)
     if (limit.blocked) return reply.status(403).send({ error: 'swipe_limit', resetAt: limit.resetAt })
     // Spread into every success payload so the client can flip to the limited

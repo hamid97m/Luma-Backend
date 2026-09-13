@@ -160,6 +160,44 @@ describe('GET /discovery', () => {
     expect(inCall!.args[1]).toEqual(['men', 'everyone', 'both'])
   })
 
+  it('explicitly excludes soft-deleted users from every profile query', async () => {
+    setupAuth()
+
+    // viewer lookup
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women' }, error: null }) }) }),
+    } as any)
+    // recent swipes — empty
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
+    } as any)
+    // blocks — empty
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ or: () => ({ data: [], error: null }) }),
+    } as any)
+    // liker swipes — nobody has liked the viewer
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+    } as any)
+    // rest-tier profile query — capture the chain calls
+    const restLog: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }, restLog))
+    // seed top-up — capture too: seeds must also honor the deleted_at guard
+    const seedLog: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }, seedLog))
+
+    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    // deleted_at must be guarded explicitly — not left to the is_active
+    // coincidence (delete also flips is_active=false today).
+    for (const log of [restLog, seedLog]) {
+      const isCall = log.find((c) => c.method === 'is' && c.args[0] === 'deleted_at')
+      expect(isCall).toBeDefined()
+      expect(isCall!.args[1]).toBeNull()
+    }
+  })
+
   it('returns 401 when no auth header', async () => {
     const res = await app.inject({ method: 'GET', url: '/discovery' })
     expect(res.statusCode).toBe(401)

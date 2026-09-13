@@ -22,9 +22,13 @@ function claimStep(data: any, spy?: (payload: any) => void) {
     },
   }
 }
-/** Lookup step: select -> eq -> maybeSingle, returning `data`. (resolveClaimMiss's re-select) */
+/** Lookup step: select -> eq -> maybeSingle, returning `data`. (resolveClaimMiss's re-select, acceptIntro's buyer availability check) */
 function lookupMaybeSingleStep(data: any) {
   return { select: () => ({ eq: () => ({ maybeSingle: () => ({ data }) }) }) }
+}
+/** Buyer availability step for acceptIntro: an alive (not deleted/banned) buyer. */
+function aliveBuyerStep() {
+  return lookupMaybeSingleStep({ deleted_at: null, banned_at: null })
 }
 /** matches insert step: insert -> select -> maybeSingle, returning `{ data, error }`. Captures the insert payload. */
 function matchesInsertStep(data: any, error: any, spy?: (payload: any) => void) {
@@ -93,9 +97,10 @@ describe('acceptIntro', () => {
     const msgInserts: any[] = []
     scriptDb([
       claimStep({ id: 'tx1', buyer_id: 'buyer1', recipient_id: 'rec1' }, (p) => claimUpdates.push(p)), // 1. atomic claim
-      matchesInsertStep({ id: 'match1' }, null, (p) => matchInserts.push(p)),                          // 2. matches insert
-      updateSpyStep((p) => txUpdates.push(p)),                                                         // 3. set match_id
-      insertSpyStep((p) => msgInserts.push(p)),                                                        // 4. seed gift message
+      aliveBuyerStep(),                                                                                // 2. buyer availability check
+      matchesInsertStep({ id: 'match1' }, null, (p) => matchInserts.push(p)),                          // 3. matches insert
+      updateSpyStep((p) => txUpdates.push(p)),                                                         // 4. set match_id
+      insertSpyStep((p) => msgInserts.push(p)),                                                        // 5. seed gift message
     ])
     const result = await acceptIntro('tx1', 'rec1')
 
@@ -120,10 +125,11 @@ describe('acceptIntro', () => {
   it('reuses the existing match on a 23505 unique-constraint conflict', async () => {
     scriptDb([
       claimStep({ id: 'tx1', buyer_id: 'buyer1', recipient_id: 'rec1' }), // 1. atomic claim
-      matchesInsertStep(null, { code: '23505' }),                        // 2. matches insert (conflict)
-      matchesLookupStep({ id: 'existing-match' }),                       // 3. re-select existing match
-      updateSpyStep(() => {}),                                           // 4. set match_id
-      insertSpyStep(() => {}),                                           // 5. seed gift message
+      aliveBuyerStep(),                                                  // 2. buyer availability check
+      matchesInsertStep(null, { code: '23505' }),                        // 3. matches insert (conflict)
+      matchesLookupStep({ id: 'existing-match' }),                       // 4. re-select existing match
+      updateSpyStep(() => {}),                                           // 5. set match_id
+      insertSpyStep(() => {}),                                           // 6. seed gift message
     ])
     const result = await acceptIntro('tx1', 'rec1')
     expect(result).toEqual({ matchId: 'existing-match' })
@@ -133,9 +139,10 @@ describe('acceptIntro', () => {
     const revertUpdates: any[] = []
     scriptDb([
       claimStep({ id: 'tx1', buyer_id: 'buyer1', recipient_id: 'rec1' }), // 1. atomic claim
-      matchesInsertStep(null, { code: '23505' }),                        // 2. matches insert (conflict)
-      matchesLookupStep(null),                                           // 3. re-select finds nothing
-      updateSpyStep((p) => revertUpdates.push(p)),                       // 4. revert claim back to pending
+      aliveBuyerStep(),                                                  // 2. buyer availability check
+      matchesInsertStep(null, { code: '23505' }),                        // 3. matches insert (conflict)
+      matchesLookupStep(null),                                           // 4. re-select finds nothing
+      updateSpyStep((p) => revertUpdates.push(p)),                       // 5. revert claim back to pending
     ])
     const result = await acceptIntro('tx1', 'rec1')
     expect(result).toEqual({ error: 'match_failed' })
@@ -147,13 +154,41 @@ describe('acceptIntro', () => {
     const revertUpdates: any[] = []
     scriptDb([
       claimStep({ id: 'tx1', buyer_id: 'buyer1', recipient_id: 'rec1' }), // 1. atomic claim
-      matchesInsertStep(null, { code: '23000', message: 'boom' }),        // 2. matches insert (unrelated failure)
-      updateSpyStep((p) => revertUpdates.push(p)),                        // 3. revert claim back to pending
+      aliveBuyerStep(),                                                   // 2. buyer availability check
+      matchesInsertStep(null, { code: '23000', message: 'boom' }),        // 3. matches insert (unrelated failure)
+      updateSpyStep((p) => revertUpdates.push(p)),                        // 4. revert claim back to pending
     ])
     const result = await acceptIntro('tx1', 'rec1')
     expect(result).toEqual({ error: 'match_failed' })
     expect(revertUpdates).toHaveLength(1)
     expect(revertUpdates[0]).toEqual({ intro_status: 'pending' })
+  })
+
+  it('returns buyer_unavailable and creates no match when the buyer is soft-deleted', async () => {
+    const retireUpdates: any[] = []
+    scriptDb([
+      claimStep({ id: 'tx1', buyer_id: 'buyer1', recipient_id: 'rec1' }),          // 1. atomic claim
+      lookupMaybeSingleStep({ deleted_at: '2026-09-01T00:00:00Z', banned_at: null }), // 2. buyer is deleted
+      updateSpyStep((p) => retireUpdates.push(p)),                                  // 3. retire intro like a decline
+    ])
+    const result = await acceptIntro('tx1', 'rec1')
+    expect(result).toEqual({ error: 'buyer_unavailable' })
+    // The intro leaves 'pending' the same way a decline does, so it never resurfaces.
+    expect(retireUpdates).toHaveLength(1)
+    expect(retireUpdates[0]).toEqual({ intro_status: 'dismissed' })
+    // No matches insert / gift-message seed happened: only the 3 scripted db calls ran.
+    expect(vi.mocked(db.from)).toHaveBeenCalledTimes(3)
+  })
+
+  it('returns buyer_unavailable when the buyer is banned', async () => {
+    scriptDb([
+      claimStep({ id: 'tx1', buyer_id: 'buyer1', recipient_id: 'rec1' }),          // 1. atomic claim
+      lookupMaybeSingleStep({ deleted_at: null, banned_at: '2026-09-01T00:00:00Z' }), // 2. buyer is banned
+      updateSpyStep(() => {}),                                                      // 3. retire intro
+    ])
+    const result = await acceptIntro('tx1', 'rec1')
+    expect(result).toEqual({ error: 'buyer_unavailable' })
+    expect(vi.mocked(db.from)).toHaveBeenCalledTimes(3)
   })
 })
 
@@ -203,6 +238,8 @@ describe('listPendingIntros', () => {
         buyer: {
           id: 'buyer1',
           name: 'Ali',
+          deleted_at: null,
+          banned_at: null,
           user_photos: [
             { url: 'url-position-2', position: 2 },
             { url: 'url-position-0', position: 0 },
@@ -217,6 +254,42 @@ describe('listPendingIntros', () => {
       buyer: { id: 'buyer1', name: 'Ali', photo: 'url-position-0' },
       emoji: '🌹',
       note: 'hi there',
+      createdAt: '2026-01-01T00:00:00Z',
+    }])
+  })
+
+  it('drops intros whose buyer is soft-deleted or banned', async () => {
+    scriptDb([
+      listStep([
+        {
+          id: 'intro-deleted',
+          note: null,
+          gift_emoji: '🎁',
+          created_at: '2026-01-03T00:00:00Z',
+          buyer: { id: 'buyer-deleted', name: 'Gone', deleted_at: '2026-01-02T00:00:00Z', banned_at: null, user_photos: [] },
+        },
+        {
+          id: 'intro-banned',
+          note: null,
+          gift_emoji: '🎁',
+          created_at: '2026-01-02T12:00:00Z',
+          buyer: { id: 'buyer-banned', name: 'Bad', deleted_at: null, banned_at: '2026-01-02T00:00:00Z', user_photos: [] },
+        },
+        {
+          id: 'intro-alive',
+          note: 'hey',
+          gift_emoji: '🌹',
+          created_at: '2026-01-01T00:00:00Z',
+          buyer: { id: 'buyer-alive', name: 'Sara', deleted_at: null, banned_at: null, user_photos: [{ url: 'p0', position: 0 }] },
+        },
+      ]),
+    ])
+    const result = await listPendingIntros('rec1')
+    expect(result).toEqual([{
+      id: 'intro-alive',
+      buyer: { id: 'buyer-alive', name: 'Sara', photo: 'p0' },
+      emoji: '🌹',
+      note: 'hey',
       createdAt: '2026-01-01T00:00:00Z',
     }])
   })

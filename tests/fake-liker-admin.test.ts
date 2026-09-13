@@ -271,6 +271,51 @@ describe('admin fake-liker fakes', () => {
     expect(body.items[1]).toEqual({ id: 'f1', name: 'Aaron', likesSent: 0, matches: 0, unreadCount: 0 })
   })
 
+  it('excludes matches with a soft-deleted real counterpart from matches and unreadCount', async () => {
+    // First users call = fake pool; second = real-participant hydration.
+    let usersCalls = 0
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') {
+        usersCalls++
+        if (usersCalls === 1) return chainable({ data: [{ id: 'f1', name: 'Fake One' }], error: null })
+        return chainable({
+          data: [
+            { id: 'real-deleted', deleted_at: '2026-09-01T00:00:00Z' },
+            { id: 'real-alive', deleted_at: null },
+          ],
+          error: null,
+        })
+      }
+      if (table === 'matches') return chainable({
+        data: [
+          { id: 'm1', user1_id: 'f1', user2_id: 'real-deleted' },
+          { id: 'm2', user1_id: 'real-alive', user2_id: 'f1' },
+        ],
+        error: null,
+      })
+      // Both matches have an unread message from the real side — only the
+      // alive one may count toward the needs-reply signal.
+      if (table === 'messages') return chainable({
+        data: [
+          { match_id: 'm1', sender_id: 'real-deleted' },
+          { match_id: 'm2', sender_id: 'real-alive' },
+        ],
+        error: null,
+      })
+      if (table === 'swipes') return chainable({ count: 2, error: null })
+      return chainable({ data: null })
+    })
+
+    const res = await app.inject({ method: 'GET', url: '/admin/fake-liker/fakes?page=1', headers })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().items).toEqual([
+      { id: 'f1', name: 'Fake One', likesSent: 2, matches: 1, unreadCount: 1 },
+    ])
+    // The hydration query actually ran (pool + real-participant lookups).
+    expect(usersCalls).toBe(2)
+  })
+
   it('returns an empty page for an empty pool', async () => {
     vi.mocked(db.from).mockImplementation((table: string) => {
       if (table === 'users') return chainable({ data: [], error: null })

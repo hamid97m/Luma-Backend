@@ -8,8 +8,8 @@ const MESSAGES_PAGE_SIZE = 50
 
 const MATCH_SELECT = `
   id, created_at, last_message_at, user1_id, user2_id,
-  user1:users!matches_user1_id_fkey(id, name, is_seed, telegram_id, last_active, notified_offline_at, allows_write_to_pm, user_photos(url, position)),
-  user2:users!matches_user2_id_fkey(id, name, is_seed, telegram_id, last_active, notified_offline_at, allows_write_to_pm, user_photos(url, position))
+  user1:users!matches_user1_id_fkey!inner(id, name, is_seed, telegram_id, last_active, notified_offline_at, allows_write_to_pm, deleted_at, user_photos(url, position)),
+  user2:users!matches_user2_id_fkey!inner(id, name, is_seed, telegram_id, last_active, notified_offline_at, allows_write_to_pm, deleted_at, user_photos(url, position))
 `
 
 function participant(u: any) {
@@ -29,7 +29,7 @@ function fakeChatUser(u: any): FakeChatUser {
 // Match ids where a fake chat has ≥1 unread message from the real user.
 // Reused by GET /chats/unread-count and the ?filter=fake-unread list.
 async function fakeUnreadMatchIds(): Promise<string[]> {
-  const { data: seeds } = await db.from('users').select('id').eq('is_seed', true)
+  const { data: seeds } = await db.from('users').select('id').eq('is_seed', true).is('deleted_at', null)
   const seedIds = (seeds ?? []).map((s: any) => s.id)
   if (seedIds.length === 0) return []
 
@@ -47,6 +47,20 @@ async function fakeUnreadMatchIds(): Promise<string[]> {
     realByMatch.set(m.id, u1Seed ? m.user2_id : m.user1_id)
   }
   if (realByMatch.size === 0) return []
+
+  // Drop matches whose real (non-seed) participant is soft-deleted — they must
+  // not surface in the unread badge or the fake-unread queue.
+  const realIds = [...new Set(realByMatch.values())]
+  const { data: realUsers } = await db.from('users').select('id, deleted_at').in('id', realIds)
+  const deletedRealIds = new Set(
+    (realUsers ?? []).filter((u: any) => u.deleted_at != null).map((u: any) => u.id),
+  )
+  if (deletedRealIds.size > 0) {
+    for (const [mId, realId] of [...realByMatch]) {
+      if (deletedRealIds.has(realId)) realByMatch.delete(mId)
+    }
+    if (realByMatch.size === 0) return []
+  }
 
   const matchIds = [...realByMatch.keys()]
   const { data: unread } = await db
@@ -84,7 +98,9 @@ export async function adminChatsRoutes(app: FastifyInstance) {
       if (orderErr) return reply.status(500).send({ error: 'chats_fetch_failed' })
       const pageIds = (ordered ?? []).map((r: any) => r.id).slice(from, from + PAGE_SIZE)
       const { data: rows, error } = await db
-        .from('matches').select(MATCH_SELECT).in('id', pageIds).order('last_message_at', { ascending: false })
+        .from('matches').select(MATCH_SELECT).in('id', pageIds)
+        .is('user1.deleted_at', null).is('user2.deleted_at', null)
+        .order('last_message_at', { ascending: false })
       if (error) return reply.status(500).send({ error: 'chats_fetch_failed' })
       const items = await Promise.all((rows ?? []).map(async (row: any) => {
         const [{ count: messageCount }, { data: lastRows }] = await Promise.all([
@@ -105,6 +121,8 @@ export async function adminChatsRoutes(app: FastifyInstance) {
     const { data: rows, count, error } = await db
       .from('matches')
       .select(MATCH_SELECT, { count: 'exact' })
+      .is('user1.deleted_at', null)
+      .is('user2.deleted_at', null)
       .order('last_message_at', { ascending: false })
       .range(from, from + PAGE_SIZE - 1)
 
@@ -149,6 +167,8 @@ export async function adminChatsRoutes(app: FastifyInstance) {
       .from('matches')
       .select(MATCH_SELECT)
       .eq('id', matchId)
+      .is('user1.deleted_at', null)
+      .is('user2.deleted_at', null)
       .single()
 
     if (matchErr && matchErr.code !== 'PGRST116') {
@@ -205,7 +225,9 @@ export async function adminChatsRoutes(app: FastifyInstance) {
     if (trimmed.length > 2000) return reply.status(400).send({ error: 'message_too_long' })
 
     const { data: match, error: matchErr } = await db
-      .from('matches').select(MATCH_SELECT).eq('id', matchId).single()
+      .from('matches').select(MATCH_SELECT).eq('id', matchId)
+      .is('user1.deleted_at', null).is('user2.deleted_at', null)
+      .single()
     if (matchErr && matchErr.code !== 'PGRST116') {
       req.log.error({ err: matchErr }, 'match lookup failed')
       return reply.status(500).send({ error: 'chats_fetch_failed' })

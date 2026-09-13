@@ -220,6 +220,34 @@ export async function notifyNewLike(
   await bot.api.sendMessage(toTelegramId, t.notify.newLike(likerName), { reply_markup: keyboard })
 }
 
+/** DM a referrer that someone they invited has qualified (completed a profile). */
+export async function notifyReferralQualified(toTelegramId: number, referredName: string): Promise<void> {
+  try {
+    const bot = getBot()
+    const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
+    await bot.api.sendMessage(toTelegramId, t.referral.qualified(referredName), { reply_markup: keyboard })
+  } catch (err) {
+    console.error('notifyReferralQualified failed', err)
+  }
+}
+
+/** DM a referrer that they earned a referral milestone reward. */
+export async function notifyReferralReward(
+  toTelegramId: number,
+  milestone: { rewardType: string; rewardAmount: number }
+): Promise<void> {
+  try {
+    const bot = getBot()
+    const text = milestone.rewardType === 'premium_days'
+      ? t.referral.rewardPremium(milestone.rewardAmount)
+      : t.referral.rewardSwipes(milestone.rewardAmount)
+    const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
+    await bot.api.sendMessage(toTelegramId, text, { reply_markup: keyboard })
+  } catch (err) {
+    console.error('notifyReferralReward failed', err)
+  }
+}
+
 // Channel that receives an ops notification on every confirmed Stars purchase.
 // Defaults to the internal payments channel; overridable via env so the target
 // can be changed without a code edit. Set to an empty string to disable.

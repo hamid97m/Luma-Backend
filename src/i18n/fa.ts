@@ -37,6 +37,11 @@ export const fa = {
     paused: 'پروفایلت موقتاً از نمایش خارج شد. برای بازگشت، یک عکس تازه از خودت در لوما بارگذاری کن ✨',
     fallbackName: 'یک نفر',
   },
+  referral: {
+    qualified: (name: string) => `${name} با لینک دعوت تو عضو لوما شد 🎉 مرسی که لوما رو معرفی می‌کنی!`,
+    rewardSwipes: (n: number) => `جایزه دعوت از دوستان: ${n} لایک اضافه گرفتی! 🔥`,
+    rewardPremium: (days: number) => `جایزه دعوت از دوستان: ${days} روز اشتراک پریمیوم گرفتی! 🌟`,
+  },
   gifts: {
     invoiceTitle: (emoji: string) => `هدیه ${emoji}`,
     invoiceDescription: 'ارسال هدیه',

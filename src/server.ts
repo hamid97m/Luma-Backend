@@ -21,6 +21,7 @@ import { premiumRoutes } from './routes/premium.js'
 import { reportsRoutes } from './routes/reports.js'
 import { blockRoutes } from './routes/block.js'
 import { supportRoutes } from './routes/support.js'
+import { referralRoutes } from './routes/referrals.js'
 import { adminRoutes } from './routes/admin/index.js'
 
 declare module 'fastify' {
@@ -121,6 +122,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(reportsRoutes)
   await app.register(blockRoutes)
   await app.register(supportRoutes)
+  await app.register(referralRoutes)
   await app.register(adminRoutes, { prefix: '/admin' })
 
   return app

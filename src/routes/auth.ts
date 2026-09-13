@@ -3,6 +3,7 @@ import { db } from '../db.js'
 import { verifyInitData } from '../auth.js'
 import { getBotUsername } from '../bot.js'
 import { getProfileWithPhotos } from './profile.js'
+import { captureReferralAttribution } from '../referrals/attribution.js'
 
 export async function authRoutes(app: FastifyInstance) {
   app.post('/auth/verify', async (req, reply) => {
@@ -66,6 +67,9 @@ export async function authRoutes(app: FastifyInstance) {
       if (error || !created) return reply.status(500).send({ error: 'user_creation_failed' })
       userId = created.id
       userName = created.name
+
+      const startParam = new URLSearchParams(initData).get('start_param')
+      await captureReferralAttribution(created.id, tgUser.id, startParam)
     }
 
     const profile = existing ?? { age: 0 }

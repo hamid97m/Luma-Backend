@@ -10,6 +10,7 @@ import {
 } from './premium/service.js'
 import { t } from './i18n/index.js'
 import type { MessageButton } from './messaging/messageButton.js'
+import { parseRefCode, stashReferralClaim } from './referrals/attribution.js'
 
 let _bot: Bot | null = null
 
@@ -95,6 +96,8 @@ function registerHandlers(bot: Bot): void {
   bot.command('start', async (ctx) => {
     // Deep link from the app's Blocked screen: t.me/<bot>?start=support
     if (ctx.match === 'support') return promptSupport(ctx)
+    const refCode = parseRefCode(typeof ctx.match === 'string' ? ctx.match : null)
+    if (refCode && ctx.from) await stashReferralClaim(ctx.from.id, refCode)
     await clearPending(ctx)
     await sendStart(ctx)
   })

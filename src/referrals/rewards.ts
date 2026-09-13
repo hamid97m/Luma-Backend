@@ -42,7 +42,7 @@ async function grantPremiumDays(userId: string, days: number): Promise<void> {
     .from('users')
     .update({ premium_until: extendPremiumUntil(user.premium_until ?? null, days) })
     .eq('id', userId)
-  await db.from('premium_transactions').insert({
+  const { error } = await db.from('premium_transactions').insert({
     user_id: userId,
     plan_id: null,
     plan_title: 'Referral reward',
@@ -52,6 +52,7 @@ async function grantPremiumDays(userId: string, days: number): Promise<void> {
     source: 'referral',
     paid_at: new Date().toISOString(),
   })
+  if (error) console.error('referral premium audit insert failed', error)
 }
 
 export async function evaluateReferralRewards(referrerId: string): Promise<void> {

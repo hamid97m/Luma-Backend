@@ -39,7 +39,7 @@ export const fa = {
   },
   referral: {
     qualified: (name: string) => `${name} با لینک دعوت تو عضو لوما شد 🎉 مرسی که لوما رو معرفی می‌کنی!`,
-    rewardSwipes: (n: number) => `جایزه دعوت از دوستان: ${n} لایک اضافه گرفتی! 🔥`,
+    rewardSwipes: (n: number) => `جایزه دعوت از دوستان: ${n} دیسکاوری اضافه گرفتی! 🔥`,
     rewardPremium: (days: number) => `جایزه دعوت از دوستان: ${days} روز اشتراک پریمیوم گرفتی! 🌟`,
   },
   gifts: {

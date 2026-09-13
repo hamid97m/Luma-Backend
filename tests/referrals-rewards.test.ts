@@ -161,6 +161,30 @@ describe('evaluateReferralRewards', () => {
     expect(updates(log, 'users')).toEqual([])
     expect(notifyReferralReward).not.toHaveBeenCalled()
   })
+
+  it('logs (but does not throw or skip the grant/notify) when the premium_transactions audit insert errors', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    getReferralConfig.mockResolvedValue({ enabled: true })
+    makeDb({
+      referrals: [{ count: 3, data: null, error: null }],
+      referral_rewards: [
+        { data: [{ milestone: 1 }], error: null }, // milestone 1 already granted
+        { error: null }, // claim insert for milestone 3
+      ],
+      users: [
+        { data: { telegram_id: 555, allows_write_to_pm: true }, error: null }, // referrer lookup
+        { data: { premium_until: null }, error: null }, // grantPremiumDays select
+        { error: null }, // grantPremiumDays update
+      ],
+      premium_transactions: [{ error: { message: 'insert failed' } }],
+    })
+
+    await evaluateReferralRewards('referrer-1')
+
+    expect(errorSpy).toHaveBeenCalledWith('referral premium audit insert failed', { message: 'insert failed' })
+    // The reward still grants and notifies despite the audit-row failure.
+    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[1])
+  })
 })
 
 describe('maybeQualifyReferral', () => {

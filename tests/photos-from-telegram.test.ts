@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
 vi.mock('../src/db.js', () => ({ db: { from: vi.fn(), storage: { from: vi.fn() } } }))
 vi.mock('../src/bot.js', () => ({ fetchTelegramProfilePhoto: vi.fn() }))
+vi.mock('../src/referrals/rewards.js', () => ({ maybeQualifyReferral: vi.fn() }))
 
 import { buildApp } from '../src/server.js'
 import { verifyInitData } from '../src/auth.js'

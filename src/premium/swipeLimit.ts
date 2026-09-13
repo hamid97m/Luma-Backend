@@ -37,7 +37,7 @@ export function evaluateSwipeWindow(startedAt: string | null, count: number, now
   return { blocked: false, resetAt, nextStartedAt: startedAt, nextCount: count + 1, remaining: SWIPE_LIMIT - (count + 1) }
 }
 
-const WINDOW_COLUMNS = 'gender, looking_for, premium_until, swipe_window_started_at, swipe_window_count'
+const WINDOW_COLUMNS = 'gender, looking_for, premium_until, swipe_window_started_at, swipe_window_count, bonus_swipes'
 
 async function loadLimitedUser(userId: string, nowMs: number) {
   const { data: me, error } = await db.from('users').select(WINDOW_COLUMNS).eq('id', userId).single()
@@ -78,13 +78,61 @@ async function guardedWindowUpdate(
   return 'ok'
 }
 
+/**
+ * Optimistic-concurrency write: only persists the decrement if bonus_swipes
+ * still matches what we last read, same guard pattern as
+ * `guardedWindowUpdate` above.
+ */
+async function guardedBonusUpdate(userId: string, expectedBonus: number): Promise<'ok' | 'lost' | 'dbError'> {
+  const { data, error } = await db
+    .from('users')
+    .update({ bonus_swipes: expectedBonus - 1 })
+    .eq('id', userId)
+    .eq('bonus_swipes', expectedBonus)
+    .select('id')
+  if (error) return 'dbError'
+  if (!data || data.length === 0) return 'lost'
+  return 'ok'
+}
+
+/**
+ * A window-blocked user with bonus swipes available swipes successfully,
+ * consuming one bonus swipe instead. Mirrors the window counter's
+ * lost-race retry: one re-read, then fail open (not blocked, no limit
+ * info) rather than blocking a legitimate swipe.
+ */
+async function consumeBonusOrBlock(userId: string, bonusSwipes: number, resetAt: string): Promise<SwipeLimitCheck> {
+  if (bonusSwipes <= 0) return { blocked: true, resetAt }
+
+  const first = await guardedBonusUpdate(userId, bonusSwipes)
+  if (first === 'ok') return { blocked: false, swipeLimit: { remaining: bonusSwipes - 1, resetAt } }
+  if (first === 'dbError') return { blocked: false, swipeLimit: null }
+
+  // Lost the race — re-read once and retry against the fresh bonus count.
+  const { data: retryRow, error: retryError } = await db
+    .from('users')
+    .select('bonus_swipes')
+    .eq('id', userId)
+    .single()
+  if (retryError || !retryRow) return { blocked: false, swipeLimit: null }
+
+  const retryBonus = retryRow.bonus_swipes ?? 0
+  if (retryBonus <= 0) return { blocked: true, resetAt }
+
+  const second = await guardedBonusUpdate(userId, retryBonus)
+  if (second === 'ok') return { blocked: false, swipeLimit: { remaining: retryBonus - 1, resetAt } }
+  // Lost twice in a row — fail open, matching the window counter's
+  // existing fail-open philosophy.
+  return { blocked: false, swipeLimit: null }
+}
+
 /** Gate + counter for POST /swipes: blocks at the limit, otherwise counts this swipe. */
 export async function checkAndCountSwipe(userId: string, nowMs = Date.now()): Promise<SwipeLimitCheck> {
   const me = await loadLimitedUser(userId, nowMs)
   if (!me) return { blocked: false, swipeLimit: null }
 
   const w = evaluateSwipeWindow(me.swipe_window_started_at ?? null, me.swipe_window_count ?? 0, nowMs)
-  if (w.blocked) return { blocked: true, resetAt: w.resetAt }
+  if (w.blocked) return consumeBonusOrBlock(userId, me.bonus_swipes ?? 0, w.resetAt)
 
   const first = await guardedWindowUpdate(userId, me.swipe_window_count ?? 0, w)
   if (first === 'ok') return { blocked: false, swipeLimit: { remaining: w.remaining!, resetAt: w.resetAt } }
@@ -116,5 +164,7 @@ export async function getSwipeLimitStatus(userId: string, nowMs = Date.now()): P
   const me = await loadLimitedUser(userId, nowMs)
   if (!me) return { limited: false, resetAt: null }
   const w = evaluateSwipeWindow(me.swipe_window_started_at ?? null, me.swipe_window_count ?? 0, nowMs)
-  return w.blocked ? { limited: true, resetAt: w.resetAt } : { limited: false, resetAt: null }
+  if (!w.blocked) return { limited: false, resetAt: null }
+  if ((me.bonus_swipes ?? 0) > 0) return { limited: false, resetAt: null }
+  return { limited: true, resetAt: w.resetAt }
 }

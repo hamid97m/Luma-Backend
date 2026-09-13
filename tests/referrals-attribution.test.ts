@@ -100,6 +100,45 @@ describe('ensureReferralCode', () => {
     expect(updates[0]).toEqual({ referral_code: code })
   })
 
+  it('retries once when the first update hits a unique collision, then succeeds', async () => {
+    let calls = 0
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') {
+        return {
+          select: () => chainable({ data: { referral_code: null }, error: null }),
+          update: () => {
+            calls++
+            return chainable({ error: calls === 1 ? { message: 'duplicate key' } : null })
+          },
+        } as any
+      }
+      return chainable({ data: null })
+    })
+    const code = await ensureReferralCode('user-1')
+    expect(code).not.toBeNull()
+    expect(code).toHaveLength(8)
+    expect(calls).toBe(2)
+  })
+
+  it('returns null after exhausting all 3 attempts on repeated collisions', async () => {
+    let calls = 0
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') {
+        return {
+          select: () => chainable({ data: { referral_code: null }, error: null }),
+          update: () => {
+            calls++
+            return chainable({ error: { message: 'duplicate key' } })
+          },
+        } as any
+      }
+      return chainable({ data: null })
+    })
+    const code = await ensureReferralCode('user-1')
+    expect(code).toBeNull()
+    expect(calls).toBe(3)
+  })
+
   it('returns null when the select errors', async () => {
     vi.mocked(db.from).mockImplementation((table: string) => {
       if (table === 'users') {
@@ -132,8 +171,9 @@ describe('stashReferralClaim', () => {
     })
     await stashReferralClaim(123, 'abc123')
     expect(upsertSpy).toHaveBeenCalledTimes(1)
-    const [payload] = upsertSpy.mock.calls[0]
+    const [payload, options] = upsertSpy.mock.calls[0]
     expect(payload).toMatchObject({ telegram_id: 123, code: 'abc123' })
+    expect(options).toEqual({ onConflict: 'telegram_id' })
   })
 
   it('never throws — resolves even if the client throws', async () => {
@@ -289,5 +329,29 @@ describe('captureReferralAttribution', () => {
     await expect(
       captureReferralAttribution('new-user-1', 999, 'ref_abc123')
     ).resolves.toBeUndefined()
+  })
+
+  it('a non-throwing error result on the users.update does not short-circuit the referrals insert', async () => {
+    const referralInserts: any[] = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') {
+        return {
+          select: () => chainable({ data: { id: 'referrer-1' }, error: null }),
+          update: () => chainable({ error: { message: 'update failed' } }),
+        } as any
+      }
+      if (table === 'referrals') {
+        return {
+          insert: (p: any) => {
+            referralInserts.push(p)
+            return chainable({ error: null })
+          },
+        } as any
+      }
+      return chainable({ data: null })
+    })
+
+    await captureReferralAttribution('new-user-1', 999, 'ref_abc123')
+    expect(referralInserts).toEqual([{ referrer_id: 'referrer-1', referred_id: 'new-user-1' }])
   })
 })

@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
+import { maybeQualifyReferral } from '../referrals/rewards.js'
 
 export async function getProfileWithPhotos(userId: string) {
   const { data: user, error } = await db
@@ -75,6 +76,8 @@ export async function profileRoutes(app: FastifyInstance) {
       .select('id, url, position')
       .eq('user_id', req.userId)
       .order('position', { ascending: true })
+
+    await maybeQualifyReferral(req.userId)
 
     return {
       ...user,

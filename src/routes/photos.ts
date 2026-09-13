@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 import { randomUUID } from 'crypto'
 import { fetchTelegramProfilePhoto } from '../bot.js'
+import { maybeQualifyReferral } from '../referrals/rewards.js'
 
 const MAX_PHOTOS = 6
 
@@ -180,6 +181,8 @@ export async function photosRoutes(app: FastifyInstance) {
         .eq('status', 'pending')
     }
 
+    await maybeQualifyReferral(req.userId)
+
     return { photo: { id: photoId, url: publicUrl, position: nextPosition } }
   })
 
@@ -322,6 +325,8 @@ export async function photosRoutes(app: FastifyInstance) {
         .eq('reported_id', req.userId)
         .eq('status', 'pending')
     }
+
+    await maybeQualifyReferral(req.userId)
 
     return { photo: { id: photoId, url: publicUrl, position: nextPosition } }
   })

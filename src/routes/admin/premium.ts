@@ -5,7 +5,7 @@ import { extendPremiumUntil } from '../../premium/service.js'
 const PLAN_SELECT = 'id, title, description, price_stars, discount_percent, discount_ends_at, duration_days, is_active, sort_order, created_at'
 const PAGE_SIZE = 25
 const TX_STATUSES = ['pending_payment', 'paid', 'refunded']
-const TX_SOURCES = ['purchase', 'admin_grant']
+const TX_SOURCES = ['purchase', 'admin_grant', 'referral']
 
 function isPositiveInt(n: unknown): n is number {
   return typeof n === 'number' && Number.isInteger(n) && n > 0

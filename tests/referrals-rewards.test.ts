@@ -185,6 +185,37 @@ describe('evaluateReferralRewards', () => {
     // The reward still grants and notifies despite the audit-row failure.
     expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[1])
   })
+
+  it('logs when grantBonusSwipes exhausts both attempts without a successful update', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    getReferralConfig.mockResolvedValue({ enabled: true })
+    makeDb({
+      referrals: [{ count: 1, data: null, error: null }],
+      referral_rewards: [
+        { data: [], error: null }, // granted milestones lookup
+        { error: null }, // claim insert for milestone 1
+      ],
+      users: [
+        { data: { telegram_id: 555, allows_write_to_pm: true }, error: null }, // referrer lookup
+        { data: { bonus_swipes: 5 }, error: null }, // attempt 1 select
+        { data: null, error: null }, // attempt 1 guarded update loses the race
+        { data: { bonus_swipes: 5 }, error: null }, // attempt 2 select
+        { data: null, error: null }, // attempt 2 guarded update loses the race
+      ],
+    })
+
+    await evaluateReferralRewards('referrer-1')
+
+    // Claim was already inserted (idempotency guard), so the milestone is
+    // considered granted even though the underlying swipe increment never
+    // landed — the failure must be logged so it isn't silent.
+    expect(errorSpy).toHaveBeenCalledWith('referral bonus grant failed after claim', {
+      userId: 'referrer-1',
+      amount: MILESTONES[0].rewardAmount,
+    })
+    // No behavior change otherwise: still notifies the user of the reward.
+    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[0])
+  })
 })
 
 describe('maybeQualifyReferral', () => {

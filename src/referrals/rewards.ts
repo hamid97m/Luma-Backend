@@ -33,6 +33,7 @@ async function grantBonusSwipes(userId: string, amount: number): Promise<void> {
       .maybeSingle()
     if (updated) return
   }
+  console.error('referral bonus grant failed after claim', { userId, amount })
 }
 
 async function grantPremiumDays(userId: string, days: number): Promise<void> {

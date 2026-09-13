@@ -148,20 +148,14 @@ export async function adminUsersRoutes(app: FastifyInstance) {
         .from('matches')
         .select(`
           id, created_at, user1_id, user2_id,
-          user1:users!matches_user1_id_fkey(id, name, deleted_at, user_photos(url, position)),
-          user2:users!matches_user2_id_fkey(id, name, deleted_at, user_photos(url, position))
+          user1:users!matches_user1_id_fkey(id, name, user_photos(url, position)),
+          user2:users!matches_user2_id_fkey(id, name, user_photos(url, position))
         `)
         .or(`user1_id.eq.${id},user2_id.eq.${id}`)
         .order('created_at', { ascending: false })
       if (matchesErr) throw new Error('user detail matches failed')
 
-      // Hide matches whose counterpart is soft-deleted — they no longer exist
-      // anywhere else in the product, so listing them here only confuses.
-      // counts.matches below uses matches.length, so it stays consistent.
-      const matches = (matchRows ?? []).filter((row: any) => {
-        const other = row.user1_id === id ? row.user2 : row.user1
-        return !other?.deleted_at
-      }).map((row: any) => {
+      const matches = (matchRows ?? []).map((row: any) => {
         const other = row.user1_id === id ? row.user2 : row.user1
         const photo =
           (other?.user_photos ?? [])
@@ -389,7 +383,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
 
     const { data: user, error } = await db
       .from('users')
-      .select('telegram_id, is_seed, deleted_at')
+      .select('telegram_id, is_seed')
       .eq('id', id)
       .single()
     if (error && (error as any).code !== 'PGRST116') {
@@ -397,8 +391,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
       return reply.status(500).send({ error: 'user_fetch_failed' })
     }
     if (!user) return reply.status(404).send({ error: 'user_not_found' })
-    // Deleted accounts join seeds/invalid telegram_ids as unreachable targets.
-    if ((user as any).is_seed || (user as any).telegram_id <= 0 || (user as any).deleted_at) {
+    if ((user as any).is_seed || (user as any).telegram_id <= 0) {
       return reply.status(400).send({ error: 'not_messageable' })
     }
 

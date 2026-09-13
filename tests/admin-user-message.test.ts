@@ -65,14 +65,6 @@ describe('admin user message (single-user bot DM)', () => {
     expect(sendBroadcastMessage).not.toHaveBeenCalled()
   })
 
-  it('400 not_messageable for a soft-deleted user', async () => {
-    mockUser({ telegram_id: 555, is_seed: false, deleted_at: '2026-09-01T00:00:00Z' })
-    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/message', headers, payload: { text: 'hi' } })
-    expect(res.statusCode).toBe(400)
-    expect(res.json().error).toBe('not_messageable')
-    expect(sendBroadcastMessage).not.toHaveBeenCalled()
-  })
-
   it('400 not_messageable for a non-positive telegram_id', async () => {
     mockUser({ telegram_id: -7, is_seed: false })
     const res = await app.inject({ method: 'POST', url: '/admin/users/u1/message', headers, payload: { text: 'hi' } })

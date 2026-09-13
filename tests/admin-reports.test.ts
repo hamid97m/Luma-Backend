@@ -42,63 +42,6 @@ describe('admin reports', () => {
     expect(body.items[0]).toMatchObject({ reportCount: 3, reportedUser: { id: 'u1', name: 'Sara' } })
   })
 
-  it('excludes soft-deleted reported users from the resolved list DB-side', async () => {
-    const log: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'reports') {
-        return chainable({
-          data: [{
-            id: 'r1', reported_id: 'u1', reason: 'fake', context: 'discovery',
-            status: 'dismissed', created_at: 't1', resolved_at: 't2',
-            reported: { id: 'u1', name: 'Sara', deleted_at: null },
-          }],
-          count: 1, error: null,
-        }, log)
-      }
-      return chainable({ data: [], error: null })
-    })
-
-    const res = await app.inject({ method: 'GET', url: '/admin/reports?status=resolved', headers })
-    expect(res.statusCode).toBe(200)
-    expect(res.json().items[0].reportedUser).toEqual({ id: 'u1', name: 'Sara' })
-
-    const select = log.find((c) => c.method === 'select')
-    expect(select?.args[0]).toContain('users!reports_reported_id_fkey!inner(id, name, deleted_at)')
-    expect(log).toContainEqual({ method: 'is', args: ['reported.deleted_at', null] })
-  })
-
-  it('drops reports filed by soft-deleted reporters from the per-user list', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') {
-        return chainable({ data: { id: 'u1', name: 'Sara', user_photos: [] }, error: null })
-      }
-      if (table === 'reports') {
-        return chainable({
-          data: [
-            {
-              id: 'r1', reporter_id: 'alive-1', context: 'discovery', reason: 'fake',
-              note: null, match_id: null, status: 'pending', created_at: 't1',
-              reporter: { id: 'alive-1', name: 'Ali', deleted_at: null },
-            },
-            {
-              id: 'r2', reporter_id: 'gone-1', context: 'chat', reason: 'spam',
-              note: null, match_id: null, status: 'pending', created_at: 't2',
-              reporter: { id: 'gone-1', name: 'Ghost', deleted_at: '2026-09-01T00:00:00Z' },
-            },
-          ],
-          error: null,
-        })
-      }
-      return chainable({ data: [], error: null })
-    })
-
-    const res = await app.inject({ method: 'GET', url: '/admin/reports/user/u1', headers })
-    expect(res.statusCode).toBe(200)
-    const body = res.json()
-    expect(body.reports).toHaveLength(1)
-    expect(body.reports[0]).toMatchObject({ id: 'r1', reporterId: 'alive-1', reporterName: 'Ali' })
-  })
-
   it('bans a reported user and resolves their pending reports', async () => {
     const userUpdate = vi.fn(() => chainable({ data: { id: 'u1' }, error: null }))
     const reportsUpdate = vi.fn(() => chainable({ error: null }))

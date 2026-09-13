@@ -113,40 +113,16 @@ export async function adminFakeLikerRoutes(app: FastifyInstance) {
       .or(`user1_id.in.(${poolIds.join(',')}),user2_id.in.(${poolIds.join(',')})`)
     if (matchesErr) return reply.status(500).send({ error: 'fakes_fetch_failed' })
 
-    // Hydrate the real (non-pool) participants so soft-deleted counterparts can
-    // be excluded — a match with a deleted real user is dead weight and must not
-    // inflate the per-fake match count or the needs-reply (unread) signal.
-    const realIds = new Set<string>()
-    for (const m of matches ?? []) {
-      const u1Fake = poolIdSet.has(m.user1_id)
-      const u2Fake = poolIdSet.has(m.user2_id)
-      if (u1Fake && u2Fake) continue // both fake -> no real participant
-      realIds.add(u1Fake ? m.user2_id : m.user1_id)
-    }
-    const deletedRealIds = new Set<string>()
-    if (realIds.size > 0) {
-      const { data: realUsers, error: realErr } = await db
-        .from('users')
-        .select('id, deleted_at')
-        .in('id', [...realIds])
-      if (realErr) return reply.status(500).send({ error: 'fakes_fetch_failed' })
-      for (const u of realUsers ?? []) {
-        if (u.deleted_at) deletedRealIds.add(u.id)
-      }
-    }
-
     const matchesByFake = new Map<string, number>()
     const realByMatch = new Map<string, string>() // matchId -> real (non-fake) participant id
     const fakeByMatch = new Map<string, string>() // matchId -> pool participant id
     for (const m of matches ?? []) {
       const u1Fake = poolIdSet.has(m.user1_id)
       const u2Fake = poolIdSet.has(m.user2_id)
-      const realId = u1Fake && u2Fake ? null : u1Fake ? m.user2_id : m.user1_id
-      if (realId && deletedRealIds.has(realId)) continue // deleted real side -> skip entirely
       if (u1Fake) matchesByFake.set(m.user1_id, (matchesByFake.get(m.user1_id) ?? 0) + 1)
       if (u2Fake) matchesByFake.set(m.user2_id, (matchesByFake.get(m.user2_id) ?? 0) + 1)
-      if (realId === null) continue // both fake -> no real recipient for unread purposes
-      realByMatch.set(m.id, realId)
+      if (u1Fake && u2Fake) continue // both fake -> no real recipient for unread purposes
+      realByMatch.set(m.id, u1Fake ? m.user2_id : m.user1_id)
       fakeByMatch.set(m.id, u1Fake ? m.user1_id : m.user2_id)
     }
 

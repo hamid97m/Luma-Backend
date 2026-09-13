@@ -23,12 +23,9 @@ export async function adminSupportRoutes(app: FastifyInstance) {
       .from('support_tickets')
       .select(
         'id, status, last_sender, last_message_at, created_at, ' +
-        'user:users!support_tickets_user_id_fkey!inner(id, name, deleted_at, user_photos(url, position))',
+        'user:users!support_tickets_user_id_fkey(id, name, user_photos(url, position))',
         { count: 'exact' },
       )
-      // Hide tickets from soft-deleted accounts; !inner makes the embed filterable
-      // so count/range pagination stays correct.
-      .is('user.deleted_at', null)
     if (status === 'open') q = q.eq('status', 'open')
     else if (status === 'closed') q = q.eq('status', 'closed')
     else if (status === 'needs_reply') q = q.eq('status', 'open').eq('last_sender', 'user')
@@ -73,7 +70,7 @@ export async function adminSupportRoutes(app: FastifyInstance) {
       .from('support_tickets')
       .select(
         'id, status, created_at, closed_at, ' +
-        'user:users!support_tickets_user_id_fkey(id, name, telegram_id, deleted_at, user_photos(url, position))',
+        'user:users!support_tickets_user_id_fkey(id, name, telegram_id, user_photos(url, position))',
       )
       .eq('id', id)
       .maybeSingle()
@@ -91,10 +88,7 @@ export async function adminSupportRoutes(app: FastifyInstance) {
     return {
       ticket: {
         id: t.id, status: t.status, createdAt: t.created_at, closedAt: t.closed_at,
-        user: {
-          id: u?.id ?? null, name: u?.name ?? '', photo: primaryPhoto(u),
-          telegramId: u?.telegram_id ?? null, deletedAt: u?.deleted_at ?? null,
-        },
+        user: { id: u?.id ?? null, name: u?.name ?? '', photo: primaryPhoto(u), telegramId: u?.telegram_id ?? null },
       },
       messages: (messages ?? []).map(mapMessage),
     }
@@ -109,7 +103,7 @@ export async function adminSupportRoutes(app: FastifyInstance) {
 
     const { data: ticket } = await db
       .from('support_tickets')
-      .select('id, user:users!support_tickets_user_id_fkey(telegram_id, allows_write_to_pm, deleted_at)')
+      .select('id, user:users!support_tickets_user_id_fkey(telegram_id, allows_write_to_pm)')
       .eq('id', id)
       .maybeSingle()
     if (!ticket) return reply.status(404).send({ error: 'ticket_not_found' })
@@ -128,8 +122,7 @@ export async function adminSupportRoutes(app: FastifyInstance) {
       .eq('id', id)
 
     const u: any = (ticket as any).user
-    // Never DM a soft-deleted account; the reply is still recorded above.
-    if (u?.telegram_id && u.allows_write_to_pm !== false && !u.deleted_at) {
+    if (u?.telegram_id && u.allows_write_to_pm !== false) {
       // Preview = the ticket's opening (earliest) message.
       const { data: first } = await db
         .from('support_messages')

@@ -131,6 +131,54 @@ describe('GET /matches', () => {
     expect(body.matches[0].unreadCount).toBe(0)
   })
 
+  it('orders chats by last-message time, newest first, falling back to match time', async () => {
+    setupAuth()
+    mockNoBlocks()
+
+    // match-old was created first but has the most recent message; match-new
+    // is a newer match with no messages yet. Activity order beats match order.
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({
+        or: () => ({
+          order: () => ({
+            data: [
+              {
+                id: 'match-new',
+                created_at: '2026-01-05T00:00:00Z',
+                user1_id: USER_ID,
+                user2_id: 'other-a',
+                user1: { id: USER_ID, name: 'Ali', telegram_id: 1, deleted_at: null },
+                user2: { id: 'other-a', name: 'Sara', telegram_id: 99, deleted_at: null },
+              },
+              {
+                id: 'match-old',
+                created_at: '2026-01-01T00:00:00Z',
+                user1_id: USER_ID,
+                user2_id: 'other-b',
+                user1: { id: USER_ID, name: 'Ali', telegram_id: 1, deleted_at: null },
+                user2: { id: 'other-b', name: 'Nika', telegram_id: 98, deleted_at: null },
+              },
+            ],
+            error: null,
+          }),
+        }),
+      }),
+    } as any)
+    mockChatGateExempt()
+    // Promise.all interleaves the per-match reads: photos×2, lastMessage×2, unread×2.
+    mockPhotos()
+    mockPhotos()
+    mockLastMessage(null)
+    mockLastMessage({ body: 'salam', created_at: '2026-01-10T00:00:00Z', sender_id: 'other-b' })
+    mockUnreadCount(0)
+    mockUnreadCount(0)
+
+    const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().matches.map((m: any) => m.id)).toEqual(['match-old', 'match-new'])
+  })
+
   it('excludes a match whose counterpart has deleted their account', async () => {
     setupAuth()
     mockNoBlocks()

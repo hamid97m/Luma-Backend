@@ -89,6 +89,14 @@ export async function matchesRoutes(app: FastifyInstance) {
       })
     )
 
+    // Newest activity first: a chat bumps to the top when a message lands;
+    // matches with no messages yet sort by when the match was made.
+    matches.sort((a, b) => {
+      const aTime = Date.parse(a.lastMessage?.createdAt ?? a.matchedAt)
+      const bTime = Date.parse(b.lastMessage?.createdAt ?? b.matchedAt)
+      return bTime - aTime
+    })
+
     return { matches }
   })
 

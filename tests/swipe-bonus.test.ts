@@ -79,6 +79,7 @@ describe('checkAndCountSwipe — bonus swipes', () => {
     expect(res).toEqual({ blocked: false, swipeLimit: { remaining: 2, resetAt: RESET_AT } })
     expect(captured).toHaveLength(1)
     expect(captured[0].patch).toEqual({ bonus_swipes: 2 })
+    expect(captured[0].eqArgs).toContainEqual(['id', 'u1'])
     expect(captured[0].eqArgs).toContainEqual(['bonus_swipes', 3])
   })
 
@@ -86,6 +87,59 @@ describe('checkAndCountSwipe — bonus swipes', () => {
     mockBonusScenario({
       selects: [{ data: { ...LIMITED_USER, bonus_swipes: 0 }, error: null }],
       updates: [],
+    })
+    vi.mocked(isPremiumEnabled).mockResolvedValue(true)
+
+    const res = await checkAndCountSwipe('u1', NOW)
+
+    expect(res).toEqual({ blocked: true, resetAt: RESET_AT })
+  })
+
+  it('consumes a bonus swipe on the window-counter race retry path when the retry re-read is also at the limit', async () => {
+    // Initial read sees count=19 (one swipe left), so the main window
+    // branch attempts to count this swipe normally. A concurrent writer
+    // pushes the count to the limit (20) before our guarded update lands,
+    // so the first guardedWindowUpdate loses the race. The retry re-read
+    // sees count=20 (now blocked) — this must route through bonus
+    // consumption too, symmetric with the main branch, instead of blocking
+    // outright.
+    const captured: Array<{ patch: any; eqArgs: any[][] }> = []
+    mockBonusScenario({
+      selects: [
+        { data: { ...LIMITED_USER, swipe_window_count: 19, bonus_swipes: 2 }, error: null }, // initial load
+        { data: { ...LIMITED_USER, swipe_window_count: 20, bonus_swipes: 2 }, error: null }, // retry re-read, now at limit
+      ],
+      updates: [
+        { data: [], error: null }, // guardedWindowUpdate loses the race
+        { data: [{ id: 'u1' }], error: null }, // guardedBonusUpdate succeeds
+      ],
+      captured,
+    })
+    vi.mocked(isPremiumEnabled).mockResolvedValue(true)
+
+    const res = await checkAndCountSwipe('u1', NOW)
+
+    expect(res).toEqual({ blocked: false, swipeLimit: { remaining: 1, resetAt: RESET_AT } })
+    // First update attempted the window counter, second the bonus decrement.
+    expect(captured).toHaveLength(2)
+    expect(captured[0].patch).toEqual({ swipe_window_started_at: start, swipe_window_count: 20 })
+    expect(captured[1].patch).toEqual({ bonus_swipes: 1 })
+    expect(captured[1].eqArgs).toContainEqual(['id', 'u1'])
+    expect(captured[1].eqArgs).toContainEqual(['bonus_swipes', 2])
+  })
+
+  it('blocks when the bonus retry re-read shows bonus swipes genuinely exhausted', async () => {
+    // First guardedBonusUpdate loses the race; the retry re-read shows
+    // bonus_swipes has actually dropped to 0 (a concurrent request spent
+    // it), so this swipe blocks rather than attempting a second decrement.
+    mockBonusScenario({
+      selects: [
+        { data: { ...LIMITED_USER, bonus_swipes: 2 }, error: null }, // initial load, window already at limit
+        { data: { bonus_swipes: 0 }, error: null }, // retry re-read, bonus now exhausted
+      ],
+      updates: [
+        { data: [], error: null }, // first guarded bonus update loses the race
+      ],
     })
     vi.mocked(isPremiumEnabled).mockResolvedValue(true)
 

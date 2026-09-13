@@ -150,7 +150,7 @@ export async function checkAndCountSwipe(userId: string, nowMs = Date.now()): Pr
   if (retryError || !retryRow) return { blocked: false, swipeLimit: null }
 
   const retryW = evaluateSwipeWindow(retryRow.swipe_window_started_at ?? null, retryRow.swipe_window_count ?? 0, nowMs)
-  if (retryW.blocked) return { blocked: true, resetAt: retryW.resetAt }
+  if (retryW.blocked) return consumeBonusOrBlock(userId, retryRow.bonus_swipes ?? 0, retryW.resetAt)
 
   const second = await guardedWindowUpdate(userId, retryRow.swipe_window_count ?? 0, retryW)
   if (second === 'ok') return { blocked: false, swipeLimit: { remaining: retryW.remaining!, resetAt: retryW.resetAt } }

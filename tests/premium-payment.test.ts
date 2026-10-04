@@ -4,9 +4,10 @@ vi.mock('../src/bot.js', () => ({
   createPremiumInvoiceLink: vi.fn(),
   refundPremiumPayment: vi.fn().mockResolvedValue(undefined),
   notifyPaymentChannel: vi.fn().mockResolvedValue(undefined),
+  notifyPremiumPurchased: vi.fn().mockResolvedValue(undefined),
 }))
 import { db } from '../src/db.js'
-import { refundPremiumPayment, notifyPaymentChannel } from '../src/bot.js'
+import { refundPremiumPayment, notifyPaymentChannel, notifyPremiumPurchased } from '../src/bot.js'
 import { validatePremiumPreCheckout, handlePremiumPaid } from '../src/premium/service.js'
 
 /** Claim step: update -> eq -> eq -> select -> maybeSingle, returning `data`. */
@@ -72,6 +73,21 @@ describe('handlePremiumPaid', () => {
     expect(notice).toContain('30 days')
     expect(notice).toContain('100 ⭐')
     expect(notice).toContain('charge_1')
+    // congratulates the buyer by DM
+    expect(notifyPremiumPurchased).toHaveBeenCalledWith(111, 30)
+  })
+
+  it('still grants premium when the buyer DM fails', async () => {
+    vi.mocked(notifyPremiumPurchased).mockRejectedValueOnce(new Error('blocked'))
+    const userUpdates: any[] = []
+    scriptDb([
+      claimStep(PAID_TX),
+      lookupStep({ premium_until: null }),
+      updateSpyStep((p) => userUpdates.push(p)),
+    ])
+    await expect(handlePremiumPaid('tx1', 'charge_1', 111, 100)).resolves.toBeUndefined()
+    expect(userUpdates).toHaveLength(1)
+    expect(refundPremiumPayment).not.toHaveBeenCalled()
   })
 
   it('is idempotent on replays (claim misses)', async () => {
@@ -79,6 +95,7 @@ describe('handlePremiumPaid', () => {
     await handlePremiumPaid('tx1', 'charge_1', 111, 100)
     expect(refundPremiumPayment).not.toHaveBeenCalled()
     expect(notifyPaymentChannel).not.toHaveBeenCalled()
+    expect(notifyPremiumPurchased).not.toHaveBeenCalled()
   })
 
   it('refunds and marks refunded when the user update fails', async () => {
@@ -93,6 +110,7 @@ describe('handlePremiumPaid', () => {
     expect(refundPremiumPayment).toHaveBeenCalledWith(111, 'charge_1')
     expect(txUpdates[0]).toMatchObject({ status: 'refunded' })
     expect(notifyPaymentChannel).not.toHaveBeenCalled()
+    expect(notifyPremiumPurchased).not.toHaveBeenCalled()
   })
 
   it('refunds when the user row is missing', async () => {

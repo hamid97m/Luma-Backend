@@ -56,6 +56,8 @@ export const fa = {
     checkoutUnavailable: 'این خرید دیگر در دسترس نیست.',
     checkoutAlreadyProcessed: 'این خرید قبلاً پردازش شده است.',
     checkoutPriceMismatch: 'قیمت همخوانی ندارد.',
+    purchased: (days: number) =>
+      `تبریک! 🌟 اشتراک پریمیوم ${days} روزه‌ات فعال شد.\nحالا می‌تونی ببینی کی لایکت کرده و بدون محدودیت گفتگو کنی. لوما رو باز کن ✨`,
   },
   chat: {
     seedGreeting: 'سلام',

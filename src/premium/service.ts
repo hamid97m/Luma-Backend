@@ -1,5 +1,5 @@
 import { db } from '../db.js'
-import { createPremiumInvoiceLink, refundPremiumPayment, notifyPaymentChannel } from '../bot.js'
+import { createPremiumInvoiceLink, refundPremiumPayment, notifyPaymentChannel, notifyPremiumPurchased } from '../bot.js'
 import { formatPremiumPaidNotice } from '../payments/paymentNotify.js'
 import { schedulePurchaseCheckoutFollowup } from '../jobs/purchaseMessage.js'
 import { t } from '../i18n/index.js'
@@ -139,6 +139,9 @@ export async function handlePremiumPaid(transactionId: string, chargeId: string,
     chargeId,
     at: new Date().toISOString(),
   })).catch(() => {})
+
+  notifyPremiumPurchased(buyerTelegramId, tx.duration_days)
+    .catch((err) => console.error('[premium] buyer DM failed:', err?.message ?? err))
 }
 
 /** Buyer paid but we couldn't grant time: refund the Stars and mark the tx.

@@ -248,6 +248,13 @@ export async function notifyReferralReward(
   }
 }
 
+/** DM a buyer that their premium purchase is active. */
+export async function notifyPremiumPurchased(toTelegramId: number, durationDays: number): Promise<void> {
+  const bot = getBot()
+  const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
+  await bot.api.sendMessage(toTelegramId, t.premium.purchased(durationDays), { reply_markup: keyboard })
+}
+
 // Channel that receives an ops notification on every confirmed Stars purchase.
 // Defaults to the internal payments channel; overridable via env so the target
 // can be changed without a code edit. Set to an empty string to disable.

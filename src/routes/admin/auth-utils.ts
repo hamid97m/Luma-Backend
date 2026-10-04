@@ -1,7 +1,7 @@
 import jwt from 'jsonwebtoken'
 import bcrypt from 'bcryptjs'
 
-const TOKEN_TTL = '12h'
+const TOKEN_TTL = '7d'
 
 export interface AdminTokenPayload {
   adminId: string

@@ -13,4 +13,7 @@ export function tFor(locale: Locale | null | undefined): Messages {
   return messages[locale ?? 'fa']
 }
 
+/** @deprecated Persian-only shim; TODO(Tasks 3–4): delete once every call site uses tFor(). */
+export const t: Messages = fa
+
 export { isLocale, mapTelegramLang, LOCALES, type Locale } from './locale.js'

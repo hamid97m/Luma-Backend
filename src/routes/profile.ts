@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 import { maybeQualifyReferral } from '../referrals/rewards.js'
 import { isLocale } from '../i18n/index.js'
+import { scheduleUserGeo } from '../geo/resolveCity.js'
 
 export async function getProfileWithPhotos(userId: string) {
   const { data: user, error } = await db
@@ -79,6 +80,10 @@ export async function profileRoutes(app: FastifyInstance) {
         /\p{L}/u.test(trimmed)
       if (!cityOk) return reply.status(400).send({ error: 'invalid_location' })
       updates.location = trimmed
+      // Hidden discovery geo is re-resolved in the background after the save;
+      // clear it now so the old city never outlives the new text.
+      updates.geo_city = null
+      updates.geo_country = null
     }
 
     const { data: user, error } = await db
@@ -89,6 +94,8 @@ export async function profileRoutes(app: FastifyInstance) {
       .single()
 
     if (error || !user) return reply.status(500).send({ error: 'update_failed' })
+
+    if ('location' in updates) scheduleUserGeo(req.userId, user.location, req.log)
 
     const { data: photos } = await db
       .from('user_photos')
@@ -154,6 +161,8 @@ export async function profileRoutes(app: FastifyInstance) {
       bio: null,
       interests: [],
       location: null,
+      geo_city: null,
+      geo_country: null,
       icebreaker_prompt: null,
       icebreaker_answer: null,
       age: 0,

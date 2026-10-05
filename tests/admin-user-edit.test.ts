@@ -114,6 +114,9 @@ describe('PUT /admin/users/:id', () => {
       looking_for: 'men',
       bio: null,
       location: 'Tehran',
+      // A location change clears the hidden geo until it is re-resolved.
+      geo_city: null,
+      geo_country: null,
       icebreaker_prompt: 'Ask me',
       icebreaker_answer: 'Anything',
       interests: ['music', 'travel'],

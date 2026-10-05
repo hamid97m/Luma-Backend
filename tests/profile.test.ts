@@ -3,10 +3,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
 vi.mock('../src/db.js', () => ({ db: { from: vi.fn(), storage: { from: vi.fn() } } }))
 vi.mock('../src/referrals/rewards.js', () => ({ maybeQualifyReferral: vi.fn() }))
+vi.mock('../src/geo/resolveCity.js', () => ({ scheduleUserGeo: vi.fn() }))
 
 import { buildApp } from '../src/server.js'
 import { verifyInitData } from '../src/auth.js'
 import { db } from '../src/db.js'
+import { scheduleUserGeo } from '../src/geo/resolveCity.js'
 
 const AUTH = { authorization: 'valid_init_data' }
 const TG_USER = { id: 1, first_name: 'Ali' }
@@ -174,6 +176,44 @@ describe('PUT /profile/me', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json().location).toBe('تهران')
+  })
+
+  it('clears the hidden geo on a city change and re-resolves it in the background', async () => {
+    setupAuth()
+
+    const update = vi.fn().mockReturnValue({
+      eq: () => ({ select: () => ({ single: () => ({ data: { id: USER_ID, name: 'Ali', age: 25, location: 'مشهد' }, error: null }) }) }),
+    })
+    vi.mocked(db.from)
+      .mockReturnValueOnce({ update } as any)
+      .mockReturnValueOnce({
+        select: () => ({ eq: () => ({ order: () => ({ data: [], error: null }) }) }),
+      } as any)
+
+    const res = await app.inject({ method: 'PUT', url: '/profile/me', headers: AUTH, payload: { location: 'مشهد' } })
+
+    expect(res.statusCode).toBe(200)
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ location: 'مشهد', geo_city: null, geo_country: null }))
+    expect(scheduleUserGeo).toHaveBeenCalledWith(USER_ID, 'مشهد', expect.anything())
+    expect(res.json()).not.toHaveProperty('geo_city')
+  })
+
+  it('leaves the hidden geo alone when the city is not part of the update', async () => {
+    setupAuth()
+
+    const update = vi.fn().mockReturnValue({
+      eq: () => ({ select: () => ({ single: () => ({ data: { id: USER_ID, name: 'Ali', age: 25, bio: 'hi' }, error: null }) }) }),
+    })
+    vi.mocked(db.from)
+      .mockReturnValueOnce({ update } as any)
+      .mockReturnValueOnce({
+        select: () => ({ eq: () => ({ order: () => ({ data: [], error: null }) }) }),
+      } as any)
+
+    await app.inject({ method: 'PUT', url: '/profile/me', headers: AUTH, payload: { bio: 'hi', geo_city: 'Paris' } })
+
+    expect(update.mock.calls[0][0]).not.toHaveProperty('geo_city')
+    expect(scheduleUserGeo).not.toHaveBeenCalled()
   })
 
   it('rejects an out-of-range age with 400 invalid_age', async () => {

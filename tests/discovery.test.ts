@@ -288,6 +288,55 @@ describe('GET /discovery', () => {
     expect(body.profiles[0]).not.toHaveProperty('likedYou')
   })
 
+  it('ranks by the hidden normalized city, then country, and never returns geo fields', async () => {
+    setupAuth()
+
+    // viewer typed Persian, resolved to Tehran/IR
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women', location: 'تهران', geo_city: 'Tehran', geo_country: 'IR' }, error: null }) }) }),
+    } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
+    } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ or: () => ({ data: [], error: null }) }),
+    } as any)
+    // liker swipes — nobody
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+    } as any)
+    const profile = (id: string, location: string, geo_city: string | null, geo_country: string | null) => ({
+      id, name: 'N', age: 25, bio: null, telegram_id: 1, interests: [], location, geo_city, geo_country, user_photos: [],
+    })
+    const cityLog: Array<{ method: string; args: unknown[] }> = []
+    const countryLog: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('city-1', 'tehran', 'Tehran', 'IR')], error: null }, cityLog))
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('country-1', 'Mashhad', 'Mashhad', 'IR')], error: null }, countryLog))
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('rest-1', 'Dubai', 'Dubai', 'AE')], error: null }))
+    mockSeedTopUp()
+
+    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    // city tier matches the normalized city, not the typed text
+    expect(cityLog).toContainEqual({ method: 'eq', args: ['geo_country', 'IR'] })
+    expect(cityLog).toContainEqual({ method: 'eq', args: ['geo_city', 'Tehran'] })
+    expect(cityLog.find((c) => c.method === 'ilike')).toBeUndefined()
+    // country tier excludes the city-tier pick
+    expect(countryLog).toContainEqual({ method: 'eq', args: ['geo_country', 'IR'] })
+    expect(countryLog).toContainEqual({ method: 'not', args: ['id', 'in', `(${USER_ID},city-1)`] })
+
+    const byId = Object.fromEntries(res.json().profiles.map((p: any) => [p.id, p]))
+    expect(Object.keys(byId).sort()).toEqual(['city-1', 'country-1', 'rest-1'])
+    // "تهران" vs "tehran" is the same city once normalized
+    expect(byId['city-1'].nearby).toBe(true)
+    expect(byId['country-1'].nearby).toBe(false)
+    for (const p of res.json().profiles) {
+      expect(p).not.toHaveProperty('geo_city')
+      expect(p).not.toHaveProperty('geo_country')
+    }
+  })
+
   it('appends seed/fake profiles at the tail when real users run low', async () => {
     setupAuth()
 

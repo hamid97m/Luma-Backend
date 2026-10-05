@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
-import { interleaveBatch, escapeIlike, shuffle } from '../discoveryRanking.js'
+import { interleaveBatch, escapeIlike, shuffle, isSameCity } from '../discoveryRanking.js'
 import { getSwipeLimitStatus } from '../premium/swipeLimit.js'
 import { getDirectChatStatus } from '../premium/directChatLimit.js'
 import { isPremiumActive } from '../premium/service.js'
@@ -23,9 +23,10 @@ const MAX_LIKER_IDS = 500
 
 // user_photos!inner makes the embed an INNER JOIN, so users with zero photos
 // are excluded from discovery entirely — an incomplete/abandoned profile (no
-// photo uploaded) must never surface as a blank card.
+// photo uploaded) must never surface as a blank card. geo_city/geo_country are
+// ranking-only and are deliberately left out of the response below.
 const PROFILE_COLUMNS =
-  'id, name, age, bio, telegram_id, interests, location, premium_until, user_photos!inner(id, url, position)'
+  'id, name, age, bio, telegram_id, interests, location, geo_city, geo_country, premium_until, user_photos!inner(id, url, position)'
 
 export async function discoveryRoutes(app: FastifyInstance) {
   app.get('/discovery', async (req, reply) => {
@@ -34,7 +35,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
     // Get viewer's preference, gender and city
     const { data: viewer } = await db
       .from('users')
-      .select('looking_for, gender, location')
+      .select('looking_for, gender, location, geo_city, geo_country')
       .eq('id', req.userId)
       .single()
 
@@ -136,13 +137,17 @@ export async function discoveryRoutes(app: FastifyInstance) {
       likers = shuffle(data ?? []).slice(0, MAX_LIKER_SLOTS)
     }
 
-    // Tier 2: same city (case-insensitive exact match on free-text location)
+    // Tier 2: same city — the hidden DeepSeek-normalized city when the viewer's
+    // is resolved, else a case-insensitive exact match on the typed location.
     const likerPickedIds = [...excludeIds, ...likers.map((p: any) => p.id)]
     const city = (viewer.location ?? '').trim()
+    const geoCountry: string | null = viewer.geo_country ?? null
+    const geoCity: string | null = geoCountry ? viewer.geo_city ?? null : null
     let sameCity: any[] = []
-    if (city) {
-      const { data, error } = await profileQuery()
-        .ilike('location', escapeIlike(city))
+    if (geoCity || city) {
+      let q = profileQuery()
+      q = geoCity ? q.eq('geo_country', geoCountry).eq('geo_city', geoCity) : q.ilike('location', escapeIlike(city))
+      const { data, error } = await q
         .not('id', 'in', `(${likerPickedIds.join(',')})`)
         .order('last_active', { ascending: false })
         .limit(FILLER_POOL)
@@ -150,8 +155,21 @@ export async function discoveryRoutes(app: FastifyInstance) {
       sameCity = shuffle(data ?? [])
     }
 
-    // Tier 3: everyone else, most recently active first
-    const allPickedIds = [...likerPickedIds, ...sameCity.map((p: any) => p.id)]
+    // Tier 3: same country (only when the viewer's location is resolved)
+    const cityPickedIds = [...likerPickedIds, ...sameCity.map((p: any) => p.id)]
+    let sameCountry: any[] = []
+    if (geoCountry) {
+      const { data, error } = await profileQuery()
+        .eq('geo_country', geoCountry)
+        .not('id', 'in', `(${cityPickedIds.join(',')})`)
+        .order('last_active', { ascending: false })
+        .limit(FILLER_POOL)
+      if (error) return reply.status(500).send({ error: 'discovery_failed' })
+      sameCountry = shuffle(data ?? [])
+    }
+
+    // Tier 4: everyone else, most recently active first
+    const allPickedIds = [...cityPickedIds, ...sameCountry.map((p: any) => p.id)]
     const { data: rest, error } = await profileQuery()
       .not('id', 'in', `(${allPickedIds.join(',')})`)
       .order('last_active', { ascending: false })
@@ -161,7 +179,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
 
     // Build the batch (likers boosted in so they're not crowded out), then
     // shuffle the whole 10 so nobody — likers included — is pinned to the top.
-    const merged = shuffle(interleaveBatch(likers, sameCity, shuffle(rest ?? []), BATCH_SIZE, LIKER_POSITIONS))
+    const merged = shuffle(interleaveBatch(likers, [sameCity, sameCountry, shuffle(rest ?? [])], BATCH_SIZE, LIKER_POSITIONS))
 
     // Seed/fake profiles come last: only when real candidates can't fill the
     // batch do we top up with seeds, appended at the tail (never shuffled in
@@ -179,7 +197,6 @@ export async function discoveryRoutes(app: FastifyInstance) {
       batch = [...batch, ...shuffle(seeds ?? [])]
     }
 
-    const cityLower = city.toLowerCase()
     const formatted = batch.map((p: any) => ({
       id: p.id,
       name: p.name,
@@ -191,9 +208,8 @@ export async function discoveryRoutes(app: FastifyInstance) {
       // Boolean only — the expiry timestamp stays server-side.
       premium: isPremiumActive(p.premium_until ?? null),
       // "همین نزدیکی" badge only when the candidate shares the viewer's city
-      // (case-insensitive exact match on the free-text location, mirroring the
-      // tier-2 same-city query). Empty viewer city → never nearby.
-      nearby: cityLower.length > 0 && (p.location ?? '').trim().toLowerCase() === cityLower,
+      // (same normalized city, or same typed text when either is unresolved).
+      nearby: isSameCity(viewer, p),
       photos: (p.user_photos as any[])
         .sort((a, b) => a.position - b.position)
         .map((ph: any) => ph.url),

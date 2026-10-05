@@ -1,15 +1,14 @@
 // Pure ranking helpers for the discovery feed — no DB or Fastify knowledge.
 
 /**
- * Merge the three discovery tiers into one batch. Likers occupy
- * `likerPositions` (skipped, not left as gaps, when likers run out);
- * remaining slots are filled with same-city profiles first, then the rest.
+ * Merge the discovery tiers into one batch. Likers occupy `likerPositions`
+ * (skipped, not left as gaps, when likers run out); remaining slots are filled
+ * from `fillerTiers` in priority order (same city, same country, rest).
  * Duplicates are kept in their highest tier only.
  */
 export function interleaveBatch<T extends { id: string }>(
   likers: T[],
-  sameCity: T[],
-  rest: T[],
+  fillerTiers: T[][],
   batchSize: number,
   likerPositions: number[],
 ): T[] {
@@ -18,7 +17,7 @@ export function interleaveBatch<T extends { id: string }>(
     arr.filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true)))
 
   const likerPool = dedupe(likers)
-  const fillerPool = [...dedupe(sameCity), ...dedupe(rest)]
+  const fillerPool = fillerTiers.flatMap(dedupe)
   const likerSlots = new Set(likerPositions)
 
   const result: T[] = []
@@ -45,6 +44,20 @@ export function shuffle<T>(arr: T[]): T[] {
     ;[arr[i], arr[j]] = [arr[j], arr[i]]
   }
   return arr
+}
+
+type Located = { location?: string | null; geo_city?: string | null; geo_country?: string | null }
+
+/**
+ * Same-city test for the "nearby" badge: both resolved to the same city in the
+ * same country, or (when either side is unresolved) the same typed text.
+ */
+export function isSameCity(a: Located, b: Located): boolean {
+  if (a.geo_city && a.geo_country && a.geo_city === b.geo_city && a.geo_country === b.geo_country) {
+    return true
+  }
+  const ta = (a.location ?? '').trim().toLowerCase()
+  return ta.length > 0 && ta === (b.location ?? '').trim().toLowerCase()
 }
 
 /** Escape ILIKE wildcards so a free-text value matches literally. */

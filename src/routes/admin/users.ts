@@ -4,6 +4,7 @@ import { notifyPaused, sendBroadcastMessage, forwardBroadcastMessage } from '../
 import { deleteAllPhotosForUser } from '../../photos/deleteAllPhotosForUser.js'
 import { validateButton } from '../../messaging/messageButton.js'
 import { parseChannelMessageLink } from '../../messaging/channelLink.js'
+import { scheduleUserGeo } from '../../geo/resolveCity.js'
 
 export const PAGE_SIZE = 20
 
@@ -107,6 +108,8 @@ export async function adminUsersRoutes(app: FastifyInstance) {
       .single()
 
     if (error || !user) return reply.status(500).send({ error: 'create_failed' })
+
+    scheduleUserGeo(user.id, typeof body.location === 'string' ? body.location : null, req.log)
 
     if (photos.length) {
       const { error: photoErr } = await db
@@ -266,9 +269,15 @@ export async function adminUsersRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'empty_update' })
     }
 
+    if ('location' in patch) {
+      patch.geo_city = null
+      patch.geo_country = null
+    }
+
     if (Object.keys(patch).length > 0) {
       const { error } = await db.from('users').update(patch).eq('id', id)
       if (error) return reply.status(500).send({ error: 'update_failed' })
+      if ('location' in patch) scheduleUserGeo(id, patch.location as string | null, req.log)
     }
 
     if (photos !== null) {

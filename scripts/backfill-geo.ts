@@ -11,6 +11,8 @@ if (!process.env.DEEPSEEK_API_KEY) {
   console.error('DEEPSEEK_API_KEY is not set')
   process.exit(1)
 }
+// One-off catch-up gets a bigger ceiling than the live server (~$0.50 max).
+process.env.DEEPSEEK_DAILY_LIMIT ??= '5000'
 
 // PostgREST caps each response (1000 rows on Supabase), so collect the full
 // list page by page before any row is updated.

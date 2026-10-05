@@ -61,12 +61,30 @@ describe('askDeepSeek', () => {
     expect(init.headers.authorization).toBe('Bearer sk-test')
     const body = JSON.parse(init.body)
     expect(body.response_format).toEqual({ type: 'json_object' })
+    // thinking mode bills hidden reasoning tokens — must stay off
+    expect(body.thinking).toEqual({ type: 'disabled' })
     expect(body.messages.at(-1)).toEqual({ role: 'user', content: 'مشهد' })
   })
 
   it('throws on an HTTP error', async () => {
     fetchMock.mockResolvedValueOnce(new Response('busy', { status: 503 }))
     await expect(askDeepSeek('Tehran')).rejects.toThrow('deepseek_http_503')
+  })
+
+  it('stops calling DeepSeek once the daily limit is spent, and resets the next day', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2030-01-01T10:00:00Z'))
+    vi.stubEnv('DEEPSEEK_DAILY_LIMIT', '2')
+    fetchMock.mockImplementation(async () => deepSeekReply('{"city":"Tehran","country":"IR"}'))
+
+    await askDeepSeek('a')
+    await askDeepSeek('b')
+    await expect(askDeepSeek('c')).rejects.toThrow('deepseek_daily_limit')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    vi.setSystemTime(new Date('2030-01-02T00:00:01Z'))
+    await expect(askDeepSeek('c')).resolves.toEqual({ city: 'Tehran', country: 'IR' })
+    vi.useRealTimers()
   })
 
   it('throws without an API key', async () => {

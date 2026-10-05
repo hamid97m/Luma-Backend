@@ -5,9 +5,24 @@ import { db } from '../db.js'
 export type Geo = { city: string | null; country: string | null }
 
 const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions'
-const DEEPSEEK_MODEL = 'deepseek-chat'
+const DEEPSEEK_MODEL = 'deepseek-flash'
 const TIMEOUT_MS = 15_000
 const MAX_CITY_LENGTH = 80
+// Hard spend ceiling per process per UTC day (~$0.0001 per call). Cache hits
+// don't count. Over the cap the lookup fails uncached, so a later save or the
+// backfill script resolves it; discovery falls back to typed-text matching.
+const DEFAULT_DAILY_LIMIT = 500
+
+let usage = { day: '', calls: 0 }
+
+function takeDailySlot(): boolean {
+  const limit = Number(process.env.DEEPSEEK_DAILY_LIMIT) || DEFAULT_DAILY_LIMIT
+  const day = new Date().toISOString().slice(0, 10)
+  if (usage.day !== day) usage = { day, calls: 0 }
+  if (usage.calls >= limit) return false
+  usage.calls++
+  return true
+}
 
 const SYSTEM_PROMPT = `You normalize the city a dating-app user typed as where they live.
 The input may be in Persian, Arabic, English or any other language, transliterated, misspelled, or include a province or neighborhood.
@@ -48,14 +63,18 @@ export function parseGeo(content: string): Geo {
 export async function askDeepSeek(raw: string): Promise<Geo> {
   const apiKey = process.env.DEEPSEEK_API_KEY
   if (!apiKey) throw new Error('DEEPSEEK_API_KEY is not set')
+  if (!takeDailySlot()) throw new Error('deepseek_daily_limit')
 
   const res = await fetch(DEEPSEEK_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({
       model: DEEPSEEK_MODEL,
+      // Thinking is on by default and bills hundreds of hidden output tokens
+      // per call; a city lookup needs none.
+      thinking: { type: 'disabled' },
       temperature: 0,
-      max_tokens: 100,
+      max_tokens: 60,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },

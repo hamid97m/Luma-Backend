@@ -8,7 +8,7 @@ import { validatePreCheckout, handleGiftPaid } from './gifts/service.js'
 import {
   PREMIUM_PAYLOAD_PREFIX, validatePremiumPreCheckout, handlePremiumPaid,
 } from './premium/service.js'
-import { t } from './i18n/index.js'
+import { tFor, mapTelegramLang, LOCALES, type Locale } from './i18n/index.js'
 import type { MessageButton } from './messaging/messageButton.js'
 import { parseRefCode, stashReferralClaim } from './referrals/attribution.js'
 
@@ -46,14 +46,21 @@ function webhookSecretToken(): string {
   return derive('secret')
 }
 
+/** Locale for a bot reply: the user's saved choice when they have one, else
+ * the Telegram client language (brand-new users have no row yet or a NULL locale). */
+async function replyLocale(ctx: Context): Promise<Locale> {
+  const tgId = ctx.from?.id
+  if (tgId) {
+    const { data } = await db.from('users').select('locale').eq('telegram_id', tgId).maybeSingle()
+    if (data?.locale) return data.locale as Locale
+  }
+  return mapTelegramLang(ctx.from?.language_code)
+}
+
 async function sendStart(ctx: Context): Promise<void> {
-  const keyboard = new InlineKeyboard().webApp(
-    t.bot.openAppButton,
-    process.env.WEB_URL!
-  )
-  await ctx.reply(t.bot.start, {
-    reply_markup: keyboard,
-  })
+  const t = tFor(await replyLocale(ctx))
+  const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
+  await ctx.reply(t.bot.start, { reply_markup: keyboard })
 }
 
 async function clearPending(ctx: Context): Promise<void> {
@@ -66,6 +73,7 @@ async function promptSupport(ctx: Context): Promise<void> {
   if (tgId) {
     await db.from('users').update({ awaiting_support_since: new Date().toISOString() }).eq('telegram_id', tgId)
   }
+  const t = tFor(await replyLocale(ctx))
   await ctx.reply(t.support.prompt)
 }
 
@@ -112,7 +120,7 @@ function registerHandlers(bot: Bot): void {
 
     const { data: user } = await db
       .from('users')
-      .select('id, awaiting_support_since')
+      .select('id, awaiting_support_since, locale')
       .eq('telegram_id', tgId)
       .maybeSingle()
 
@@ -120,6 +128,7 @@ function registerHandlers(bot: Bot): void {
       return next()
     }
 
+    const t = tFor((user.locale as Locale | null) ?? mapTelegramLang(ctx.from?.language_code))
     await db.from('users').update({ awaiting_support_since: null }).eq('id', user.id)
     const result = await createTicket(user.id, text!)
     const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
@@ -156,13 +165,6 @@ export function mountWebhook(app: FastifyInstance): void {
 }
 
 /**
- * Public-profile description shown on the bot's Telegram profile and in the
- * empty-chat screen ("What can this bot do?"). Set once at startup via
- * `setMyDescription`; max 512 chars per the Bot API.
- */
-const BOT_DESCRIPTION = t.bot.description
-
-/**
  * Initialise the bot and register the webhook with Telegram. Call AFTER
  * `app.listen()` so the endpoint is already accepting requests. `setWebhook`
  * also atomically disables any previous long-polling loop on Telegram's side,
@@ -178,7 +180,12 @@ export async function initWebhook(publicBaseUrl: string): Promise<void> {
     allowed_updates: ['message', 'pre_checkout_query'],
     drop_pending_updates: false,
   })
-  await bot.api.setMyDescription(BOT_DESCRIPTION)
+  // "What can this bot do?" text follows the Telegram client language. The
+  // call without language_code is the default for clients in any other language.
+  await bot.api.setMyDescription(tFor('fa').bot.description)
+  for (const locale of LOCALES) {
+    await bot.api.setMyDescription(tFor(locale).bot.description, { language_code: locale })
+  }
   console.log(`[bot] webhook set (@${botUsername})`)
 }
 
@@ -186,12 +193,14 @@ export interface MatchNotifyRecipient {
   telegramId: number
   matchName: string
   matchPhoto: string | null
+  locale: Locale | null
 }
 
 export async function notifyMatch(recipients: MatchNotifyRecipient[]): Promise<void> {
   const bot = getBot()
 
-  const send = ({ telegramId, matchName, matchPhoto }: MatchNotifyRecipient) => {
+  const send = ({ telegramId, matchName, matchPhoto, locale }: MatchNotifyRecipient) => {
+    const t = tFor(locale)
     const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
     const caption = t.notify.match(matchName)
 
@@ -213,7 +222,9 @@ export async function notifyMatch(recipients: MatchNotifyRecipient[]): Promise<v
 export async function notifyNewLike(
   toTelegramId: number,
   likerName: string,
+  locale: Locale | null,
 ): Promise<void> {
+  const t = tFor(locale)
   const bot = getBot()
   const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
   // Like DMs are text-only by design — no liker photo (the reveal happens in-app).
@@ -221,8 +232,9 @@ export async function notifyNewLike(
 }
 
 /** DM a referrer that someone they invited has qualified (completed a profile). */
-export async function notifyReferralQualified(toTelegramId: number, referredName: string): Promise<void> {
+export async function notifyReferralQualified(toTelegramId: number, referredName: string, locale: Locale | null): Promise<void> {
   try {
+    const t = tFor(locale)
     const bot = getBot()
     const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
     await bot.api.sendMessage(toTelegramId, t.referral.qualified(referredName), { reply_markup: keyboard })
@@ -234,9 +246,11 @@ export async function notifyReferralQualified(toTelegramId: number, referredName
 /** DM a referrer that they earned a referral milestone reward. */
 export async function notifyReferralReward(
   toTelegramId: number,
-  milestone: { rewardType: string; rewardAmount: number }
+  milestone: { rewardType: string; rewardAmount: number },
+  locale: Locale | null,
 ): Promise<void> {
   try {
+    const t = tFor(locale)
     const bot = getBot()
     const text = milestone.rewardType === 'premium_days'
       ? t.referral.rewardPremium(milestone.rewardAmount)
@@ -249,7 +263,8 @@ export async function notifyReferralReward(
 }
 
 /** DM a buyer that their premium purchase is active. */
-export async function notifyPremiumPurchased(toTelegramId: number, durationDays: number): Promise<void> {
+export async function notifyPremiumPurchased(toTelegramId: number, durationDays: number, locale: Locale | null): Promise<void> {
+  const t = tFor(locale)
   const bot = getBot()
   const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
   await bot.api.sendMessage(toTelegramId, t.premium.purchased(durationDays), { reply_markup: keyboard })
@@ -281,7 +296,8 @@ export async function notifyPaymentChannel(text: string): Promise<void> {
 
 /** DM a user that their profile was paused for photo review and a new photo is
  * required to return to discovery. */
-export async function notifyPaused(toTelegramId: number): Promise<void> {
+export async function notifyPaused(toTelegramId: number, locale: Locale | null): Promise<void> {
+  const t = tFor(locale)
   const bot = getBot()
   const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
   await bot.api.sendMessage(toTelegramId, t.notify.paused, { reply_markup: keyboard })
@@ -355,9 +371,11 @@ export async function notifyNewMessage(
   toTelegramId: number,
   senderName: string,
   messageBody: string,
-  senderPhoto: string | null = null,
-  matchId?: string
+  senderPhoto: string | null,
+  matchId: string | undefined,
+  locale: Locale | null,
 ): Promise<void> {
+  const t = tFor(locale)
   const bot = getBot()
   // Deep-link the button straight to this chat (screen=matches + chat=<id>), so
   // tapping the notification opens the conversation, not the app's home tab.
@@ -365,8 +383,8 @@ export async function notifyNewMessage(
   const url = matchId
     ? `${process.env.WEB_URL!}?screen=matches&chat=${encodeURIComponent(matchId)}`
     : process.env.WEB_URL!
-  // "پاسخ دادن" (Reply) when we can open the chat directly; the generic
-  // "open app" label only when there's no matchId to deep-link to.
+  // "Reply" when we can open the chat directly; the generic "open app" label
+  // only when there's no matchId to deep-link to.
   const buttonLabel = matchId ? t.bot.replyButton : t.bot.openAppButton
   const keyboard = new InlineKeyboard().webApp(buttonLabel, url)
   const caption = t.notify.newMessage(senderName, messageBody)
@@ -382,7 +400,8 @@ export async function notifyNewMessage(
 }
 
 /** DM a recipient that someone sent them a gift as an intro. */
-export async function notifyGiftIntro(toTelegramId: number, senderName: string, emoji: string): Promise<void> {
+export async function notifyGiftIntro(toTelegramId: number, senderName: string, emoji: string, locale: Locale | null): Promise<void> {
+  const t = tFor(locale)
   const bot = getBot()
   const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
   await bot.api.sendMessage(toTelegramId, t.notify.giftIntro(senderName, emoji), { reply_markup: keyboard })
@@ -392,7 +411,9 @@ export async function notifyTicketReply(
   toTelegramId: number,
   issuePreview: string,
   answer: string,
+  locale: Locale | null,
 ): Promise<void> {
+  const t = tFor(locale)
   const bot = getBot()
   const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
   const preview = issuePreview.length > 200 ? `${issuePreview.slice(0, 199)}…` : issuePreview

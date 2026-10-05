@@ -74,7 +74,7 @@ describe('handlePremiumPaid', () => {
     expect(notice).toContain('100 ⭐')
     expect(notice).toContain('charge_1')
     // congratulates the buyer by DM
-    expect(notifyPremiumPurchased).toHaveBeenCalledWith(111, 30)
+    expect(notifyPremiumPurchased).toHaveBeenCalledWith(111, 30, null)
   })
 
   it('still grants premium when the buyer DM fails', async () => {

@@ -341,7 +341,8 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     // Warn the user only when pausing (not on resume), and only if bot DMs are
     // not explicitly declined.
     if (pausedAt && data.telegram_id > 0 && data.allows_write_to_pm !== false) {
-      notifyPaused(data.telegram_id).catch((err) =>
+      // TODO(Task 4): pass real locale
+      notifyPaused(data.telegram_id, null).catch((err) =>
         console.error('[admin] notifyPaused failed:', err?.message ?? err))
     }
     return { ok: true }

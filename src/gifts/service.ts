@@ -148,14 +148,16 @@ export async function handleGiftPaid(payload: string, chargeId: string, buyerTel
     })
     if (msgErr) console.error(`[gifts] failed to insert gift message for tx ${tx.id}:`, msgErr)
     if (recipient.telegram_id) {
-      notifyNewMessage(recipient.telegram_id, buyer?.name ?? t.notify.fallbackName, t.gifts.sentYouGift(tx.gift_emoji ?? '🎁'))
+      // TODO(Task 4): pass real locale
+      notifyNewMessage(recipient.telegram_id, buyer?.name ?? t.notify.fallbackName, t.gifts.sentYouGift(tx.gift_emoji ?? '🎁'), null, undefined, null)
         .catch(() => {})
     }
   } else {
     const { error: introErr } = await db.from('gift_transactions').update({ intro_status: 'pending' }).eq('id', tx.id)
     if (introErr) console.error(`[gifts] failed to set intro_status for tx ${tx.id}:`, introErr)
     if (recipient.telegram_id) {
-      notifyGiftIntro(recipient.telegram_id, buyer?.name ?? t.notify.fallbackName, tx.gift_emoji ?? '🎁').catch(() => {})
+      // TODO(Task 4): pass real locale
+      notifyGiftIntro(recipient.telegram_id, buyer?.name ?? t.notify.fallbackName, tx.gift_emoji ?? '🎁', null).catch(() => {})
     }
   }
 }

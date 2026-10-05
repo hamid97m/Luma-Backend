@@ -120,7 +120,7 @@ describe('POST /swipes — like with no reverse', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ matched: false })
-    expect(notifyNewLike).toHaveBeenCalledWith(2, 'Ali')
+    expect(notifyNewLike).toHaveBeenCalledWith(2, 'Ali', null)
   })
 
   it('does not DM when the target has not granted bot write access', async () => {
@@ -244,7 +244,7 @@ describe('POST /swipes — mutual like', () => {
     // Only the OTHER user (the earlier liker, away from the app) is DM'd — the
     // active swiper already sees the match live in-app, so no self-notification.
     expect(notifyMatch).toHaveBeenCalledWith([
-      { telegramId: 2, matchName: 'Ali', matchPhoto: 'https://example.com/ali.jpg' },
+      { telegramId: 2, matchName: 'Ali', matchPhoto: 'https://example.com/ali.jpg', locale: null },
     ])
     // The match path uses notifyMatch, not the new-like DM — no double notification.
     expect(notifyNewLike).not.toHaveBeenCalled()

@@ -15,7 +15,7 @@ describe('notifyNewLike', () => {
   beforeEach(() => { vi.clearAllMocks(); process.env.WEB_URL = 'https://luma.test'; process.env.BOT_TOKEN = 'x' })
 
   it('sends a text message naming the liker, never a photo', async () => {
-    await notifyNewLike(123, 'Sara')
+    await notifyNewLike(123, 'Sara', null)
     expect(sendMessage).toHaveBeenCalledTimes(1)
     const [chatId, text] = sendMessage.mock.calls[0]
     expect(chatId).toBe(123)

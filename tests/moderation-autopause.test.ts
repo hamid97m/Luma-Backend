@@ -40,7 +40,7 @@ describe('maybeAutoPauseForReports', () => {
     })
     const paused = await maybeAutoPauseForReports(REPORTED)
     expect(paused).toBe(true)
-    expect(notifyPaused).toHaveBeenCalledWith(100)
+    expect(notifyPaused).toHaveBeenCalledWith(100, null)
     expect(db.storage.from).toHaveBeenCalledWith('profile-photos')
     expect(storageRemove).toHaveBeenCalledWith([`${REPORTED}/photo-1`, `${REPORTED}/photo-2`])
   })

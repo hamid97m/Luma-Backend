@@ -137,8 +137,8 @@ describe('evaluateReferralRewards', () => {
     ])
 
     expect(notifyReferralReward).toHaveBeenCalledTimes(2)
-    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[0])
-    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[1])
+    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[0], null)
+    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[1], null)
   })
 
   it('a duplicate-claim insert error (23505) grants nothing for that milestone', async () => {
@@ -183,7 +183,7 @@ describe('evaluateReferralRewards', () => {
 
     expect(errorSpy).toHaveBeenCalledWith('referral premium audit insert failed', { message: 'insert failed' })
     // The reward still grants and notifies despite the audit-row failure.
-    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[1])
+    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[1], null)
   })
 
   it('logs when grantBonusSwipes exhausts both attempts without a successful update', async () => {
@@ -214,7 +214,7 @@ describe('evaluateReferralRewards', () => {
       amount: MILESTONES[0].rewardAmount,
     })
     // No behavior change otherwise: still notifies the user of the reward.
-    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[0])
+    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[0], null)
   })
 })
 
@@ -234,7 +234,7 @@ describe('maybeQualifyReferral', () => {
 
     await maybeQualifyReferral('user-1')
 
-    expect(notifyReferralQualified).toHaveBeenCalledWith(777, 'Sara')
+    expect(notifyReferralQualified).toHaveBeenCalledWith(777, 'Sara', null)
     expect(getReferralConfig).toHaveBeenCalledTimes(1) // proves evaluateReferralRewards ran
   })
 

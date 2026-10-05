@@ -131,6 +131,6 @@ describe('handleGiftPaid', () => {
     expect(sendGiftToUser).toHaveBeenCalledWith(999, 'g', undefined)
     expect(introUpdates).toHaveLength(1)
     expect(introUpdates[0]).toMatchObject({ intro_status: 'pending' })
-    expect(notifyGiftIntro).toHaveBeenCalledWith(999, 'Ali', '🌹')
+    expect(notifyGiftIntro).toHaveBeenCalledWith(999, 'Ali', '🌹', null)
   })
 })

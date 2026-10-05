@@ -324,7 +324,7 @@ describe('runFakeLikerJob — match creation', () => {
     expect(logs.inserts.matches[0]).toMatchObject({ user1_id: 'f1', user2_id: 't1' })
     expect(notifyMatch).toHaveBeenCalledTimes(1)
     expect(notifyMatch).toHaveBeenCalledWith([
-      { telegramId: 555, matchName: 'Sara', matchPhoto: 'https://p/f1.jpg' },
+      { telegramId: 555, matchName: 'Sara', matchPhoto: 'https://p/f1.jpg', locale: null },
     ])
   })
 
@@ -383,7 +383,7 @@ describe('runFakeLikerJob — like-back phase', () => {
     expect(logs.inserts.swipes).toEqual([{ swiper_id: 'f2', swiped_id: 'r1', direction: 'like' }])
     expect(logs.inserts.matches[0]).toMatchObject({ user1_id: 'f2', user2_id: 'r1' }) // 'f2' < 'r1'
     expect(notifyMatch).toHaveBeenCalledWith([
-      { telegramId: 777, matchName: 'Bea', matchPhoto: 'https://p/f2.jpg' },
+      { telegramId: 777, matchName: 'Bea', matchPhoto: 'https://p/f2.jpg', locale: null },
     ])
   })
 
@@ -524,7 +524,7 @@ describe('runFakeLikerJob — new-like notification', () => {
 
     expect(res.likesSent).toBe(1)
     expect(res.matchesCreated).toBe(0)
-    expect(notifyNewLike).toHaveBeenCalledWith(777, 'Sara')
+    expect(notifyNewLike).toHaveBeenCalledWith(777, 'Sara', null)
   })
 
   it('does not notify when the target has a fake/sentinel telegram id', async () => {

@@ -140,7 +140,8 @@ export async function handlePremiumPaid(transactionId: string, chargeId: string,
     at: new Date().toISOString(),
   })).catch(() => {})
 
-  notifyPremiumPurchased(buyerTelegramId, tx.duration_days)
+  // TODO(Task 4): pass real locale
+  notifyPremiumPurchased(buyerTelegramId, tx.duration_days, null)
     .catch((err) => console.error('[premium] buyer DM failed:', err?.message ?? err))
 }
 

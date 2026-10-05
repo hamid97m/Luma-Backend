@@ -132,7 +132,8 @@ async function likeTargetAndMatch(
   if (!reverse) {
     // Fake liked a real user without matching → send the "someone liked you" DM.
     if (target.telegram_id > 0 && target.allows_write_to_pm !== false) {
-      notifyNewLike(target.telegram_id, fake.name)
+      // TODO(Task 4): pass real locale
+      notifyNewLike(target.telegram_id, fake.name, null)
         .catch((err) => logger.warn({ err }, 'fake liker: new-like notify failed'))
     }
     return
@@ -155,7 +156,8 @@ async function likeTargetAndMatch(
 
   // Notify the real user only (fakes have a negative sentinel telegram_id).
   if (target.telegram_id > 0 && target.allows_write_to_pm !== false) {
-    notifyMatch([{ telegramId: target.telegram_id, matchName: fake.name, matchPhoto: fakePhoto(fake.id) }])
+    // TODO(Task 4): pass real locale
+    notifyMatch([{ telegramId: target.telegram_id, matchName: fake.name, matchPhoto: fakePhoto(fake.id), locale: null }])
       .catch((err) => logger.warn({ err }, 'fake liker: match notify failed'))
   }
 }

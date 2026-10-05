@@ -70,7 +70,8 @@ export async function swipesRoutes(app: FastifyInstance) {
       const me = pair?.find((u: { id: string }) => u.id === req.userId)
       const target = pair?.find((u: { id: string }) => u.id === targetUserId)
       if (me && target && target.telegram_id > 0 && target.allows_write_to_pm !== false) {
-        notifyNewLike(target.telegram_id, me.name).catch(console.error)
+        // TODO(Task 4): pass real locale
+        notifyNewLike(target.telegram_id, me.name, null).catch(console.error)
       }
       return { matched: false, ...swipeLimit }
     }
@@ -121,7 +122,8 @@ export async function swipesRoutes(app: FastifyInstance) {
       { user: them, matchName: me.name, matchPhoto: primaryPhoto(me.id) },
     ]
       .filter((r) => r.user.allows_write_to_pm !== false)
-      .map((r) => ({ telegramId: r.user.telegram_id, matchName: r.matchName, matchPhoto: r.matchPhoto }))
+      // TODO(Task 4): pass real locale
+      .map((r) => ({ telegramId: r.user.telegram_id, matchName: r.matchName, matchPhoto: r.matchPhoto, locale: null }))
 
     if (recipients.length > 0) notifyMatch(recipients).catch(console.error)
 

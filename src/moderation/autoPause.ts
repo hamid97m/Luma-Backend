@@ -48,7 +48,8 @@ export async function maybeAutoPauseForReports(reportedUserId: string): Promise<
     // Telegram rejects DMs from bots the user never granted write access to;
     // a false flag means an explicit decline, so skip it (null = unknown, try).
     if (data.telegram_id > 0 && data.allows_write_to_pm !== false) {
-      Promise.resolve(notifyPaused(data.telegram_id)).catch((err) =>
+      // TODO(Task 4): pass real locale
+      Promise.resolve(notifyPaused(data.telegram_id, null)).catch((err) =>
         console.error('[moderation] notifyPaused failed:', err?.message ?? err))
     }
     return true

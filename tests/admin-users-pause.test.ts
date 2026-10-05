@@ -35,7 +35,7 @@ describe('admin pause/unpause', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ ok: true })
     expect((update.mock.calls[0][0] as any).paused_at).toBeTruthy()
-    expect(notifyPaused).toHaveBeenCalledWith(100)
+    expect(notifyPaused).toHaveBeenCalledWith(100, null)
     expect(db.storage.from).toHaveBeenCalledWith('profile-photos')
     expect(storageRemove).toHaveBeenCalledWith(['u1/photo-1', 'u1/photo-2'])
   })

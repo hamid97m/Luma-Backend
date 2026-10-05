@@ -131,7 +131,8 @@ export async function adminSupportRoutes(app: FastifyInstance) {
         .order('created_at', { ascending: true })
         .limit(1)
         .maybeSingle()
-      notifyTicketReply(u.telegram_id, first?.body ?? '', text)
+      // TODO(Task 4): pass real locale
+      notifyTicketReply(u.telegram_id, first?.body ?? '', text, null)
         .catch((err) => req.log.warn({ err }, 'failed to send ticket reply notification'))
     }
 

@@ -26,7 +26,7 @@ export async function authRoutes(app: FastifyInstance) {
     // Find or create user
     const { data: existing } = await db
       .from('users')
-      .select('id, name, age, gender, looking_for, bio, deleted_at, banned_at')
+      .select('id, name, age, gender, looking_for, bio, deleted_at, banned_at, locale')
       .eq('telegram_id', tgUser.id)
       .single()
 
@@ -80,11 +80,14 @@ export async function authRoutes(app: FastifyInstance) {
       if (fullProfile) return { user: fullProfile }
     }
 
+    // null = the user has never picked a language; the client shows the
+    // first-open picker. Never default to 'fa' here.
     return {
       user: {
         id: userId,
         name: userName,
         setupComplete,
+        locale: existing?.locale ?? null,
       },
     }
   })

@@ -1,11 +1,12 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 import { maybeQualifyReferral } from '../referrals/rewards.js'
+import { isLocale } from '../i18n/index.js'
 
 export async function getProfileWithPhotos(userId: string) {
   const { data: user, error } = await db
     .from('users')
-    .select('id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt, icebreaker_answer, is_active, paused_at')
+    .select('id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt, icebreaker_answer, is_active, paused_at, locale')
     .eq('id', userId)
     .single()
   if (error || !user) return null
@@ -32,7 +33,7 @@ export async function profileRoutes(app: FastifyInstance) {
   app.put('/profile/me', async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
-    const allowed = ['name', 'age', 'gender', 'looking_for', 'bio', 'interests', 'location', 'icebreaker_prompt', 'icebreaker_answer', 'is_active'] as const
+    const allowed = ['name', 'age', 'gender', 'looking_for', 'bio', 'interests', 'location', 'icebreaker_prompt', 'icebreaker_answer', 'is_active', 'locale'] as const
     const body = req.body as Record<string, unknown>
     const updates: Record<string, unknown> = {}
     for (const key of allowed) {
@@ -62,11 +63,15 @@ export async function profileRoutes(app: FastifyInstance) {
       updates.age = age
     }
 
+    if ('locale' in updates && !isLocale(updates.locale)) {
+      return reply.status(400).send({ error: 'invalid_locale' })
+    }
+
     const { data: user, error } = await db
       .from('users')
       .update({ ...updates, last_active: new Date().toISOString() })
       .eq('id', req.userId)
-      .select('id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt, icebreaker_answer, is_active')
+      .select('id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt, icebreaker_answer, is_active, locale')
       .single()
 
     if (error || !user) return reply.status(500).send({ error: 'update_failed' })
@@ -98,6 +103,19 @@ export async function profileRoutes(app: FastifyInstance) {
     const { error } = await db.from('users').update({ allows_write_to_pm: granted }).eq('id', req.userId)
     if (error) return reply.status(500).send({ error: 'update_failed' })
     return { ok: true }
+  })
+
+  // Lightweight language switch for the Settings screen and the first-open
+  // picker — no profile re-fetch, no last_active bump.
+  app.patch('/profile/me/locale', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+
+    const { locale } = (req.body ?? {}) as { locale?: unknown }
+    if (!isLocale(locale)) return reply.status(400).send({ error: 'invalid_locale' })
+
+    const { error } = await db.from('users').update({ locale }).eq('id', req.userId)
+    if (error) return reply.status(500).send({ error: 'update_failed' })
+    return { ok: true, locale }
   })
 
   app.delete('/profile/me', async (req, reply) => {

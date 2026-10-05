@@ -67,6 +67,20 @@ export async function profileRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'invalid_locale' })
     }
 
+    // City is free text stored in `location`. Required when sent: 2–40 chars,
+    // at least one letter, no digits. Mirrors frontend/src/utils/validateCity.ts.
+    if ('location' in updates) {
+      const raw = updates.location
+      const trimmed = typeof raw === 'string' ? raw.trim() : ''
+      const cityOk =
+        trimmed.length >= 2 &&
+        trimmed.length <= 40 &&
+        !/[0-9۰-۹٠-٩]/.test(trimmed) &&
+        /\p{L}/u.test(trimmed)
+      if (!cityOk) return reply.status(400).send({ error: 'invalid_location' })
+      updates.location = trimmed
+    }
+
     const { data: user, error } = await db
       .from('users')
       .update({ ...updates, last_active: new Date().toISOString() })

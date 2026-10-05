@@ -126,6 +126,56 @@ describe('PUT /profile/me', () => {
     expect(res.json().name).toBe('Ali')
   })
 
+  it('rejects an empty city with 400 invalid_location', async () => {
+    setupAuth()
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/profile/me',
+      headers: AUTH,
+      payload: { location: '   ' },
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_location' })
+  })
+
+  it('rejects a city with digits with 400 invalid_location', async () => {
+    setupAuth()
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/profile/me',
+      headers: AUTH,
+      payload: { location: 'تهران۲' },
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_location' })
+  })
+
+  it('accepts and trims a valid city', async () => {
+    setupAuth()
+
+    vi.mocked(db.from)
+      .mockReturnValueOnce({
+        update: () => ({ eq: () => ({ select: () => ({ single: () => ({ data: { id: USER_ID, name: 'Ali', age: 25, location: 'تهران', gender: 'man', looking_for: 'women', bio: null }, error: null }) }) }) }),
+      } as any)
+      .mockReturnValueOnce({
+        select: () => ({ eq: () => ({ order: () => ({ data: [], error: null }) }) }),
+      } as any)
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/profile/me',
+      headers: AUTH,
+      payload: { location: '  تهران  ' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().location).toBe('تهران')
+  })
+
   it('rejects an out-of-range age with 400 invalid_age', async () => {
     setupAuth()
 

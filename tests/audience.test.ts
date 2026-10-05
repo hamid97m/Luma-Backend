@@ -58,8 +58,9 @@ describe('applyAudienceFilters', () => {
     expect(has(applyWithLog({ locales: [] }), 'in', (a) => a[0] === 'locale')).toBe(false)
   })
 
-  it('ignores unknown locale values', () => {
+  it('drops unknown locale values but fails closed when none remain', () => {
     expect(has(applyWithLog({ locales: ['de', 'en'] }), 'in', (a) => a[0] === 'locale' && JSON.stringify(a[1]) === '["en"]')).toBe(true)
-    expect(has(applyWithLog({ locales: ['de'] }), 'in', (a) => a[0] === 'locale')).toBe(false)
+    // An all-invalid list must match nobody — never silently broadcast to everyone.
+    expect(has(applyWithLog({ locales: ['de'] }), 'in', (a) => a[0] === 'locale' && JSON.stringify(a[1]) === '[]')).toBe(true)
   })
 })

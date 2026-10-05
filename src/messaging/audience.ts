@@ -7,7 +7,7 @@ export interface BroadcastFilters {
   lookingFor?: string[]
   activity?: { activeWithinDays?: number; inactiveOverDays?: number }
   premium?: 'premium' | 'free'
-  /** `users.locale` values ('fa' | 'en' | 'ar'); unknown values are ignored, empty = no filter. */
+  /** `users.locale` values ('fa' | 'en' | 'ar'); unknown values are dropped, absent/empty = no filter. */
   locales?: string[]
 }
 
@@ -29,8 +29,9 @@ export function applyAudienceFilters(query: any, filters: BroadcastFilters, nowM
 
   if (filters.genders?.length) query = query.in('gender', filters.genders)
   if (filters.lookingFor?.length) query = query.in('looking_for', filters.lookingFor)
-  const locales = (filters.locales ?? []).filter(isLocale)
-  if (locales.length) query = query.in('locale', locales)
+  // Fail closed: once the admin asked for a locale filter, an all-invalid
+  // list must match nobody (`.in('locale', [])`), never fall back to everyone.
+  if (filters.locales?.length) query = query.in('locale', filters.locales.filter(isLocale))
 
   const activeWithin = filters.activity?.activeWithinDays
   if (activeWithin != null) {

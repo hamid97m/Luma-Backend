@@ -182,9 +182,14 @@ export async function initWebhook(publicBaseUrl: string): Promise<void> {
   })
   // "What can this bot do?" text follows the Telegram client language. The
   // call without language_code is the default for clients in any other language.
-  await bot.api.setMyDescription(tFor('fa').bot.description)
-  for (const locale of LOCALES) {
-    await bot.api.setMyDescription(tFor(locale).bot.description, { language_code: locale })
+  // Cosmetic: a failure here must never take the webhook (and the process) down.
+  try {
+    await bot.api.setMyDescription(tFor('fa').bot.description)
+    for (const locale of LOCALES) {
+      await bot.api.setMyDescription(tFor(locale).bot.description, { language_code: locale })
+    }
+  } catch (err) {
+    console.warn('[bot] setMyDescription failed (non-fatal):', err)
   }
   console.log(`[bot] webhook set (@${botUsername})`)
 }

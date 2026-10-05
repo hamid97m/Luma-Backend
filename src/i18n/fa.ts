@@ -62,4 +62,4 @@ export const fa = {
   chat: {
     seedGreeting: 'سلام',
   },
-} as const;
+};

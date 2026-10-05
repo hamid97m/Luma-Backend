@@ -96,6 +96,7 @@ describe('GET /discovery', () => {
           age: 27,
           bio: 'سلام',
           telegram_id: 999,
+          premium_until: '2099-01-01T00:00:00.000Z',
           user_photos: [
             { id: 'ph2', url: 'https://img2.jpg', position: 1 },
             { id: 'ph1', url: 'https://img1.jpg', position: 0 },
@@ -122,6 +123,7 @@ describe('GET /discovery', () => {
       interests: [],
       location: null,
       nearby: false,
+      premium: true,
       photos: ['https://img1.jpg', 'https://img2.jpg'],
     })
   })

@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 import { chatGateContext, matchPremiumRequired } from '../premium/chatLimit.js'
+import { isPremiumActive } from '../premium/service.js'
 
 export async function matchesRoutes(app: FastifyInstance) {
   app.get('/matches', async (req, reply) => {
@@ -20,8 +21,8 @@ export async function matchesRoutes(app: FastifyInstance) {
       .from('matches')
       .select(`
         id, created_at, user1_id, user2_id,
-        user1:users!matches_user1_id_fkey(id, name, telegram_id, username, deleted_at, age, bio, icebreaker_prompt, icebreaker_answer, gender),
-        user2:users!matches_user2_id_fkey(id, name, telegram_id, username, deleted_at, age, bio, icebreaker_prompt, icebreaker_answer, gender)
+        user1:users!matches_user1_id_fkey(id, name, telegram_id, username, deleted_at, age, bio, icebreaker_prompt, icebreaker_answer, gender, premium_until),
+        user2:users!matches_user2_id_fkey(id, name, telegram_id, username, deleted_at, age, bio, icebreaker_prompt, icebreaker_answer, gender, premium_until)
       `)
       .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
       .order('created_at', { ascending: false })
@@ -77,6 +78,7 @@ export async function matchesRoutes(app: FastifyInstance) {
             icebreakerPrompt: other.icebreaker_prompt ?? null,
             icebreakerAnswer: other.icebreaker_answer ?? null,
             photos: (photos ?? []).map((p: { url: string }) => p.url),
+            premium: isPremiumActive(other.premium_until ?? null),
           },
           lastMessage: lastMsg
             ? { body: lastMsg.body, createdAt: lastMsg.created_at, senderId: lastMsg.sender_id }

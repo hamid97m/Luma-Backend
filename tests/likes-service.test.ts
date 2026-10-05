@@ -4,10 +4,10 @@ import { getIncomingLikers } from '../src/likes/service.js'
 import { db } from '../src/db.js'
 import { chainable } from './admin-helpers.js'
 
-function liker(id: string, gender: string, opts: Partial<{ deleted_at: string; banned_at: string }> = {}) {
+function liker(id: string, gender: string, opts: Partial<{ deleted_at: string; banned_at: string; premium_until: string | null }> = {}) {
   return {
     swiper_id: id, created_at: `2026-08-0${id.slice(-1)}T00:00:00Z`,
-    swiper: { id, name: `U${id}`, age: 25, bio: null, location: 'Tehran', interests: ['Hiking', 'Music'], telegram_id: 10, gender, deleted_at: opts.deleted_at ?? null, banned_at: opts.banned_at ?? null },
+    swiper: { id, name: `U${id}`, age: 25, bio: null, location: 'Tehran', interests: ['Hiking', 'Music'], telegram_id: 10, gender, deleted_at: opts.deleted_at ?? null, banned_at: opts.banned_at ?? null, premium_until: opts.premium_until ?? null },
   }
 }
 
@@ -26,10 +26,12 @@ describe('getIncomingLikers', () => {
   beforeEach(() => vi.clearAllMocks())
 
   it('returns likers not yet acted on, newest first', async () => {
-    mockDb([liker('a1', 'woman'), liker('a2', 'man')], [], [], [])
+    mockDb([liker('a1', 'woman'), liker('a2', 'man', { premium_until: '2099-01-01T00:00:00.000Z' })], [], [], [])
     const res = await getIncomingLikers('me')
     expect(res.map((r) => r.id)).toEqual(['a2', 'a1']) // created_at desc
     expect(res[0].gender).toBe('man')
+    expect(res[0].premium).toBe(true)
+    expect(res[1].premium).toBe(false)
     // location + interests are carried through for the liker profile view
     expect(res[0].location).toBe('Tehran')
     expect(res[0].interests).toEqual(['Hiking', 'Music'])

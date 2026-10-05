@@ -3,6 +3,7 @@ import { db } from '../db.js'
 import { interleaveBatch, escapeIlike, shuffle } from '../discoveryRanking.js'
 import { getSwipeLimitStatus } from '../premium/swipeLimit.js'
 import { getDirectChatStatus } from '../premium/directChatLimit.js'
+import { isPremiumActive } from '../premium/service.js'
 
 const BATCH_SIZE = 10
 const MAX_LIKER_SLOTS = 4
@@ -24,7 +25,7 @@ const MAX_LIKER_IDS = 500
 // are excluded from discovery entirely — an incomplete/abandoned profile (no
 // photo uploaded) must never surface as a blank card.
 const PROFILE_COLUMNS =
-  'id, name, age, bio, telegram_id, interests, location, user_photos!inner(id, url, position)'
+  'id, name, age, bio, telegram_id, interests, location, premium_until, user_photos!inner(id, url, position)'
 
 export async function discoveryRoutes(app: FastifyInstance) {
   app.get('/discovery', async (req, reply) => {
@@ -187,6 +188,8 @@ export async function discoveryRoutes(app: FastifyInstance) {
       telegramId: p.telegram_id,
       interests: p.interests ?? [],
       location: p.location ?? null,
+      // Boolean only — the expiry timestamp stays server-side.
+      premium: isPremiumActive(p.premium_until ?? null),
       // "همین نزدیکی" badge only when the candidate shares the viewer's city
       // (case-insensitive exact match on the free-text location, mirroring the
       // tier-2 same-city query). Empty viewer city → never nearby.

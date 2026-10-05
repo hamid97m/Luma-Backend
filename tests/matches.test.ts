@@ -24,7 +24,7 @@ function mockNoBlocks() {
   } as any)
 }
 
-function mockMatchesRow() {
+function mockMatchesRow(premiumUntil: string | null = null) {
   vi.mocked(db.from).mockReturnValueOnce({
     select: () => ({
       or: () => ({
@@ -35,7 +35,7 @@ function mockMatchesRow() {
             user1_id: USER_ID,
             user2_id: 'other-user',
             user1: { id: USER_ID, name: 'Ali', telegram_id: 1, deleted_at: null, age: 30, bio: null, icebreaker_prompt: null, icebreaker_answer: null },
-            user2: { id: 'other-user', name: 'Sara', telegram_id: 99, deleted_at: null, age: 24, bio: 'Coffee person', icebreaker_prompt: 'My perfect Sunday', icebreaker_answer: 'Hiking then pancakes' },
+            user2: { id: 'other-user', name: 'Sara', telegram_id: 99, deleted_at: null, age: 24, bio: 'Coffee person', icebreaker_prompt: 'My perfect Sunday', icebreaker_answer: 'Hiking then pancakes', premium_until: premiumUntil },
           }],
           error: null,
         }),
@@ -104,6 +104,7 @@ describe('GET /matches', () => {
     const body = res.json()
     expect(body.matches).toHaveLength(1)
     expect(body.matches[0].user.name).toBe('Sara')
+    expect(body.matches[0].user.premium).toBe(false)
     expect(body.matches[0].user.telegramId).toBe(99)
     expect(body.matches[0].user.age).toBe(24)
     expect(body.matches[0].user.bio).toBe('Coffee person')
@@ -113,6 +114,19 @@ describe('GET /matches', () => {
       body: 'hey there', createdAt: '2026-01-02T00:00:00Z', senderId: 'other-user',
     })
     expect(body.matches[0].unreadCount).toBe(2)
+  })
+
+  it('marks the other user premium only while premium_until is still in the future', async () => {
+    setupAuth()
+    mockNoBlocks()
+    mockMatchesRow('2099-01-01T00:00:00.000Z')
+    mockChatGateExempt()
+    mockPhotos()
+    mockLastMessage(null)
+    mockUnreadCount(0)
+
+    const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
+    expect(res.json().matches[0].user.premium).toBe(true)
   })
 
   it('returns null lastMessage and 0 unreadCount when there are no messages yet', async () => {

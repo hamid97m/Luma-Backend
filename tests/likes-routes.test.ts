@@ -52,6 +52,7 @@ describe('GET /likes', () => {
     expect(JSON.stringify(body)).not.toContain('Yoga') // interest
     expect(JSON.stringify(body)).not.toContain('w1')   // id
     expect(body.visible[0].photos).toEqual(['http://p/m1.jpg'])
+    expect(body.visible[0].premium).toBe(false)
   })
 
   it('shows everyone when the viewer is premium', async () => {

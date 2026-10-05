@@ -55,6 +55,7 @@ export async function likesRoutes(app: FastifyInstance) {
       telegramId: l.telegramId,
       photos: photosByUser.get(l.id) ?? [],
       likedAt: l.likedAt,
+      premium: l.premium === true,
     }))
 
     // Locked likers: ONLY the first photo (for a blurred tile). No identity.

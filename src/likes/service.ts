@@ -1,4 +1,5 @@
 import { db } from '../db.js'
+import { isPremiumActive } from '../premium/service.js'
 
 export interface IncomingLiker {
   id: string
@@ -10,6 +11,8 @@ export interface IncomingLiker {
   telegramId: number
   gender: string | null
   likedAt: string
+  /** Active premium only — expiry is not exposed to other users. */
+  premium: boolean
 }
 
 const MAX_LIKERS = 100
@@ -18,7 +21,7 @@ export async function getIncomingLikers(userId: string): Promise<IncomingLiker[]
   // (1) People who liked me, with their profile joined (mirrors the matches join pattern).
   const { data: incoming } = await db
     .from('swipes')
-    .select('swiper_id, created_at, swiper:users!swipes_swiper_id_fkey(id, name, age, bio, location, interests, telegram_id, gender, deleted_at, banned_at)')
+    .select('swiper_id, created_at, swiper:users!swipes_swiper_id_fkey(id, name, age, bio, location, interests, telegram_id, gender, deleted_at, banned_at, premium_until)')
     .eq('swiped_id', userId)
     .eq('direction', 'like')
     .order('created_at', { ascending: false })
@@ -70,6 +73,7 @@ export async function getIncomingLikers(userId: string): Promise<IncomingLiker[]
       telegramId: s.telegram_id,
       gender: s.gender ?? null,
       likedAt: row.created_at,
+      premium: isPremiumActive(s.premium_until ?? null),
     })
     if (out.length >= MAX_LIKERS) break
   }

@@ -330,7 +330,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
       .from('users')
       .update({ paused_at: pausedAt })
       .eq('id', id)
-      .select('telegram_id, allows_write_to_pm')
+      .select('telegram_id, allows_write_to_pm, locale')
       .single()
     if (error || !data) return reply.status(404).send({ error: 'user_not_found' })
 
@@ -341,8 +341,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     // Warn the user only when pausing (not on resume), and only if bot DMs are
     // not explicitly declined.
     if (pausedAt && data.telegram_id > 0 && data.allows_write_to_pm !== false) {
-      // TODO(Task 4): pass real locale
-      notifyPaused(data.telegram_id, null).catch((err) =>
+      notifyPaused(data.telegram_id, data.locale ?? null).catch((err) =>
         console.error('[admin] notifyPaused failed:', err?.message ?? err))
     }
     return { ok: true }

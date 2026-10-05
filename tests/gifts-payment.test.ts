@@ -7,8 +7,10 @@ vi.mock('../src/bot.js', () => ({
   notifyPaymentChannel: vi.fn().mockResolvedValue(undefined),
 }))
 import { db } from '../src/db.js'
-import { sendGiftToUser, refundGift, notifyGiftIntro, notifyPaymentChannel } from '../src/bot.js'
-import { handleGiftPaid } from '../src/gifts/service.js'
+import { sendGiftToUser, refundGift, notifyGiftIntro, notifyNewMessage, notifyPaymentChannel } from '../src/bot.js'
+import { handleGiftPaid, validatePreCheckout } from '../src/gifts/service.js'
+import { en } from '../src/i18n/en.js'
+import { fa } from '../src/i18n/fa.js'
 
 const CLAIM_TX = {
   id: 'tx1', buyer_id: 'b', recipient_id: 'r', context: 'chat', match_id: 'm1', gift_id: 'g', gift_emoji: '🌹', note: null,
@@ -21,9 +23,10 @@ const DISCOVERY_TX = {
 function claimStep(data: any) {
   return { update: () => ({ eq: () => ({ eq: () => ({ select: () => ({ maybeSingle: () => ({ data }) }) }) }) }) }
 }
-/** Simple lookup step: select -> eq -> single, returning `data`. */
+/** Simple lookup step: select -> eq -> single/maybeSingle, returning `data`. */
 function lookupStep(data: any) {
-  return { select: () => ({ eq: () => ({ single: () => ({ data }) }) }) }
+  const leaf = { single: () => ({ data }), maybeSingle: () => ({ data }) }
+  return { select: () => ({ eq: () => leaf }) }
 }
 /** update() spy step: captures the payload passed to update(), then eq() resolves. */
 function updateSpyStep(spy: (payload: any) => void) {
@@ -49,7 +52,7 @@ describe('handleGiftPaid', () => {
     const inserts: any[] = []
     scriptDb([
       claimStep(CLAIM_TX),                                   // 1. claim pending tx
-      lookupStep({ telegram_id: 999, name: 'Sara' }),         // 2. recipient lookup
+      lookupStep({ telegram_id: 999, name: 'Sara', locale: 'en' }), // 2. recipient lookup
       lookupStep({ name: 'Ali' }),                            // 3. buyer lookup
       updateSpyStep((p) => sentUpdates.push(p)),              // 4. mark sent
       insertSpyStep((p) => inserts.push(p)),                  // 5. insert gift message
@@ -58,6 +61,9 @@ describe('handleGiftPaid', () => {
 
     expect(sendGiftToUser).toHaveBeenCalledWith(999, 'g', undefined)
     expect(refundGift).not.toHaveBeenCalled()
+
+    // the chat DM is worded in the recipient's language and carries their locale
+    expect(notifyNewMessage).toHaveBeenCalledWith(999, 'Ali', en.gifts.sentYouGift('🌹'), null, undefined, 'en')
 
     expect(sentUpdates).toHaveLength(1)
     expect(sentUpdates[0]).toMatchObject({ status: 'sent' })
@@ -121,7 +127,7 @@ describe('handleGiftPaid', () => {
     const introUpdates: any[] = []
     scriptDb([
       claimStep(DISCOVERY_TX),                          // 1. claim pending tx
-      lookupStep({ telegram_id: 999, name: 'Sara' }),   // 2. recipient lookup
+      lookupStep({ telegram_id: 999, name: 'Sara', locale: 'ar' }), // 2. recipient lookup
       lookupStep({ name: 'Ali' }),                      // 3. buyer lookup
       updateSpyStep(() => {}),                          // 4. mark sent
       updateSpyStep((p) => introUpdates.push(p)),       // 5. set intro_status
@@ -131,6 +137,37 @@ describe('handleGiftPaid', () => {
     expect(sendGiftToUser).toHaveBeenCalledWith(999, 'g', undefined)
     expect(introUpdates).toHaveLength(1)
     expect(introUpdates[0]).toMatchObject({ intro_status: 'pending' })
-    expect(notifyGiftIntro).toHaveBeenCalledWith(999, 'Ali', '🌹', null)
+    expect(notifyGiftIntro).toHaveBeenCalledWith(999, 'Ali', '🌹', 'ar')
+  })
+
+  it('uses the recipient\'s fallback name and null locale when the row has none', async () => {
+    scriptDb([
+      claimStep(DISCOVERY_TX),
+      lookupStep({ telegram_id: 999, name: 'Sara', locale: null }),
+      lookupStep(null), // buyer row gone → fallback name
+      updateSpyStep(() => {}),
+      updateSpyStep(() => {}),
+    ])
+    await handleGiftPaid('tx1', 'charge_1', 111, 75)
+    expect(notifyGiftIntro).toHaveBeenCalledWith(999, fa.notify.fallbackName, '🌹', null)
+  })
+})
+
+describe('validatePreCheckout', () => {
+  beforeEach(() => vi.clearAllMocks())
+  const PENDING = { status: 'pending_payment', charged_stars: 75, gift_id: 'g', buyer_id: 'b' }
+
+  it('rejects an unknown tx in Persian without a buyer lookup', async () => {
+    scriptDb([lookupStep(null)])
+    expect(await validatePreCheckout('tx1', 75, 'XTR')).toEqual({ ok: false, reason: fa.gifts.checkoutUnavailable })
+    expect(db.from).toHaveBeenCalledTimes(1)
+  })
+  it('rejects an already-processed tx in the buyer\'s language', async () => {
+    scriptDb([lookupStep({ ...PENDING, status: 'paid' }), lookupStep({ locale: 'en' })])
+    expect(await validatePreCheckout('tx1', 75, 'XTR')).toEqual({ ok: false, reason: en.gifts.checkoutAlreadyProcessed })
+  })
+  it('rejects a price mismatch in the buyer\'s language', async () => {
+    scriptDb([lookupStep(PENDING), lookupStep({ locale: 'en' })])
+    expect(await validatePreCheckout('tx1', 10, 'XTR')).toEqual({ ok: false, reason: en.gifts.checkoutPriceMismatch })
   })
 })

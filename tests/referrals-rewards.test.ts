@@ -102,7 +102,7 @@ describe('evaluateReferralRewards', () => {
         { error: null }, // claim insert for milestone 3
       ],
       users: [
-        { data: { telegram_id: 555, allows_write_to_pm: true }, error: null }, // referrer lookup
+        { data: { telegram_id: 555, allows_write_to_pm: true, locale: 'en' }, error: null }, // referrer lookup
         { data: { bonus_swipes: 0 }, error: null }, // grantBonusSwipes select
         { data: { id: 'referrer-1' }, error: null }, // grantBonusSwipes guarded update
         { data: { premium_until: null }, error: null }, // grantPremiumDays select
@@ -136,9 +136,10 @@ describe('evaluateReferralRewards', () => {
       },
     ])
 
+    // Both DMs go out in the referrer's language.
     expect(notifyReferralReward).toHaveBeenCalledTimes(2)
-    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[0], null)
-    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[1], null)
+    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[0], 'en')
+    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[1], 'en')
   })
 
   it('a duplicate-claim insert error (23505) grants nothing for that milestone', async () => {
@@ -172,7 +173,7 @@ describe('evaluateReferralRewards', () => {
         { error: null }, // claim insert for milestone 3
       ],
       users: [
-        { data: { telegram_id: 555, allows_write_to_pm: true }, error: null }, // referrer lookup
+        { data: { telegram_id: 555, allows_write_to_pm: true, locale: 'ar' }, error: null }, // referrer lookup
         { data: { premium_until: null }, error: null }, // grantPremiumDays select
         { error: null }, // grantPremiumDays update
       ],
@@ -183,7 +184,7 @@ describe('evaluateReferralRewards', () => {
 
     expect(errorSpy).toHaveBeenCalledWith('referral premium audit insert failed', { message: 'insert failed' })
     // The reward still grants and notifies despite the audit-row failure.
-    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[1], null)
+    expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[1], 'ar')
   })
 
   it('logs when grantBonusSwipes exhausts both attempts without a successful update', async () => {
@@ -196,7 +197,7 @@ describe('evaluateReferralRewards', () => {
         { error: null }, // claim insert for milestone 1
       ],
       users: [
-        { data: { telegram_id: 555, allows_write_to_pm: true }, error: null }, // referrer lookup
+        { data: { telegram_id: 555, allows_write_to_pm: true, locale: null }, error: null }, // referrer lookup (no locale yet)
         { data: { bonus_swipes: 5 }, error: null }, // attempt 1 select
         { data: null, error: null }, // attempt 1 guarded update loses the race
         { data: { bonus_swipes: 5 }, error: null }, // attempt 2 select
@@ -213,7 +214,8 @@ describe('evaluateReferralRewards', () => {
       userId: 'referrer-1',
       amount: MILESTONES[0].rewardAmount,
     })
-    // No behavior change otherwise: still notifies the user of the reward.
+    // No behavior change otherwise: still notifies the user of the reward
+    // (null locale → Persian for a referrer who hasn't picked a language).
     expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[0], null)
   })
 })
@@ -226,7 +228,7 @@ describe('maybeQualifyReferral', () => {
     makeDb({
       users: [
         { data: { age: 25, name: 'Sara', referred_by: 'referrer-1' }, error: null }, // subject lookup
-        { data: { telegram_id: 777, allows_write_to_pm: true }, error: null }, // referrer lookup
+        { data: { telegram_id: 777, allows_write_to_pm: true, locale: 'en' }, error: null }, // referrer lookup
       ],
       user_photos: [{ count: 2, data: null, error: null }],
       referrals: [{ data: { referrer_id: 'referrer-1' }, error: null }], // guarded qualify update
@@ -234,7 +236,8 @@ describe('maybeQualifyReferral', () => {
 
     await maybeQualifyReferral('user-1')
 
-    expect(notifyReferralQualified).toHaveBeenCalledWith(777, 'Sara', null)
+    // The DM goes to the referrer, in the referrer's language (not the referred user's).
+    expect(notifyReferralQualified).toHaveBeenCalledWith(777, 'Sara', 'en')
     expect(getReferralConfig).toHaveBeenCalledTimes(1) // proves evaluateReferralRewards ran
   })
 

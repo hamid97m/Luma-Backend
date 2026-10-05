@@ -9,6 +9,8 @@ vi.mock('../src/bot.js', () => ({
 import { db } from '../src/db.js'
 import { refundPremiumPayment, notifyPaymentChannel, notifyPremiumPurchased } from '../src/bot.js'
 import { validatePremiumPreCheckout, handlePremiumPaid } from '../src/premium/service.js'
+import { en } from '../src/i18n/en.js'
+import { fa } from '../src/i18n/fa.js'
 
 /** Claim step: update -> eq -> eq -> select -> maybeSingle, returning `data`. */
 function claimStep(data: any) {
@@ -29,25 +31,35 @@ function scriptDb(steps: any[]) {
 }
 
 const PAID_TX = { id: 'tx1', user_id: 'u1', duration_days: 30 }
+const PENDING_TX = { status: 'pending_payment', price_stars: 100, user_id: 'u1' }
 
 describe('validatePremiumPreCheckout', () => {
   beforeEach(() => vi.clearAllMocks())
 
   it('accepts a pending tx with matching amount', async () => {
-    scriptDb([lookupStep({ status: 'pending_payment', price_stars: 100 })])
+    scriptDb([lookupStep(PENDING_TX), lookupStep({ locale: 'fa' })])
     expect(await validatePremiumPreCheckout('tx1', 100, 'XTR')).toEqual({ ok: true })
   })
-  it('rejects an unknown tx', async () => {
+  it('rejects an unknown tx in Persian (no buyer to look up)', async () => {
     scriptDb([lookupStep(null)])
-    expect((await validatePremiumPreCheckout('tx1', 100, 'XTR')).ok).toBe(false)
+    expect(await validatePremiumPreCheckout('tx1', 100, 'XTR'))
+      .toEqual({ ok: false, reason: fa.premium.checkoutUnavailable })
+    expect(db.from).toHaveBeenCalledTimes(1)
   })
-  it('rejects an already-processed tx', async () => {
-    scriptDb([lookupStep({ status: 'paid', price_stars: 100 })])
-    expect((await validatePremiumPreCheckout('tx1', 100, 'XTR')).ok).toBe(false)
+  it('rejects an already-processed tx in the buyer\'s language', async () => {
+    scriptDb([lookupStep({ ...PENDING_TX, status: 'paid' }), lookupStep({ locale: 'en' })])
+    expect(await validatePremiumPreCheckout('tx1', 100, 'XTR'))
+      .toEqual({ ok: false, reason: en.premium.checkoutAlreadyProcessed })
   })
-  it('rejects an amount mismatch', async () => {
-    scriptDb([lookupStep({ status: 'pending_payment', price_stars: 100 })])
-    expect((await validatePremiumPreCheckout('tx1', 50, 'XTR')).ok).toBe(false)
+  it('rejects an amount mismatch in the buyer\'s language', async () => {
+    scriptDb([lookupStep(PENDING_TX), lookupStep({ locale: 'en' })])
+    expect(await validatePremiumPreCheckout('tx1', 50, 'XTR'))
+      .toEqual({ ok: false, reason: en.premium.checkoutPriceMismatch })
+  })
+  it('falls back to Persian when the buyer has no locale yet', async () => {
+    scriptDb([lookupStep(PENDING_TX), lookupStep({ locale: null })])
+    expect(await validatePremiumPreCheckout('tx1', 50, 'XTR'))
+      .toEqual({ ok: false, reason: fa.premium.checkoutPriceMismatch })
   })
 })
 
@@ -58,7 +70,7 @@ describe('handlePremiumPaid', () => {
     const userUpdates: any[] = []
     scriptDb([
       claimStep(PAID_TX),                       // 1. pending -> paid claim
-      lookupStep({ premium_until: null }),      // 2. current expiry lookup
+      lookupStep({ premium_until: null, locale: 'en' }), // 2. current expiry + locale lookup
       updateSpyStep((p) => userUpdates.push(p)),// 3. users.premium_until update
     ])
     await handlePremiumPaid('tx1', 'charge_1', 111, 100)
@@ -73,7 +85,17 @@ describe('handlePremiumPaid', () => {
     expect(notice).toContain('30 days')
     expect(notice).toContain('100 ⭐')
     expect(notice).toContain('charge_1')
-    // congratulates the buyer by DM
+    // congratulates the buyer by DM, in the buyer's language
+    expect(notifyPremiumPurchased).toHaveBeenCalledWith(111, 30, 'en')
+  })
+
+  it('DMs a buyer without a stored locale in Persian (null)', async () => {
+    scriptDb([
+      claimStep(PAID_TX),
+      lookupStep({ premium_until: null, locale: null }),
+      updateSpyStep(() => {}),
+    ])
+    await handlePremiumPaid('tx1', 'charge_1', 111, 100)
     expect(notifyPremiumPurchased).toHaveBeenCalledWith(111, 30, null)
   })
 

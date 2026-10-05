@@ -104,11 +104,11 @@ describe('POST /swipes — like with no reverse', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ eq: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: null, error: null }) }) }) }) }),
     } as any)
-    // fetch pair (swiper + target)
+    // fetch pair (swiper + target) — the DM follows the TARGET's locale, not the swiper's
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ in: () => ({ data: [
-        { id: USER_ID, name: 'Ali', telegram_id: 1, allows_write_to_pm: null },
-        { id: TARGET_ID, name: 'Sara', telegram_id: 2, allows_write_to_pm: null },
+        { id: USER_ID, name: 'Ali', telegram_id: 1, allows_write_to_pm: null, locale: 'fa' },
+        { id: TARGET_ID, name: 'Sara', telegram_id: 2, allows_write_to_pm: null, locale: 'en' },
       ], error: null }) }),
     } as any)
     const res = await app.inject({
@@ -120,6 +120,23 @@ describe('POST /swipes — like with no reverse', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ matched: false })
+    expect(notifyNewLike).toHaveBeenCalledWith(2, 'Ali', 'en')
+  })
+
+  it('passes a null locale for a liked user who has not picked a language yet', async () => {
+    setupAuth()
+    mockTarget()
+    vi.mocked(db.from).mockReturnValueOnce({ upsert: vi.fn().mockReturnValue({ error: null }) } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: null, error: null }) }) }) }) }),
+    } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ in: () => ({ data: [
+        { id: USER_ID, name: 'Ali', telegram_id: 1, allows_write_to_pm: null, locale: 'en' },
+        { id: TARGET_ID, name: 'Sara', telegram_id: 2, allows_write_to_pm: null, locale: null },
+      ], error: null }) }),
+    } as any)
+    await app.inject({ method: 'POST', url: '/swipes', headers: AUTH, payload: { targetUserId: TARGET_ID, direction: 'like' } })
     expect(notifyNewLike).toHaveBeenCalledWith(2, 'Ali', null)
   })
 
@@ -216,11 +233,11 @@ describe('POST /swipes — mutual like', () => {
         select: () => ({ single: () => ({ data: { id: 'match-uuid' }, error: null }) }),
       }),
     } as any)
-    // fetch both users
+    // fetch both users — the match DM goes to Sara, in Sara's language
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ in: () => ({ data: [
-        { id: USER_ID, name: 'Ali', telegram_id: 1 },
-        { id: TARGET_ID, name: 'Sara', telegram_id: 2 },
+        { id: USER_ID, name: 'Ali', telegram_id: 1, locale: 'fa' },
+        { id: TARGET_ID, name: 'Sara', telegram_id: 2, locale: 'ar' },
       ], error: null }) }),
     } as any)
     // fetch primary photos
@@ -244,7 +261,7 @@ describe('POST /swipes — mutual like', () => {
     // Only the OTHER user (the earlier liker, away from the app) is DM'd — the
     // active swiper already sees the match live in-app, so no self-notification.
     expect(notifyMatch).toHaveBeenCalledWith([
-      { telegramId: 2, matchName: 'Ali', matchPhoto: 'https://example.com/ali.jpg', locale: null },
+      { telegramId: 2, matchName: 'Ali', matchPhoto: 'https://example.com/ali.jpg', locale: 'ar' },
     ])
     // The match path uses notifyMatch, not the new-like DM — no double notification.
     expect(notifyNewLike).not.toHaveBeenCalled()

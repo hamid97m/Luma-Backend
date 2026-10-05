@@ -31,18 +31,24 @@ function mockDb({ threshold, pendingCount, updateData, photos }: {
 describe('maybeAutoPauseForReports', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('pauses and notifies once the pending count reaches the threshold', async () => {
+  it('pauses and notifies (in the user\'s language) once the pending count reaches the threshold', async () => {
     const { storageRemove } = mockDb({
       threshold: 3,
       pendingCount: 3,
-      updateData: { telegram_id: 100, allows_write_to_pm: true },
+      updateData: { telegram_id: 100, allows_write_to_pm: true, locale: 'ar' },
       photos: [{ id: 'photo-1' }, { id: 'photo-2' }],
     })
     const paused = await maybeAutoPauseForReports(REPORTED)
     expect(paused).toBe(true)
-    expect(notifyPaused).toHaveBeenCalledWith(100, null)
+    expect(notifyPaused).toHaveBeenCalledWith(100, 'ar')
     expect(db.storage.from).toHaveBeenCalledWith('profile-photos')
     expect(storageRemove).toHaveBeenCalledWith([`${REPORTED}/photo-1`, `${REPORTED}/photo-2`])
+  })
+
+  it('passes a null locale when the user has not picked a language yet', async () => {
+    mockDb({ threshold: 3, pendingCount: 3, updateData: { telegram_id: 100, allows_write_to_pm: true, locale: null } })
+    expect(await maybeAutoPauseForReports(REPORTED)).toBe(true)
+    expect(notifyPaused).toHaveBeenCalledWith(100, null)
   })
 
   it('does nothing below the threshold', async () => {

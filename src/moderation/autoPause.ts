@@ -39,7 +39,7 @@ export async function maybeAutoPauseForReports(reportedUserId: string): Promise<
       .eq('id', reportedUserId)
       .is('paused_at', null)
       .is('banned_at', null)
-      .select('telegram_id, allows_write_to_pm')
+      .select('telegram_id, allows_write_to_pm, locale')
       .maybeSingle()
     if (!data) return false
 
@@ -48,8 +48,7 @@ export async function maybeAutoPauseForReports(reportedUserId: string): Promise<
     // Telegram rejects DMs from bots the user never granted write access to;
     // a false flag means an explicit decline, so skip it (null = unknown, try).
     if (data.telegram_id > 0 && data.allows_write_to_pm !== false) {
-      // TODO(Task 4): pass real locale
-      Promise.resolve(notifyPaused(data.telegram_id, null)).catch((err) =>
+      Promise.resolve(notifyPaused(data.telegram_id, data.locale ?? null)).catch((err) =>
         console.error('[moderation] notifyPaused failed:', err?.message ?? err))
     }
     return true

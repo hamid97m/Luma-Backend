@@ -1,6 +1,7 @@
 import { db } from '../db.js'
 import { notifyNewMessage } from '../bot.js'
 import { shouldNotifyOffline, type NotifyRecipient } from './notifyGate.js'
+import type { Locale } from '../i18n/index.js'
 
 export type DeliveryRecipient = NotifyRecipient & { id: string }
 
@@ -32,8 +33,10 @@ export async function deliverMessageNotification(
 
     // Stamp notified_offline_at only after the send resolves — a blocked bot
     // shouldn't consume this offline stretch's one-notification allowance.
-    // TODO(Task 4): pass real locale
-    await notifyNewMessage(recipient.telegram_id as number, senderName, body, senderPhoto?.url ?? null, matchId, null)
+    await notifyNewMessage(
+      recipient.telegram_id as number, senderName, body, senderPhoto?.url ?? null, matchId,
+      (recipient.locale as Locale | null) ?? null,
+    )
     await db.from('users').update({ notified_offline_at: new Date().toISOString() }).eq('id', recipient.id)
   } catch (err) {
     log?.warn({ err }, 'failed to send offline notification')

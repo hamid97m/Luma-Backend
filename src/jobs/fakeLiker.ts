@@ -2,7 +2,7 @@ import { db } from '../db.js'
 import { notifyMatch, notifyNewLike } from '../bot.js'
 import { getFakeLikerConfig } from './fakeLikerConfig.js'
 import { deliverMessageNotification } from '../messaging/deliver.js'
-import { t } from '../i18n/index.js'
+import { tFor, type Locale } from '../i18n/index.js'
 
 export interface RunStats {
   likesSent: number
@@ -81,6 +81,7 @@ interface LikeTarget {
   gender: string
   telegram_id: number
   allows_write_to_pm: boolean | null
+  locale?: Locale | null
 }
 
 /**
@@ -132,8 +133,7 @@ async function likeTargetAndMatch(
   if (!reverse) {
     // Fake liked a real user without matching → send the "someone liked you" DM.
     if (target.telegram_id > 0 && target.allows_write_to_pm !== false) {
-      // TODO(Task 4): pass real locale
-      notifyNewLike(target.telegram_id, fake.name, null)
+      notifyNewLike(target.telegram_id, fake.name, target.locale ?? null)
         .catch((err) => logger.warn({ err }, 'fake liker: new-like notify failed'))
     }
     return
@@ -156,8 +156,7 @@ async function likeTargetAndMatch(
 
   // Notify the real user only (fakes have a negative sentinel telegram_id).
   if (target.telegram_id > 0 && target.allows_write_to_pm !== false) {
-    // TODO(Task 4): pass real locale
-    notifyMatch([{ telegramId: target.telegram_id, matchName: fake.name, matchPhoto: fakePhoto(fake.id), locale: null }])
+    notifyMatch([{ telegramId: target.telegram_id, matchName: fake.name, matchPhoto: fakePhoto(fake.id), locale: target.locale ?? null }])
       .catch((err) => logger.warn({ err }, 'fake liker: match notify failed'))
   }
 }
@@ -340,7 +339,7 @@ export async function runFakeLikerJob(
         const realIds = [...new Set(slice.map((p) => p.realId))]
         const { data: reals, error: realsErr } = await db
           .from('users')
-          .select('id, gender, telegram_id, allows_write_to_pm, is_seed, is_active, banned_at, deleted_at')
+          .select('id, gender, telegram_id, allows_write_to_pm, locale, is_seed, is_active, banned_at, deleted_at')
           .in('id', realIds)
         if (realsErr) {
           stats.errors++
@@ -359,7 +358,7 @@ export async function runFakeLikerJob(
               fake.counter++ // count the assignment immediately so load stays balanced
               await likeTargetAndMatch(
                 fake,
-                { id: real.id, gender: real.gender, telegram_id: real.telegram_id, allows_write_to_pm: real.allows_write_to_pm },
+                { id: real.id, gender: real.gender, telegram_id: real.telegram_id, allows_write_to_pm: real.allows_write_to_pm, locale: real.locale ?? null },
                 fakePhoto,
                 stats,
                 logger,
@@ -376,14 +375,14 @@ export async function runFakeLikerJob(
 
     // --- Target selection: page through eligible candidates, exclude any with a received like ---
     const cutoff = new Date(Date.now() - FOUR_HOURS_MS).toISOString()
-    const targets: Array<{ id: string; gender: string; telegram_id: number; allows_write_to_pm: boolean | null; location: string | null }> = []
+    const targets: Array<LikeTarget & { location: string | null }> = []
     let scanned = 0
     let offset = 0
 
     while (targets.length < remainingBudget && scanned < SCAN_CAP) {
       const { data: batch, error: batchErr } = await db
         .from('users')
-        .select('id, gender, telegram_id, allows_write_to_pm, location')
+        .select('id, gender, telegram_id, allows_write_to_pm, locale, location')
         .eq('is_seed', false)
         .eq('is_active', true)
         .is('banned_at', null)
@@ -495,7 +494,7 @@ export async function runFakeLikerJob(
 
       const { data: realUsers } = await db
         .from('users')
-        .select('id, telegram_id, deleted_at, banned_at, last_active, notified_offline_at, allows_write_to_pm')
+        .select('id, telegram_id, deleted_at, banned_at, last_active, notified_offline_at, allows_write_to_pm, locale')
         .in('id', [...realIds])
       const realMap = new Map((realUsers ?? []).map((u: any) => [u.id, u]))
 
@@ -533,9 +532,12 @@ export async function runFakeLikerJob(
           const fake = fakes.find((f) => f.id === fakeId)
           if (!fake) continue
 
+          // The greeting is written in the real user's language — they're the reader.
+          const realLocale = (real.locale as Locale | null) ?? null
+          const seedGreeting = tFor(realLocale).chat.seedGreeting
           const { error: msgErr } = await db
             .from('messages')
-            .insert({ match_id: m.id, sender_id: fakeId, body: t.chat.seedGreeting })
+            .insert({ match_id: m.id, sender_id: fakeId, body: seedGreeting })
           if (msgErr) {
             stats.errors++
             logger.warn({ err: msgErr, match: m.id }, 'fake liker: salam insert failed')
@@ -545,10 +547,10 @@ export async function runFakeLikerJob(
 
           // Offline-notify the real user (shared delivery logic).
           void deliverMessageNotification(
-            { id: realId, telegram_id: real.telegram_id, last_active: real.last_active, notified_offline_at: real.notified_offline_at, allows_write_to_pm: real.allows_write_to_pm },
+            { id: realId, telegram_id: real.telegram_id, last_active: real.last_active, notified_offline_at: real.notified_offline_at, allows_write_to_pm: real.allows_write_to_pm, locale: realLocale },
             fakeId,
             fake.name,
-            t.chat.seedGreeting,
+            seedGreeting,
             m.id,
             logger,
           )

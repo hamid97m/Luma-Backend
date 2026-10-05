@@ -103,7 +103,7 @@ export async function adminSupportRoutes(app: FastifyInstance) {
 
     const { data: ticket } = await db
       .from('support_tickets')
-      .select('id, user:users!support_tickets_user_id_fkey(telegram_id, allows_write_to_pm)')
+      .select('id, user:users!support_tickets_user_id_fkey(telegram_id, allows_write_to_pm, locale)')
       .eq('id', id)
       .maybeSingle()
     if (!ticket) return reply.status(404).send({ error: 'ticket_not_found' })
@@ -131,8 +131,7 @@ export async function adminSupportRoutes(app: FastifyInstance) {
         .order('created_at', { ascending: true })
         .limit(1)
         .maybeSingle()
-      // TODO(Task 4): pass real locale
-      notifyTicketReply(u.telegram_id, first?.body ?? '', text, null)
+      notifyTicketReply(u.telegram_id, first?.body ?? '', text, u.locale ?? null)
         .catch((err) => req.log.warn({ err }, 'failed to send ticket reply notification'))
     }
 

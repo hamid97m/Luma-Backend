@@ -5,7 +5,7 @@ import {
   notifyNewMessage, notifyGiftIntro, notifyPaymentChannel,
 } from '../bot.js'
 import { formatGiftPaidNotice } from '../payments/paymentNotify.js'
-import { t } from '../i18n/index.js'
+import { tFor, type Locale } from '../i18n/index.js'
 
 const CATALOG_TTL_MS = 5 * 60 * 1000
 let catalogCache: { at: number; gifts: { id: string; emoji: string | null; starCost: number }[] } | null = null
@@ -89,6 +89,9 @@ export async function createGiftCheckout(input: {
   }).select('id').single()
   if (error || !tx) return { error: 'checkout_failed' }
 
+  // Invoice copy follows the buyer's language (the buyer is the caller).
+  const { data: buyer } = await db.from('users').select('locale').eq('id', input.buyerId).maybeSingle()
+  const t = tFor((buyer?.locale as Locale | null) ?? null)
   const invoiceLink = await createGiftInvoiceLink(
     tx.id, t.gifts.invoiceTitle(gift.emoji ?? '🎁'), t.gifts.invoiceDescription, chargedStars,
   )
@@ -97,8 +100,11 @@ export async function createGiftCheckout(input: {
 
 export async function validatePreCheckout(payload: string, totalAmount: number, currency: string) {
   const { data: tx } = await db
-    .from('gift_transactions').select('status, charged_stars, gift_id').eq('id', payload).maybeSingle()
-  if (!tx) return { ok: false as const, reason: t.gifts.checkoutUnavailable }
+    .from('gift_transactions').select('status, charged_stars, gift_id, buyer_id').eq('id', payload).maybeSingle()
+  // Unknown tx → no buyer to look up, so the rejection falls back to Persian.
+  if (!tx) return { ok: false as const, reason: tFor(null).gifts.checkoutUnavailable }
+  const { data: buyer } = await db.from('users').select('locale').eq('id', tx.buyer_id).maybeSingle()
+  const t = tFor((buyer?.locale as Locale | null) ?? null)
   if (tx.status !== 'pending_payment') return { ok: false as const, reason: t.gifts.checkoutAlreadyProcessed }
   if (currency !== 'XTR' || totalAmount !== tx.charged_stars) return { ok: false as const, reason: t.gifts.checkoutPriceMismatch }
   const catalog = await loadRawCatalog()
@@ -115,9 +121,12 @@ export async function handleGiftPaid(payload: string, chargeId: string, buyerTel
     .select('id, buyer_id, recipient_id, context, match_id, gift_id, gift_emoji, note').maybeSingle()
   if (!tx) return // already handled or unknown
 
-  const { data: recipient } = await db.from('users').select('telegram_id, name').eq('id', tx.recipient_id).single()
+  const { data: recipient } = await db.from('users').select('telegram_id, name, locale').eq('id', tx.recipient_id).single()
   const { data: buyer } = await db.from('users').select('name').eq('id', tx.buyer_id).single()
   if (!recipient) { await failAndRefund(tx.id, buyerTelegramId, chargeId); return }
+  // DMs below go to the recipient, so they're worded in the recipient's language.
+  const recipientLocale = (recipient.locale as Locale | null) ?? null
+  const rt = tFor(recipientLocale)
 
   try {
     await sendGiftToUser(recipient.telegram_id, tx.gift_id, tx.note ?? undefined)
@@ -148,16 +157,14 @@ export async function handleGiftPaid(payload: string, chargeId: string, buyerTel
     })
     if (msgErr) console.error(`[gifts] failed to insert gift message for tx ${tx.id}:`, msgErr)
     if (recipient.telegram_id) {
-      // TODO(Task 4): pass real locale
-      notifyNewMessage(recipient.telegram_id, buyer?.name ?? t.notify.fallbackName, t.gifts.sentYouGift(tx.gift_emoji ?? '🎁'), null, undefined, null)
+      notifyNewMessage(recipient.telegram_id, buyer?.name ?? rt.notify.fallbackName, rt.gifts.sentYouGift(tx.gift_emoji ?? '🎁'), null, undefined, recipientLocale)
         .catch(() => {})
     }
   } else {
     const { error: introErr } = await db.from('gift_transactions').update({ intro_status: 'pending' }).eq('id', tx.id)
     if (introErr) console.error(`[gifts] failed to set intro_status for tx ${tx.id}:`, introErr)
     if (recipient.telegram_id) {
-      // TODO(Task 4): pass real locale
-      notifyGiftIntro(recipient.telegram_id, buyer?.name ?? t.notify.fallbackName, tx.gift_emoji ?? '🎁', null).catch(() => {})
+      notifyGiftIntro(recipient.telegram_id, buyer?.name ?? rt.notify.fallbackName, tx.gift_emoji ?? '🎁', recipientLocale).catch(() => {})
     }
   }
 }

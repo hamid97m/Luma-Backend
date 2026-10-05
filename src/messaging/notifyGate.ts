@@ -5,6 +5,8 @@ export interface NotifyRecipient {
   last_active: string | null
   notified_offline_at: string | null
   allows_write_to_pm: boolean | null
+  /** users.locale — drives the language of the DM; null/undefined → Persian. */
+  locale?: string | null
 }
 
 /**

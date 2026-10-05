@@ -80,7 +80,7 @@ export async function evaluateReferralRewards(referrerId: string): Promise<void>
 
     const { data: referrer } = await db
       .from('users')
-      .select('telegram_id, allows_write_to_pm')
+      .select('telegram_id, allows_write_to_pm, locale')
       .eq('id', referrerId)
       .single()
 
@@ -95,8 +95,7 @@ export async function evaluateReferralRewards(referrerId: string): Promise<void>
       else await grantPremiumDays(referrerId, milestone.rewardAmount)
 
       if (referrer && referrer.telegram_id > 0 && referrer.allows_write_to_pm !== false) {
-        // TODO(Task 4): pass real locale
-        await notifyReferralReward(referrer.telegram_id, milestone, null)
+        await notifyReferralReward(referrer.telegram_id, milestone, referrer.locale ?? null)
       }
     }
   } catch (err) {
@@ -131,12 +130,11 @@ export async function maybeQualifyReferral(userId: string): Promise<void> {
 
     const { data: referrer } = await db
       .from('users')
-      .select('telegram_id, allows_write_to_pm')
+      .select('telegram_id, allows_write_to_pm, locale')
       .eq('id', qualified.referrer_id)
       .single()
     if (referrer && referrer.telegram_id > 0 && referrer.allows_write_to_pm !== false) {
-      // TODO(Task 4): pass real locale
-      await notifyReferralQualified(referrer.telegram_id, user.name, null)
+      await notifyReferralQualified(referrer.telegram_id, user.name, referrer.locale ?? null)
     }
     await evaluateReferralRewards(qualified.referrer_id)
   } catch (err) {

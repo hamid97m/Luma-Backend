@@ -10,8 +10,8 @@ async function getUsableMatch(matchId: string, userId: string) {
     .from('matches')
     .select(`
       id, user1_id, user2_id,
-      user1:users!matches_user1_id_fkey(id, name, telegram_id, deleted_at, last_active, notified_offline_at, allows_write_to_pm, gender),
-      user2:users!matches_user2_id_fkey(id, name, telegram_id, deleted_at, last_active, notified_offline_at, allows_write_to_pm, gender)
+      user1:users!matches_user1_id_fkey(id, name, telegram_id, deleted_at, last_active, notified_offline_at, allows_write_to_pm, gender, locale),
+      user2:users!matches_user2_id_fkey(id, name, telegram_id, deleted_at, last_active, notified_offline_at, allows_write_to_pm, gender, locale)
     `)
     .eq('id', matchId)
     .single()
@@ -117,7 +117,7 @@ export async function messagesRoutes(app: FastifyInstance) {
     const me: any = match.user1_id === req.userId ? match.user1 : match.user2
 
     void deliverMessageNotification(
-      { id: other.id, telegram_id: other.telegram_id, last_active: other.last_active, notified_offline_at: other.notified_offline_at, allows_write_to_pm: other.allows_write_to_pm },
+      { id: other.id, telegram_id: other.telegram_id, last_active: other.last_active, notified_offline_at: other.notified_offline_at, allows_write_to_pm: other.allows_write_to_pm, locale: other.locale ?? null },
       req.userId,
       me.name,
       trimmed,

@@ -2,10 +2,25 @@ import { db } from '../db.js'
 import { createPremiumInvoiceLink, refundPremiumPayment, notifyPaymentChannel, notifyPremiumPurchased } from '../bot.js'
 import { formatPremiumPaidNotice } from '../payments/paymentNotify.js'
 import { schedulePurchaseCheckoutFollowup } from '../jobs/purchaseMessage.js'
-import { t } from '../i18n/index.js'
+import { tFor, type Locale } from '../i18n/index.js'
 
 export const PREMIUM_PAYLOAD_PREFIX = 'premium:'
 const DAY_MS = 24 * 60 * 60 * 1000
+
+export type PlanTranslations = Partial<Record<'en' | 'ar', { title?: string; description?: string }>>
+
+/** Plan title/description for a locale. Persian columns are the base; a
+ * translation overrides field-by-field, blank strings fall back. */
+export function planText(
+  plan: { title: string; description: string; translations?: PlanTranslations | null },
+  locale: Locale | null,
+): { title: string; description: string } {
+  const tr = locale && locale !== 'fa' ? plan.translations?.[locale] : undefined
+  return {
+    title: tr?.title?.trim() || plan.title,
+    description: tr?.description?.trim() || plan.description,
+  }
+}
 
 export function isPremiumActive(premiumUntil: string | null, nowMs = Date.now()): boolean {
   return !!premiumUntil && new Date(premiumUntil).getTime() > nowMs
@@ -44,21 +59,23 @@ export async function isPremiumEnabled(): Promise<boolean> {
 export async function getPremiumStatus(userId: string) {
   const [{ data: cfg }, { data: me }, { data: plans }] = await Promise.all([
     db.from('premium_config').select('premium_enabled').eq('id', true).single(),
-    db.from('users').select('premium_until').eq('id', userId).single(),
+    db.from('users').select('premium_until, locale').eq('id', userId).single(),
     db.from('premium_plans')
-      .select('id, title, description, price_stars, discount_percent, discount_ends_at, duration_days')
+      .select('id, title, description, translations, price_stars, discount_percent, discount_ends_at, duration_days')
       .eq('is_active', true)
       .order('sort_order', { ascending: true }),
   ])
+  const locale = (me?.locale as Locale | null) ?? null
   return {
     enabled: cfg?.premium_enabled === true,
     premiumUntil: me?.premium_until ?? null,
     plans: (plans ?? []).map((p: any) => {
       const active = discountActive(p.discount_percent, p.discount_ends_at)
+      const text = planText(p, locale)
       return {
         id: p.id,
-        title: p.title,
-        description: p.description,
+        title: text.title,
+        description: text.description,
         priceStars: active ? chargedPrice(p.price_stars, p.discount_percent) : p.price_stars,
         originalPriceStars: active ? p.price_stars : null,
         discountPercent: active ? p.discount_percent : null,
@@ -74,10 +91,17 @@ export async function createPremiumCheckout(userId: string, planId: string) {
 
   const { data: plan } = await db
     .from('premium_plans')
-    .select('id, title, description, price_stars, discount_percent, discount_ends_at, duration_days')
+    .select('id, title, description, translations, price_stars, discount_percent, discount_ends_at, duration_days')
     .eq('id', planId).eq('is_active', true)
     .maybeSingle()
   if (!plan) return { error: 'plan_unavailable' }
+
+  // Invoice copy follows the buyer's language; the stored plan_title is the
+  // same localized text so the receipt/admin view matches what they saw.
+  const { data: buyer } = await db.from('users').select('locale').eq('id', userId).maybeSingle()
+  const locale = (buyer?.locale as Locale | null) ?? null
+  const text = planText(plan, locale)
+  const t = tFor(locale)
 
   // Recompute the discount at checkout time (not what was shown when the paywall loaded) and
   // snapshot the charged amount — an invoice created seconds before expiry is still honored later.
@@ -86,14 +110,14 @@ export async function createPremiumCheckout(userId: string, planId: string) {
     : plan.price_stars
 
   const { data: tx, error } = await db.from('premium_transactions').insert({
-    user_id: userId, plan_id: plan.id, plan_title: plan.title,
+    user_id: userId, plan_id: plan.id, plan_title: text.title,
     price_stars: chargeStars, duration_days: plan.duration_days,
     status: 'pending_payment', source: 'purchase',
   }).select('id').single()
   if (error || !tx) return { error: 'checkout_failed' }
 
   const invoiceLink = await createPremiumInvoiceLink(
-    tx.id, plan.title, plan.description || t.premium.invoiceDescriptionFallback(plan.duration_days), chargeStars,
+    tx.id, text.title, text.description || t.premium.invoiceDescriptionFallback(plan.duration_days), chargeStars,
   )
 
   // Per-payment abandoned-checkout nudge: check back in ~5 min and, if this is
@@ -106,8 +130,11 @@ export async function createPremiumCheckout(userId: string, planId: string) {
 
 export async function validatePremiumPreCheckout(transactionId: string, totalAmount: number, currency: string) {
   const { data: tx } = await db
-    .from('premium_transactions').select('status, price_stars').eq('id', transactionId).maybeSingle()
-  if (!tx) return { ok: false as const, reason: t.premium.checkoutUnavailable }
+    .from('premium_transactions').select('status, price_stars, user_id').eq('id', transactionId).maybeSingle()
+  // Unknown tx → no buyer to look up, so the rejection falls back to Persian.
+  if (!tx) return { ok: false as const, reason: tFor(null).premium.checkoutUnavailable }
+  const { data: buyer } = await db.from('users').select('locale').eq('id', tx.user_id).maybeSingle()
+  const t = tFor((buyer?.locale as Locale | null) ?? null)
   if (tx.status !== 'pending_payment') return { ok: false as const, reason: t.premium.checkoutAlreadyProcessed }
   if (currency !== 'XTR' || totalAmount !== tx.price_stars) return { ok: false as const, reason: t.premium.checkoutPriceMismatch }
   return { ok: true as const }
@@ -122,7 +149,7 @@ export async function handlePremiumPaid(transactionId: string, chargeId: string,
     .select('id, user_id, duration_days').maybeSingle()
   if (!tx) return // already handled or unknown
 
-  const { data: user } = await db.from('users').select('premium_until, name').eq('id', tx.user_id).single()
+  const { data: user } = await db.from('users').select('premium_until, name, locale').eq('id', tx.user_id).single()
   if (!user) { await failAndRefund(tx.id, buyerTelegramId, chargeId); return }
 
   const { error: updErr } = await db
@@ -140,8 +167,7 @@ export async function handlePremiumPaid(transactionId: string, chargeId: string,
     at: new Date().toISOString(),
   })).catch(() => {})
 
-  // TODO(Task 4): pass real locale
-  notifyPremiumPurchased(buyerTelegramId, tx.duration_days, null)
+  notifyPremiumPurchased(buyerTelegramId, tx.duration_days, (user.locale as Locale | null) ?? null)
     .catch((err) => console.error('[premium] buyer DM failed:', err?.message ?? err))
 }
 

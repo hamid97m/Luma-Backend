@@ -30,6 +30,7 @@ function mockMatchLookup(overrides: Partial<{
   otherDeletedAt: string | null
   otherLastActive: string | null
   otherNotifiedOfflineAt: string | null
+  otherLocale: string | null
   blocked: boolean
 }> = {}) {
   const {
@@ -38,6 +39,7 @@ function mockMatchLookup(overrides: Partial<{
     otherDeletedAt = null,
     otherLastActive = RECENT,
     otherNotifiedOfflineAt = null,
+    otherLocale = 'en',
     blocked = false,
   } = overrides
   vi.mocked(db.from).mockReturnValueOnce({
@@ -53,12 +55,14 @@ function mockMatchLookup(overrides: Partial<{
               deleted_at: user1_id === USER_ID ? null : otherDeletedAt,
               last_active: user1_id === USER_ID ? RECENT : otherLastActive,
               notified_offline_at: user1_id === USER_ID ? null : otherNotifiedOfflineAt,
+              locale: user1_id === USER_ID ? 'fa' : otherLocale,
             },
             user2: {
               id: user2_id, name: 'Sara', telegram_id: OTHER_TELEGRAM_ID,
               deleted_at: user2_id === OTHER_ID ? otherDeletedAt : null,
               last_active: user2_id === OTHER_ID ? otherLastActive : RECENT,
               notified_offline_at: user2_id === OTHER_ID ? otherNotifiedOfflineAt : null,
+              locale: user2_id === OTHER_ID ? otherLocale : 'fa',
             },
           },
         }),
@@ -270,9 +274,30 @@ describe('POST /matches/:matchId/messages', () => {
     // Flush the fire-and-forget notify chain before asserting on it.
     await new Promise((resolve) => setImmediate(resolve))
 
-    // 5th arg is the matchId so the DM button deep-links straight to this chat.
-    expect(notifyNewMessage).toHaveBeenCalledWith(OTHER_TELEGRAM_ID, 'Ali', 'hi', 'https://ali.jpg', MATCH_ID, null)
+    // 5th arg is the matchId so the DM button deep-links straight to this chat;
+    // 6th is the RECIPIENT's locale (Sara's 'en', not the sender's 'fa').
+    expect(notifyNewMessage).toHaveBeenCalledWith(OTHER_TELEGRAM_ID, 'Ali', 'hi', 'https://ali.jpg', MATCH_ID, 'en')
     expect(markUpdateEq).toHaveBeenCalledWith('id', OTHER_ID)
+  })
+
+  it('passes a null locale when the offline recipient has not picked a language yet', async () => {
+    setupAuth()
+    mockMatchLookup({ otherLastActive: STALE, otherNotifiedOfflineAt: null, otherLocale: null })
+    mockChatGateExempt()
+    vi.mocked(db.from).mockReturnValueOnce({
+      insert: () => ({ select: () => ({ single: () => ({
+        data: { id: 'm4', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z', reply_to_message_id: null }, error: null,
+      }) }) }),
+    } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ order: () => ({ limit: () => ({ maybeSingle: () => ({ data: null }) }) }) }) }),
+    } as any)
+    vi.mocked(db.from).mockReturnValueOnce({ update: () => ({ eq: vi.fn().mockResolvedValue({ error: null }) }) } as any)
+
+    const res = await app.inject({ method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi' } })
+    expect(res.statusCode).toBe(200)
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(notifyNewMessage).toHaveBeenCalledWith(OTHER_TELEGRAM_ID, 'Ali', 'hi', null, MATCH_ID, null)
   })
 
   it('does not send an offline notification when the recipient is online', async () => {

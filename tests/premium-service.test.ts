@@ -11,6 +11,7 @@ import {
   getPremiumStatus, createPremiumCheckout,
 } from '../src/premium/service.js'
 import { chainable } from './admin-helpers.js'
+import { en } from '../src/i18n/en.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -80,16 +81,57 @@ describe('getPremiumStatus', () => {
       { id: 'p4', title: '12 Months', description: '', priceStars: 300, discountPercent: null, originalPriceStars: null, discountEndsAt: null, durationDays: 365 },
     ])
   })
+
+  it('localizes plan copy from translations for the viewer\'s locale, falling back per field', async () => {
+    const plansLog: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_config') return chainable({ data: { premium_enabled: true } })
+      if (table === 'users') return chainable({ data: { premium_until: null, locale: 'en' } })
+      if (table === 'premium_plans') return chainable({ data: [
+        { id: 'p1', title: 'یک ماهه', description: 'شروع خوب', translations: { en: { title: '1 Month', description: 'Good start' } },
+          price_stars: 100, discount_percent: null, discount_ends_at: null, duration_days: 30 },
+        { id: 'p2', title: 'سه ماهه', description: 'بهترین', translations: { en: { title: '3 Months', description: '  ' } },
+          price_stars: 150, discount_percent: null, discount_ends_at: null, duration_days: 90 },
+        { id: 'p3', title: 'شش ماهه', description: '', translations: null,
+          price_stars: 200, discount_percent: null, discount_ends_at: null, duration_days: 180 },
+      ] }, plansLog)
+      return chainable({ data: null })
+    })
+    const res = await getPremiumStatus('u1')
+    expect(res.plans.map((p) => [p.title, p.description])).toEqual([
+      ['1 Month', 'Good start'],
+      ['3 Months', 'بهترین'],   // blank translated description → Persian base
+      ['شش ماهه', ''],          // no translations → Persian base
+    ])
+    // The query must actually fetch the jsonb column, or planText never sees a translation.
+    const select = plansLog.find((e) => e.method === 'select')
+    expect(String(select?.args[0])).toContain('translations')
+  })
+
+  it('keeps Persian copy for a viewer whose locale is still NULL', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_config') return chainable({ data: { premium_enabled: true } })
+      if (table === 'users') return chainable({ data: { premium_until: null, locale: null } })
+      if (table === 'premium_plans') return chainable({ data: [
+        { id: 'p1', title: 'یک ماهه', description: 'شروع خوب', translations: { en: { title: '1 Month', description: 'Good start' } },
+          price_stars: 100, discount_percent: null, discount_ends_at: null, duration_days: 30 },
+      ] })
+      return chainable({ data: null })
+    })
+    const res = await getPremiumStatus('u1')
+    expect(res.plans[0]).toMatchObject({ title: 'یک ماهه', description: 'شروع خوب' })
+  })
 })
 
 describe('createPremiumCheckout', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  function mockDb(opts: { enabled: boolean; plan: any; insertData?: any }) {
+  function mockDb(opts: { enabled: boolean; plan: any; insertData?: any; buyer?: any }) {
     const inserts: any[] = []
     vi.mocked(db.from).mockImplementation((table: string) => {
       if (table === 'premium_config') return chainable({ data: { premium_enabled: opts.enabled } })
       if (table === 'premium_plans') return chainable({ data: opts.plan })
+      if (table === 'users') return chainable({ data: opts.buyer ?? { locale: null } })
       if (table === 'premium_transactions') {
         return {
           insert: (payload: any) => { inserts.push(payload); return chainable({ data: opts.insertData ?? { id: 'tx1' }, error: null }) },
@@ -154,5 +196,33 @@ describe('createPremiumCheckout', () => {
     const res = await createPremiumCheckout('u1', 'p1')
     expect(inserts[0]).toMatchObject({ price_stars: 100 })
     expect(createPremiumInvoiceLink).toHaveBeenCalledWith('tx1', '1 Month', 'Best start', 100)
+  })
+
+  it('builds the invoice and snapshots plan_title in the buyer\'s language', async () => {
+    const inserts = mockDb({
+      enabled: true,
+      buyer: { locale: 'en' },
+      plan: {
+        id: 'p1', title: 'یک ماهه', description: 'شروع خوب',
+        translations: { en: { title: '1 Month', description: 'Good start' } },
+        price_stars: 100, discount_percent: null, discount_ends_at: null, duration_days: 30,
+      },
+    })
+    await createPremiumCheckout('u1', 'p1')
+    expect(inserts[0]).toMatchObject({ plan_title: '1 Month' })
+    expect(createPremiumInvoiceLink).toHaveBeenCalledWith('tx1', '1 Month', 'Good start', 100)
+  })
+
+  it('uses the localized description fallback when the plan has no description', async () => {
+    mockDb({
+      enabled: true,
+      buyer: { locale: 'en' },
+      plan: {
+        id: 'p1', title: 'یک ماهه', description: '', translations: { en: { title: '1 Month' } },
+        price_stars: 100, discount_percent: null, discount_ends_at: null, duration_days: 30,
+      },
+    })
+    await createPremiumCheckout('u1', 'p1')
+    expect(createPremiumInvoiceLink).toHaveBeenCalledWith('tx1', '1 Month', en.premium.invoiceDescriptionFallback(30), 100)
   })
 })

@@ -20,8 +20,8 @@ describe('admin pause/unpause', () => {
     headers = { authorization: `Bearer ${signAdminToken({ adminId: 'a1', username: 'root' })}` }
   })
 
-  it('pauses a user, sets paused_at, deletes their photos, and DMs them', async () => {
-    const update = vi.fn(() => chainable({ data: { telegram_id: 100, allows_write_to_pm: true }, error: null }))
+  it('pauses a user, sets paused_at, deletes their photos, and DMs them in their language', async () => {
+    const update = vi.fn(() => chainable({ data: { telegram_id: 100, allows_write_to_pm: true, locale: 'en' }, error: null }))
     const photos = [{ id: 'photo-1' }, { id: 'photo-2' }]
     vi.mocked(db.from).mockImplementation((table: string) => {
       if (table === 'users') return { update } as any
@@ -35,9 +35,22 @@ describe('admin pause/unpause', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ ok: true })
     expect((update.mock.calls[0][0] as any).paused_at).toBeTruthy()
-    expect(notifyPaused).toHaveBeenCalledWith(100, null)
+    expect(notifyPaused).toHaveBeenCalledWith(100, 'en')
     expect(db.storage.from).toHaveBeenCalledWith('profile-photos')
     expect(storageRemove).toHaveBeenCalledWith(['u1/photo-1', 'u1/photo-2'])
+  })
+
+  it('DMs a user with no stored locale with a null locale (Persian)', async () => {
+    const update = vi.fn(() => chainable({ data: { telegram_id: 100, allows_write_to_pm: true, locale: null }, error: null }))
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') return { update } as any
+      return chainable({ data: null, error: null })
+    })
+    vi.mocked(db.storage.from).mockImplementation(() => ({ remove: vi.fn().mockResolvedValue({ error: null }) } as any))
+
+    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/pause', headers })
+    expect(res.statusCode).toBe(200)
+    expect(notifyPaused).toHaveBeenCalledWith(100, null)
   })
 
   it('unpauses a user (clears paused_at, no DM, no photo deletion)', async () => {

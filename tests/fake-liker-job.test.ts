@@ -309,7 +309,7 @@ describe('runFakeLikerJob — match creation', () => {
       fake_liker_config: enabledConfig(),
       users: [
         mkFake('f1', { name: 'Sara' }),
-        mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', telegram_id: 555, last_active: RECENT }),
+        mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', telegram_id: 555, last_active: RECENT, locale: 'en' }),
       ],
       // target already liked the fake → reverse like present
       swipes: [{ swiper_id: 't1', swiped_id: 'f1', direction: 'like' }],
@@ -323,8 +323,9 @@ describe('runFakeLikerJob — match creation', () => {
     // sorted: 'f1' < 't1'
     expect(logs.inserts.matches[0]).toMatchObject({ user1_id: 'f1', user2_id: 't1' })
     expect(notifyMatch).toHaveBeenCalledTimes(1)
+    // The DM carries the REAL user's locale (fakes have none).
     expect(notifyMatch).toHaveBeenCalledWith([
-      { telegramId: 555, matchName: 'Sara', matchPhoto: 'https://p/f1.jpg', locale: null },
+      { telegramId: 555, matchName: 'Sara', matchPhoto: 'https://p/f1.jpg', locale: 'en' },
     ])
   })
 
@@ -368,7 +369,7 @@ describe('runFakeLikerJob — like-back phase', () => {
       users: [
         mkFake('f1', { name: 'Ava' }),
         mkFake('f2', { name: 'Bea' }),
-        mkUser('r1', { gender: 'man', looking_for: 'both', telegram_id: 777, last_active: RECENT }),
+        mkUser('r1', { gender: 'man', looking_for: 'both', telegram_id: 777, last_active: RECENT, locale: 'ar' }),
       ],
       // r1 liked f2 specifically (not f1)
       swipes: [{ swiper_id: 'r1', swiped_id: 'f2', direction: 'like' }],
@@ -383,7 +384,7 @@ describe('runFakeLikerJob — like-back phase', () => {
     expect(logs.inserts.swipes).toEqual([{ swiper_id: 'f2', swiped_id: 'r1', direction: 'like' }])
     expect(logs.inserts.matches[0]).toMatchObject({ user1_id: 'f2', user2_id: 'r1' }) // 'f2' < 'r1'
     expect(notifyMatch).toHaveBeenCalledWith([
-      { telegramId: 777, matchName: 'Bea', matchPhoto: 'https://p/f2.jpg', locale: null },
+      { telegramId: 777, matchName: 'Bea', matchPhoto: 'https://p/f2.jpg', locale: 'ar' },
     ])
   })
 
@@ -514,7 +515,7 @@ describe('runFakeLikerJob — new-like notification', () => {
       fake_liker_config: enabledConfig(),
       users: [
         mkFake('f1', { name: 'Sara' }),
-        mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', telegram_id: 777 }),
+        mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', telegram_id: 777, locale: 'en' }),
       ],
       user_photos: [{ user_id: 'f1', url: 'https://p/f1.jpg', position: 0 }],
     }
@@ -524,6 +525,21 @@ describe('runFakeLikerJob — new-like notification', () => {
 
     expect(res.likesSent).toBe(1)
     expect(res.matchesCreated).toBe(0)
+    expect(notifyNewLike).toHaveBeenCalledWith(777, 'Sara', 'en')
+  })
+
+  it('passes a null locale for a target who has not picked a language yet', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1', { name: 'Sara' }),
+        mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', telegram_id: 777, locale: null }),
+      ],
+      user_photos: [{ user_id: 'f1', url: 'https://p/f1.jpg', position: 0 }],
+    }
+    useStore(store)
+    await runFakeLikerJob('schedule', silent)
+    await flush()
     expect(notifyNewLike).toHaveBeenCalledWith(777, 'Sara', null)
   })
 

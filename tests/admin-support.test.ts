@@ -51,7 +51,7 @@ describe('admin support', () => {
       if (table === 'support_tickets') {
         return {
           select: () => chainable({
-            data: { id: 't1', user: { telegram_id: 555, allows_write_to_pm: true } }, error: null,
+            data: { id: 't1', user: { telegram_id: 555, allows_write_to_pm: true, locale: 'en' } }, error: null,
           }),
           update: ticketUpdate,
         } as any
@@ -73,7 +73,7 @@ describe('admin support', () => {
     expect(res.statusCode).toBe(200)
     expect((msgInsert.mock.calls[0][0] as any)).toMatchObject({ ticket_id: 't1', sender: 'admin', admin_id: 'a1', body: 'hi' })
     expect((ticketUpdate.mock.calls[0][0] as any)).toMatchObject({ last_sender: 'admin', status: 'open' })
-    expect(notifyTicketReply).toHaveBeenCalledWith(555, 'help me', 'hi', null)
+    expect(notifyTicketReply).toHaveBeenCalledWith(555, 'help me', 'hi', 'en')
   })
 
   it('rejects an empty reply', async () => {

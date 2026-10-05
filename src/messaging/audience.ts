@@ -1,3 +1,5 @@
+import { isLocale } from '../i18n/index.js'
+
 const DAY_MS = 86_400_000
 
 export interface BroadcastFilters {
@@ -5,6 +7,8 @@ export interface BroadcastFilters {
   lookingFor?: string[]
   activity?: { activeWithinDays?: number; inactiveOverDays?: number }
   premium?: 'premium' | 'free'
+  /** `users.locale` values ('fa' | 'en' | 'ar'); unknown values are ignored, empty = no filter. */
+  locales?: string[]
 }
 
 export interface BroadcastTarget {
@@ -25,6 +29,8 @@ export function applyAudienceFilters(query: any, filters: BroadcastFilters, nowM
 
   if (filters.genders?.length) query = query.in('gender', filters.genders)
   if (filters.lookingFor?.length) query = query.in('looking_for', filters.lookingFor)
+  const locales = (filters.locales ?? []).filter(isLocale)
+  if (locales.length) query = query.in('locale', locales)
 
   const activeWithin = filters.activity?.activeWithinDays
   if (activeWithin != null) {

@@ -160,6 +160,38 @@ describe('admin broadcasts', () => {
     expect(res.json().config.kind).toBe('text')
   })
 
+  it('PUT purchase-message saves translations (text) and clears them (forward)', async () => {
+    const updates: any[] = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'purchase_message_config') {
+        return {
+          select: () => chainable({ data: PURCHASE_CFG_ROW, error: null }),
+          update: (p: any) => { updates.push(p); return chainable({ data: { ...PURCHASE_CFG_ROW, ...p }, error: null }) },
+        } as any
+      }
+      if (table === 'purchase_message_sends') return chainable({ count: 5, error: null })
+      return chainable(null)
+    })
+    const translations = { en: { message: 'Come back!', buttonTitle: 'Plans' } }
+    const res = await app.inject({ method: 'PUT', url: '/admin/broadcasts/purchase-message', headers,
+      payload: { enabled: true, kind: 'text', message: 'come back', translations } })
+    expect(res.statusCode).toBe(200)
+    expect(updates[0].translations).toEqual(translations)
+    expect(res.json().config.translations).toEqual(translations)
+
+    const fwd = await app.inject({ method: 'PUT', url: '/admin/broadcasts/purchase-message', headers,
+      payload: { enabled: false, kind: 'forward', link: 'https://t.me/mychannel/9' } })
+    expect(fwd.statusCode).toBe(200)
+    expect(updates[1].translations).toEqual({})
+  })
+
+  it('PUT purchase-message rejects malformed translations', async () => {
+    const res = await app.inject({ method: 'PUT', url: '/admin/broadcasts/purchase-message', headers,
+      payload: { enabled: true, kind: 'text', message: 'come back', translations: { de: { message: 'x' } } } })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('invalid_translations')
+  })
+
   it('PUT purchase-message rejects an empty message when enabled', async () => {
     const res = await app.inject({ method: 'PUT', url: '/admin/broadcasts/purchase-message', headers, payload: { enabled: true, kind: 'text', message: '  ' } })
     expect(res.statusCode).toBe(400)

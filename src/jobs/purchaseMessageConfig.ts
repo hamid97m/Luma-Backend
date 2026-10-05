@@ -1,5 +1,10 @@
 import { db } from '../db.js'
 import type { MessageButton } from '../messaging/messageButton.js'
+import type { Locale } from '../i18n/index.js'
+
+/** Per-language copy for the text kind. Persian is the base `message`/`button.title`;
+ * `fa` is never a key here. */
+export type PurchaseMessageTranslations = Partial<Record<'en' | 'ar', { message?: string; buttonTitle?: string }>>
 
 export interface PurchaseMessageConfig {
   enabled: boolean
@@ -9,9 +14,10 @@ export interface PurchaseMessageConfig {
   sourceMessageId: number | null
   button: MessageButton | null
   activeSince: string | null
+  translations: PurchaseMessageTranslations
 }
 
-const COLS = 'enabled, kind, message, source_chat_id, source_message_id, button, active_since'
+const COLS = 'enabled, kind, message, source_chat_id, source_message_id, button, active_since, translations'
 
 function serialize(row: any): PurchaseMessageConfig {
   return {
@@ -22,7 +28,20 @@ function serialize(row: any): PurchaseMessageConfig {
     sourceMessageId: row.source_message_id ?? null,
     button: (row.button as MessageButton | null) ?? null,
     activeSince: row.active_since ?? null,
+    translations: (row.translations as PurchaseMessageTranslations | null) ?? {},
   }
+}
+
+/** Text + button for a recipient's locale (text kind only). Persian base is
+ * the fallback; blank translations fall back field-by-field. */
+export function resolvePurchaseMessage(
+  cfg: PurchaseMessageConfig, locale: Locale | null,
+): { text: string; button: MessageButton | null } {
+  const tr = locale && locale !== 'fa' ? cfg.translations?.[locale] : undefined
+  const text = tr?.message?.trim() || (cfg.message ?? '').trim()
+  const title = tr?.buttonTitle?.trim()
+  const button = cfg.button ? (title ? { ...cfg.button, title } : cfg.button) : null
+  return { text, button }
 }
 
 /** Reads the purchase_message_config singleton. Never throws: a missing
@@ -49,6 +68,7 @@ export interface PurchaseMessageConfigPatch {
   sourceChatId?: string | null
   sourceMessageId?: number | null
   button?: MessageButton | null
+  translations?: PurchaseMessageTranslations
 }
 
 /** Updates the singleton. When `enabled` transitions false→true, stamps
@@ -75,6 +95,7 @@ export async function updatePurchaseMessageConfig(
     if (patch.sourceChatId !== undefined) updates.source_chat_id = patch.sourceChatId
     if (patch.sourceMessageId !== undefined) updates.source_message_id = patch.sourceMessageId
     if (patch.button !== undefined) updates.button = patch.button
+    if (patch.translations !== undefined) updates.translations = patch.translations
 
     const { data, error } = await dbClient
       .from('purchase_message_config')

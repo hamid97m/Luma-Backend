@@ -1,19 +1,46 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../../db.js'
-import { extendPremiumUntil } from '../../premium/service.js'
+import { extendPremiumUntil, type PlanTranslations } from '../../premium/service.js'
 
-const PLAN_SELECT = 'id, title, description, price_stars, discount_percent, discount_ends_at, duration_days, is_active, sort_order, created_at'
+const PLAN_SELECT = 'id, title, description, translations, price_stars, discount_percent, discount_ends_at, duration_days, is_active, sort_order, created_at'
 const PAGE_SIZE = 25
 const TX_STATUSES = ['pending_payment', 'paid', 'refunded']
 const TX_SOURCES = ['purchase', 'admin_grant', 'referral']
+const TRANSLATABLE_LOCALES = ['en', 'ar'] as const
 
 function isPositiveInt(n: unknown): n is number {
   return typeof n === 'number' && Number.isInteger(n) && n > 0
 }
 
+/** `{ en?: {title?, description?}, ar?: {...} }` with the same length caps as the base fields.
+ * Persian lives in the base columns, so `fa` is not an accepted key. */
+function parseTranslations(raw: unknown): { error: string } | { value: PlanTranslations } {
+  if (raw === undefined || raw === null) return { value: {} }
+  if (typeof raw !== 'object' || Array.isArray(raw)) return { error: 'invalid_translations' }
+  const out: PlanTranslations = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!(TRANSLATABLE_LOCALES as readonly string[]).includes(k)) return { error: 'invalid_translations' }
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) return { error: 'invalid_translations' }
+    const { title, description } = v as { title?: unknown; description?: unknown }
+    const entry: { title?: string; description?: string } = {}
+    if (title !== undefined) {
+      if (typeof title !== 'string' || title.length > 32) return { error: 'invalid_translations' }
+      if (title.trim()) entry.title = title.trim()
+    }
+    if (description !== undefined) {
+      if (typeof description !== 'string' || description.length > 255) return { error: 'invalid_translations' }
+      if (description.trim()) entry.description = description.trim()
+    }
+    // Blank strings fall back to Persian at read time anyway; don't persist them.
+    if (Object.keys(entry).length) out[k as 'en' | 'ar'] = entry
+  }
+  return { value: out }
+}
+
 function planToJson(p: any) {
   return {
     id: p.id, title: p.title, description: p.description,
+    translations: p.translations ?? {},
     priceStars: p.price_stars, discountPercent: p.discount_percent ?? null,
     discountEndsAt: p.discount_ends_at ?? null,
     durationDays: p.duration_days, isActive: p.is_active, sortOrder: p.sort_order,
@@ -71,6 +98,11 @@ function parsePlanBody(body: Record<string, unknown>, partial: boolean): { error
   if (body.sortOrder !== undefined) {
     if (typeof body.sortOrder !== 'number' || !Number.isInteger(body.sortOrder)) return { error: 'invalid_sort_order' }
     row.sort_order = body.sortOrder
+  }
+  if (body.translations !== undefined) {
+    const tr = parseTranslations(body.translations)
+    if ('error' in tr) return { error: tr.error }
+    row.translations = tr.value
   }
   return { row }
 }

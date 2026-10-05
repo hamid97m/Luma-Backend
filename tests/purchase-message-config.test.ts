@@ -65,4 +65,18 @@ describe('updatePurchaseMessageConfig', () => {
     expect(captured.updates.source_chat_id).toBe('-1001')
     expect(captured.updates.source_message_id).toBe(2)
   })
+
+  it('writes translations and serializes them back (missing column → {})', async () => {
+    const captured: { updates?: any } = {}
+    const translations = { en: { message: 'Come back!', buttonTitle: 'Plans' } }
+    const db = makeDb({ enabled: true, kind: 'text', active_since: null, translations: null }, captured)
+    const res = await updatePurchaseMessageConfig({ translations }, db, NOW)
+    expect(captured.updates.translations).toEqual(translations)
+    expect(res?.translations).toEqual(translations)
+
+    const untouched: { updates?: any } = {}
+    const res2 = await updatePurchaseMessageConfig({ message: 'hi' }, makeDb({ enabled: true, kind: 'text' }, untouched), NOW)
+    expect('translations' in untouched.updates).toBe(false)
+    expect(res2?.translations).toEqual({})
+  })
 })

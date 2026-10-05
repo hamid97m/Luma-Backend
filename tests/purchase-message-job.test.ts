@@ -139,6 +139,18 @@ describe('maybeSendPurchaseMessageForUser (per-payment path)', () => {
     expect(sendText).not.toHaveBeenCalled()
   })
 
+  it('sends the translated text and button title for a non-Persian recipient', async () => {
+    const inserts: any[] = []
+    const db = buildDb({ paid: [], pending: [{ id: 'tx1' }], sent: [], users: [{ id: 'u1', telegram_id: 999, locale: 'en' }], inserts })
+    const sendText = vi.fn(() => Promise.resolve())
+    const cfg: Cfg = {
+      ...textCfg, button: { kind: 'screen', screen: 'plans', title: 'طرح‌ها' } as any,
+      translations: { en: { message: 'Come back!', buttonTitle: 'Plans' } },
+    }
+    await maybeSendPurchaseMessageForUser('u1', { db, getConfig: async () => cfg, sendText })
+    expect(sendText).toHaveBeenCalledWith(999, 'Come back!', { kind: 'screen', screen: 'plans', title: 'Plans' })
+  })
+
   it('forwards when kind=forward', async () => {
     const inserts: any[] = []
     const db = buildDb({ paid: [], pending: [{ id: 'tx1' }], sent: [], users: [{ id: 'u1', telegram_id: 888 }], inserts })

@@ -14,7 +14,7 @@ const PLAN_ROW = {
   created_at: '2026-08-05T00:00:00Z',
 }
 const PLAN_JSON = {
-  id: 'p1', title: '1 Month', description: 'Best start', priceStars: 100,
+  id: 'p1', title: '1 Month', description: 'Best start', translations: {}, priceStars: 100,
   discountPercent: null, discountEndsAt: null, durationDays: 30, isActive: true, sortOrder: 0,
   createdAt: '2026-08-05T00:00:00Z',
 }
@@ -306,6 +306,31 @@ describe('admin premium', () => {
     const res = await app.inject({ method: 'DELETE', url: '/admin/premium/plans/unknown', headers })
     expect(res.statusCode).toBe(404)
     expect(res.json()).toEqual({ error: 'plan_not_found' })
+  })
+
+  it('stores and returns plan translations', async () => {
+    const inserts: any[] = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_plans') {
+        return { insert: (row: any) => { inserts.push(row); return chainable({ data: { ...PLAN_ROW, translations: row.translations }, error: null }) } } as any
+      }
+      return chainable({ data: null })
+    })
+    const translations = { en: { title: '1 Month', description: 'Best start' } }
+    const res = await app.inject({ method: 'POST', url: '/admin/premium/plans', headers,
+      payload: { title: 'یک ماهه', description: '', priceStars: 100, durationDays: 30, translations } })
+    expect(res.statusCode).toBe(201)
+    expect(inserts[0].translations).toEqual(translations)
+    expect(res.json().translations).toEqual(translations)
+  })
+
+  it('rejects malformed translations', async () => {
+    for (const translations of [{ de: { title: 'x' } }, 'en', ['en'], { en: 'x' }, { en: { title: 'X'.repeat(33) } }]) {
+      const res = await app.inject({ method: 'POST', url: '/admin/premium/plans', headers,
+        payload: { title: 'x', priceStars: 1, durationDays: 1, translations } })
+      expect(res.statusCode).toBe(400)
+      expect(res.json()).toEqual({ error: 'invalid_translations' })
+    }
   })
 })
 

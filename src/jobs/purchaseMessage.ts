@@ -1,6 +1,7 @@
 import { db } from '../db.js'
 import { sendBroadcastMessage, forwardBroadcastMessage } from '../bot.js'
-import { getPurchaseMessageConfig, type PurchaseMessageConfig } from './purchaseMessageConfig.js'
+import { getPurchaseMessageConfig, resolvePurchaseMessage, type PurchaseMessageConfig } from './purchaseMessageConfig.js'
+import type { Locale } from '../i18n/index.js'
 
 // The message goes out ~5 min after a checkout starts (the per-payment path).
 export const FOLLOWUP_DELAY_MS = 5 * 60 * 1000
@@ -20,7 +21,8 @@ export interface PurchaseMessageStats {
   failed: number
 }
 
-type Deliver = (telegramId: number) => Promise<void>
+type Target = { id: string; telegram_id: number; locale: string | null }
+type Deliver = (target: Pick<Target, 'telegram_id' | 'locale'>) => Promise<void>
 type Logger = { info?: (...a: any[]) => void; warn?: (...a: any[]) => void; error?: (...a: any[]) => void }
 
 export interface PurchaseMessageDeps {
@@ -50,10 +52,11 @@ function isDeliverable(cfg: PurchaseMessageConfig): boolean {
 function buildDeliver(cfg: PurchaseMessageConfig, deps: PurchaseMessageDeps): Deliver {
   const sendText = deps.sendText ?? sendBroadcastMessage
   const forward = deps.forward ?? forwardBroadcastMessage
-  return (telegramId: number) =>
-    cfg.kind === 'forward'
-      ? forward(telegramId, cfg.sourceChatId!, cfg.sourceMessageId!)
-      : sendText(telegramId, cfg.message!.trim(), cfg.button ?? undefined)
+  return (target) => {
+    if (cfg.kind === 'forward') return forward(target.telegram_id, cfg.sourceChatId!, cfg.sourceMessageId!)
+    const { text, button } = resolvePurchaseMessage(cfg, (target.locale as Locale | null) ?? null)
+    return sendText(target.telegram_id, text, button ?? undefined)
+  }
 }
 
 /** Atomically claim a user by inserting their sends row BEFORE sending. The
@@ -76,11 +79,11 @@ async function releaseClaim(dbClient: any, userId: string) {
 /** Claim → deliver → finalize one recipient. 403 records 'blocked' (never retry);
  * a transient error releases the claim so a later run/timer retries. */
 async function deliverToUser(
-  dbClient: any, deliver: Deliver, target: { id: string; telegram_id: number }, stats: PurchaseMessageStats, log?: Logger,
+  dbClient: any, deliver: Deliver, target: Target, stats: PurchaseMessageStats, log?: Logger,
 ) {
   if (!(await claimUser(dbClient, target.id))) return // someone else has it (or transient insert error)
   try {
-    await deliver(target.telegram_id)
+    await deliver(target)
     stats.sent++
   } catch (err) {
     if (isBlocked(err)) {
@@ -99,7 +102,7 @@ async function deliverToUser(
  * and is a messageable real user. Returns null otherwise. */
 async function loadEligibleTargetForUser(
   dbClient: any, activeSince: string, userId: string,
-): Promise<{ id: string; telegram_id: number } | null> {
+): Promise<Target | null> {
   const { data: paid } = await dbClient
     .from('premium_transactions').select('id')
     .eq('user_id', userId).eq('source', 'purchase').eq('status', 'paid').limit(1)
@@ -116,7 +119,7 @@ async function loadEligibleTargetForUser(
   if (sent?.length) return null
 
   const { data: users } = await dbClient
-    .from('users').select('id, telegram_id')
+    .from('users').select('id, telegram_id, locale')
     .eq('id', userId).eq('is_seed', false).is('banned_at', null).is('deleted_at', null)
     .gt('telegram_id', 0).or('allows_write_to_pm.is.null,allows_write_to_pm.eq.true').limit(1)
   return users?.[0] ?? null
@@ -206,11 +209,11 @@ export async function runPurchaseMessageJob(deps: RunPurchaseMessageJobDeps = {}
   if (freshIds.length === 0) return empty
 
   const { data: users, error: usersErr } = await dbClient
-    .from('users').select('id, telegram_id')
+    .from('users').select('id, telegram_id, locale')
     .in('id', freshIds).eq('is_seed', false).is('banned_at', null).is('deleted_at', null)
     .gt('telegram_id', 0).or('allows_write_to_pm.is.null,allows_write_to_pm.eq.true').limit(cap)
   if (usersErr) throw usersErr
-  const targets = (users ?? []) as { id: string; telegram_id: number }[]
+  const targets = (users ?? []) as Target[]
 
   const stats: PurchaseMessageStats = { eligible: targets.length, sent: 0, blocked: 0, failed: 0 }
   const deliver = buildDeliver(cfg, deps)

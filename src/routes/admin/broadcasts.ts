@@ -5,9 +5,38 @@ import { runBroadcast } from '../../messaging/broadcast.js'
 import { sendBroadcastMessage, forwardBroadcastMessage, verifyForwardSource } from '../../bot.js'
 import { validateButton } from '../../messaging/messageButton.js'
 import { parseChannelMessageLink } from '../../messaging/channelLink.js'
-import { getPurchaseMessageConfig, updatePurchaseMessageConfig, type PurchaseMessageConfig } from '../../jobs/purchaseMessageConfig.js'
+import {
+  getPurchaseMessageConfig, updatePurchaseMessageConfig,
+  type PurchaseMessageConfig, type PurchaseMessageTranslations,
+} from '../../jobs/purchaseMessageConfig.js'
 
 const MAX_MESSAGE_LEN = 4096
+const MAX_BUTTON_TITLE_LEN = 64
+
+/** `{ en?: {message?, buttonTitle?}, ar?: {...} }` for the text kind. Persian is the
+ * base `message`/button title, so `fa` is not an accepted key. */
+function parsePurchaseTranslations(raw: unknown): { error: string } | { value: PurchaseMessageTranslations } {
+  if (raw === null || raw === undefined) return { value: {} }
+  if (typeof raw !== 'object' || Array.isArray(raw)) return { error: 'invalid_translations' }
+  const out: PurchaseMessageTranslations = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (k !== 'en' && k !== 'ar') return { error: 'invalid_translations' }
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) return { error: 'invalid_translations' }
+    const { message, buttonTitle } = v as { message?: unknown; buttonTitle?: unknown }
+    const entry: { message?: string; buttonTitle?: string } = {}
+    if (message !== undefined) {
+      if (typeof message !== 'string' || message.length > MAX_MESSAGE_LEN) return { error: 'invalid_translations' }
+      if (message.trim()) entry.message = message.trim()
+    }
+    if (buttonTitle !== undefined) {
+      if (typeof buttonTitle !== 'string' || buttonTitle.length > MAX_BUTTON_TITLE_LEN) return { error: 'invalid_translations' }
+      if (buttonTitle.trim()) entry.buttonTitle = buttonTitle.trim()
+    }
+    // Blank strings fall back to Persian at send time anyway; don't persist them.
+    if (Object.keys(entry).length) out[k] = entry
+  }
+  return { value: out }
+}
 
 function serializePurchaseConfig(cfg: PurchaseMessageConfig | null, sentCount: number) {
   return {
@@ -16,6 +45,7 @@ function serializePurchaseConfig(cfg: PurchaseMessageConfig | null, sentCount: n
     // For forward, `message` holds the t.me link the admin pasted; for text, the body.
     message: cfg?.message ?? '',
     button: cfg?.button ?? null,
+    translations: cfg?.translations ?? {},
     activeSince: cfg?.activeSince ?? null,
     sentCount,
   }
@@ -163,7 +193,7 @@ export async function adminBroadcastsRoutes(app: FastifyInstance) {
 
   app.put('/broadcasts/purchase-message', async (req, reply) => {
     const body = req.body as {
-      enabled?: boolean; kind?: string; message?: string; link?: string; button?: unknown
+      enabled?: boolean; kind?: string; message?: string; link?: string; button?: unknown; translations?: unknown
     }
     const enabled = !!body.enabled
     const isForward = body.kind === 'forward'
@@ -190,6 +220,7 @@ export async function adminBroadcastsRoutes(app: FastifyInstance) {
       patch.sourceChatId = parsed.chatId
       patch.sourceMessageId = parsed.messageId
       patch.button = null
+      patch.translations = {}
     } else {
       const trimmed = (body.message ?? '').trim()
       if (enabled && !trimmed) return reply.status(400).send({ error: 'empty_message' })
@@ -201,6 +232,11 @@ export async function adminBroadcastsRoutes(app: FastifyInstance) {
       patch.sourceChatId = null
       patch.sourceMessageId = null
       patch.button = btn.button ?? null
+      if (body.translations !== undefined) {
+        const tr = parsePurchaseTranslations(body.translations)
+        if ('error' in tr) return reply.status(400).send({ error: tr.error })
+        patch.translations = tr.value
+      }
     }
 
     const cfg = await updatePurchaseMessageConfig(patch, db)

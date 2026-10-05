@@ -51,4 +51,15 @@ describe('applyAudienceFilters', () => {
     const log = applyWithLog({ premium: 'free' })
     expect(has(log, 'or', (a) => a[0] === `premium_until.is.null,premium_until.lte.${new Date(NOW).toISOString()}`)).toBe(true)
   })
+
+  it('maps locales to .in(locale) and omits it when absent', () => {
+    expect(has(applyWithLog({ locales: ['en', 'ar'] }), 'in', (a) => a[0] === 'locale' && JSON.stringify(a[1]) === '["en","ar"]')).toBe(true)
+    expect(has(applyWithLog({}), 'in', (a) => a[0] === 'locale')).toBe(false)
+    expect(has(applyWithLog({ locales: [] }), 'in', (a) => a[0] === 'locale')).toBe(false)
+  })
+
+  it('ignores unknown locale values', () => {
+    expect(has(applyWithLog({ locales: ['de', 'en'] }), 'in', (a) => a[0] === 'locale' && JSON.stringify(a[1]) === '["en"]')).toBe(true)
+    expect(has(applyWithLog({ locales: ['de'] }), 'in', (a) => a[0] === 'locale')).toBe(false)
+  })
 })

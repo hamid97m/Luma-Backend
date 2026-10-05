@@ -257,6 +257,8 @@ describe('DELETE /profile/me', () => {
       name: '', bio: null, interests: [], location: null,
       icebreaker_prompt: null, icebreaker_answer: null,
       age: 0, is_active: false,
+      // NULL = "never chose a language" → a re-signup gets the picker again.
+      locale: null,
     }))
     expect(updateMock.mock.calls[0][0].deleted_at).toEqual(expect.any(String))
   })

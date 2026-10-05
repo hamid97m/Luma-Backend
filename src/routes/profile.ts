@@ -158,6 +158,9 @@ export async function profileRoutes(app: FastifyInstance) {
       icebreaker_answer: null,
       age: 0,
       is_active: false,
+      // NULL = "never chose a language": a re-signup goes through the
+      // first-open picker again instead of inheriting the old choice.
+      locale: null,
       deleted_at: new Date().toISOString(),
     }).eq('id', req.userId)
 

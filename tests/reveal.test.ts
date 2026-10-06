@@ -177,6 +177,20 @@ describe('ensureDailyReveal', () => {
     await expect(ensureDailyReveal(WOMAN, NOW)).resolves.toEqual({ applies: true, swiperId: 'ali' })
     expect(notifyNewLike).not.toHaveBeenCalled()
   })
+
+  it('still returns the reveal when the like DM fails', async () => {
+    vi.mocked(getIncomingLikers).mockResolvedValue([liker('ali', '2026-10-01T00:00:00.000Z')] as any)
+    vi.mocked(notifyNewLike).mockRejectedValue(new Error('Telegram down'))
+    mockWoman({
+      candidates: [userRow('ali', { lastActive: '2026-10-07T09:00:00.000Z' })],
+      photos: [{ user_id: 'ali' }],
+    })
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await expect(ensureDailyReveal(WOMAN, NOW)).resolves.toEqual({ applies: true, swiperId: 'ali' })
+    expect(notifyNewLike).toHaveBeenCalledTimes(1)
+    expect(errSpy).toHaveBeenCalled()
+    errSpy.mockRestore()
+  })
 })
 
 describe('hiddenIncomingLikerIds', () => {

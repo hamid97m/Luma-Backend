@@ -108,8 +108,12 @@ export async function ensureDailyReveal(userId: string, now = new Date()): Promi
 
   const name = (await db.from('users').select('name').eq('id', picked.id).maybeSingle()).data as { name?: string } | null
   if (viewer.telegram_id > 0 && viewer.allows_write_to_pm !== false) {
-    await notifyNewLike(viewer.telegram_id, name?.name ?? '', (viewer.locale as 'fa' | 'en' | 'ar' | null) ?? null)
-    await db.from('like_reveals').update({ notified_at: new Date().toISOString() }).eq('user_id', userId).eq('revealed_on', today)
+    try {
+      await notifyNewLike(viewer.telegram_id, name?.name ?? '', (viewer.locale as 'fa' | 'en' | 'ar' | null) ?? null)
+      await db.from('like_reveals').update({ notified_at: new Date().toISOString() }).eq('user_id', userId).eq('revealed_on', today)
+    } catch (err) {
+      console.error(err)
+    }
   }
   return { applies: true, swiperId: picked.id }
 }

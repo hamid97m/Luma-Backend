@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
-import { interleaveBatch, shuffle, isSameCity } from '../discoveryRanking.js'
+import { interleaveBatch, shuffle, isSameCity, orderByProximity } from '../discoveryRanking.js'
 import { getSwipeLimitStatus } from '../premium/swipeLimit.js'
 import { getDirectChatStatus } from '../premium/directChatLimit.js'
 import { isPremiumActive } from '../premium/service.js'
@@ -9,7 +9,7 @@ const BATCH_SIZE = 10
 const MAX_LIKER_SLOTS = 4
 // Which batch slots likers get. This only controls whether likers make it
 // *into* the 10-profile batch (they shouldn't be crowded out) — the final
-// batch is shuffled before returning, so it does not fix their display order.
+// batch is re-ordered by proximity, so it does not fix their display order.
 const LIKER_POSITIONS = [0, 1, 2, 3]
 // Fetch more than we show so the per-request shuffle varies *which* profiles
 // surface across refreshes, not just their order. Ordered by last_active first,
@@ -23,19 +23,19 @@ const MAX_LIKER_IDS = 500
 
 // user_photos!inner makes the embed an INNER JOIN, so users with zero photos
 // are excluded from discovery entirely — an incomplete/abandoned profile (no
-// photo uploaded) must never surface as a blank card. geo_city/geo_country are
-// ranking-only and are deliberately left out of the response below.
+// photo uploaded) must never surface as a blank card. geo_city/geo_country/
+// locale are ranking-only and are deliberately left out of the response below.
 const PROFILE_COLUMNS =
-  'id, name, age, bio, telegram_id, interests, location, geo_city, geo_country, premium_until, user_photos!inner(id, url, position)'
+  'id, name, age, bio, telegram_id, interests, location, geo_city, geo_country, locale, premium_until, user_photos!inner(id, url, position)'
 
 export async function discoveryRoutes(app: FastifyInstance) {
   app.get('/discovery', async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
-    // Get viewer's preference, gender and city
+    // Get viewer's preference, gender, city/country and app language
     const { data: viewer } = await db
       .from('users')
-      .select('looking_for, gender, location, geo_city, geo_country')
+      .select('looking_for, gender, location, geo_city, geo_country, locale')
       .eq('id', req.userId)
       .single()
 
@@ -167,8 +167,21 @@ export async function discoveryRoutes(app: FastifyInstance) {
       sameCountry = shuffle(data ?? [])
     }
 
-    // Tier 4: everyone else, most recently active first
-    const allPickedIds = [...cityPickedIds, ...sameCountry.map((p: any) => p.id)]
+    // Tier 4: same app language (users.locale), when the viewer has one
+    const countryPickedIds = [...cityPickedIds, ...sameCountry.map((p: any) => p.id)]
+    let sameLanguage: any[] = []
+    if (viewer.locale) {
+      const { data, error } = await profileQuery()
+        .eq('locale', viewer.locale)
+        .not('id', 'in', `(${countryPickedIds.join(',')})`)
+        .order('last_active', { ascending: false })
+        .limit(FILLER_POOL)
+      if (error) return reply.status(500).send({ error: 'discovery_failed' })
+      sameLanguage = shuffle(data ?? [])
+    }
+
+    // Tier 5: everyone else, most recently active first
+    const allPickedIds = [...countryPickedIds, ...sameLanguage.map((p: any) => p.id)]
     const { data: rest, error } = await profileQuery()
       .not('id', 'in', `(${allPickedIds.join(',')})`)
       .order('last_active', { ascending: false })
@@ -176,9 +189,13 @@ export async function discoveryRoutes(app: FastifyInstance) {
 
     if (error) return reply.status(500).send({ error: 'discovery_failed' })
 
-    // Build the batch (likers boosted in so they're not crowded out), then
-    // shuffle the whole 10 so nobody — likers included — is pinned to the top.
-    const merged = shuffle(interleaveBatch(likers, [sameCity, sameCountry, shuffle(rest ?? [])], BATCH_SIZE, LIKER_POSITIONS))
+    // Build the batch (likers boosted in so they're not crowded out), then show
+    // it closest-first: same city, same country, same language, rest — random
+    // within each tier, likers placed in their own tier rather than pinned.
+    const merged = orderByProximity(
+      viewer,
+      interleaveBatch(likers, [sameCity, sameCountry, sameLanguage, shuffle(rest ?? [])], BATCH_SIZE, LIKER_POSITIONS),
+    )
 
     // Seed/fake profiles come last: only when real candidates can't fill the
     // batch do we top up with seeds, appended at the tail (never shuffled in

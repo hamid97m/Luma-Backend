@@ -3,7 +3,7 @@
 /**
  * Merge the discovery tiers into one batch. Likers occupy `likerPositions`
  * (skipped, not left as gaps, when likers run out); remaining slots are filled
- * from `fillerTiers` in priority order (same city, same country, rest).
+ * from `fillerTiers` in priority order (same city, country, language, rest).
  * Duplicates are kept in their highest tier only.
  */
 export function interleaveBatch<T extends { id: string }>(
@@ -54,4 +54,19 @@ type Located = { geo_city?: string | null; geo_country?: string | null }
  */
 export function isSameCity(a: Located, b: Located): boolean {
   return Boolean(a.geo_city && a.geo_country && a.geo_city === b.geo_city && a.geo_country === b.geo_country)
+}
+
+type Ranked = Located & { locale?: string | null }
+
+/** 0 same city, 1 same country, 2 same app language, 3 everyone else. */
+export function proximityRank(viewer: Ranked, p: Ranked): number {
+  if (isSameCity(viewer, p)) return 0
+  if (viewer.geo_country && p.geo_country === viewer.geo_country) return 1
+  if (viewer.locale && p.locale === viewer.locale) return 2
+  return 3
+}
+
+/** Display order: closest tier first, random within a tier. */
+export function orderByProximity<T extends Ranked>(viewer: Ranked, profiles: T[]): T[] {
+  return shuffle([...profiles]).sort((a, b) => proximityRank(viewer, a) - proximityRank(viewer, b))
 }

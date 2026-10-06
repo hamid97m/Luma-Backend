@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { interleaveBatch, shuffle, isSameCity } from '../src/discoveryRanking.js'
+import { interleaveBatch, shuffle, isSameCity, proximityRank, orderByProximity } from '../src/discoveryRanking.js'
 
 const p = (id: string) => ({ id })
 const ids = (arr: { id: string }[]) => arr.map((x) => x.id)
@@ -70,6 +70,37 @@ describe('isSameCity', () => {
 
   it('never matches on country alone', () => {
     expect(isSameCity({ geo_city: null, geo_country: 'IR' }, { geo_city: null, geo_country: 'IR' })).toBe(false)
+  })
+})
+
+describe('proximityRank / orderByProximity', () => {
+  const viewer = { geo_city: 'Tehran', geo_country: 'IR', locale: 'fa' }
+  const city = { id: 'city', geo_city: 'Tehran', geo_country: 'IR', locale: 'en' }
+  const country = { id: 'country', geo_city: 'Mashhad', geo_country: 'IR', locale: 'en' }
+  const language = { id: 'language', geo_city: 'Dubai', geo_country: 'AE', locale: 'fa' }
+  const rest = { id: 'rest', geo_city: null, geo_country: null, locale: 'en' }
+
+  it('ranks city, then country, then language, then everyone else', () => {
+    expect([city, country, language, rest].map((p) => proximityRank(viewer, p))).toEqual([0, 1, 2, 3])
+  })
+
+  it('does not count a missing viewer language as a match', () => {
+    expect(proximityRank({ locale: null }, { locale: null })).toBe(3)
+  })
+
+  it('orders closest first regardless of input order', () => {
+    for (let i = 0; i < 20; i++) {
+      expect(ids(orderByProximity(viewer, [rest, language, country, city]))).toEqual(['city', 'country', 'language', 'rest'])
+    }
+  })
+
+  it('keeps every profile and only varies order within a tier', () => {
+    const a = { ...country, id: 'a' }
+    const b = { ...country, id: 'b' }
+    const out = ids(orderByProximity(viewer, [rest, a, b, city]))
+    expect(out[0]).toBe('city')
+    expect(out.slice(1, 3).sort()).toEqual(['a', 'b'])
+    expect(out[3]).toBe('rest')
   })
 })
 

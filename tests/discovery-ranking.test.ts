@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { interleaveBatch, escapeIlike, shuffle, isSameCity } from '../src/discoveryRanking.js'
+import { interleaveBatch, shuffle, isSameCity } from '../src/discoveryRanking.js'
 
 const p = (id: string) => ({ id })
 const ids = (arr: { id: string }[]) => arr.map((x) => x.id)
@@ -54,28 +54,22 @@ describe('interleaveBatch', () => {
 })
 
 describe('isSameCity', () => {
-  it('matches on the normalized city and country, whatever was typed', () => {
-    expect(isSameCity(
-      { location: 'تهران', geo_city: 'Tehran', geo_country: 'IR' },
-      { location: 'tehran', geo_city: 'Tehran', geo_country: 'IR' },
-    )).toBe(true)
+  it('matches on the normalized city and country', () => {
+    expect(isSameCity({ geo_city: 'Tehran', geo_country: 'IR' }, { geo_city: 'Tehran', geo_country: 'IR' })).toBe(true)
   })
 
   it('does not match the same city name in a different country', () => {
-    expect(isSameCity(
-      { location: 'Paris', geo_city: 'Paris', geo_country: 'FR' },
-      { location: 'Paris TX', geo_city: 'Paris', geo_country: 'US' },
-    )).toBe(false)
+    expect(isSameCity({ geo_city: 'Paris', geo_country: 'FR' }, { geo_city: 'Paris', geo_country: 'US' })).toBe(false)
   })
 
-  it('falls back to the typed text when a side is unresolved', () => {
-    expect(isSameCity({ location: ' Tehran ' }, { location: 'tehran', geo_city: null, geo_country: null })).toBe(true)
-    expect(isSameCity({ location: 'Tehran' }, { location: 'Mashhad' })).toBe(false)
+  it('never matches an unresolved side, even with identical typed text', () => {
+    const typedOnly = { location: 'Tehran', geo_city: null, geo_country: null }
+    expect(isSameCity(typedOnly, typedOnly)).toBe(false)
+    expect(isSameCity(typedOnly, { geo_city: 'Tehran', geo_country: 'IR' })).toBe(false)
   })
 
-  it('never matches an empty location', () => {
-    expect(isSameCity({ location: '' }, { location: '' })).toBe(false)
-    expect(isSameCity({ location: null }, { location: null })).toBe(false)
+  it('never matches on country alone', () => {
+    expect(isSameCity({ geo_city: null, geo_country: 'IR' }, { geo_city: null, geo_country: 'IR' })).toBe(false)
   })
 })
 
@@ -90,16 +84,5 @@ describe('shuffle', () => {
   it('handles empty and single-element arrays', () => {
     expect(shuffle([])).toEqual([])
     expect(shuffle(['only'])).toEqual(['only'])
-  })
-})
-
-describe('escapeIlike', () => {
-  it('escapes %, _, and backslash', () => {
-    expect(escapeIlike('a%b_c\\d')).toBe('a\\%b\\_c\\\\d')
-  })
-
-  it('leaves plain city names unchanged', () => {
-    expect(escapeIlike('Tehran')).toBe('Tehran')
-    expect(escapeIlike('تهران')).toBe('تهران')
   })
 })

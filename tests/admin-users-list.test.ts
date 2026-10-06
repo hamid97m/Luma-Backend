@@ -11,6 +11,7 @@ const USER_ROW = {
   id: 'u1', telegram_id: 42, username: 'sara', name: 'Sara', age: 24,
   gender: 'woman', is_active: true, is_seed: false, banned_at: null,
   deleted_at: null, created_at: '2026-08-01T00:00:00Z', last_active: '2026-08-04T00:00:00Z',
+  geo_city: 'Tehran', geo_country: 'IR',
 }
 
 describe('GET /admin/users', () => {
@@ -41,6 +42,7 @@ describe('GET /admin/users', () => {
       id: 'u1', telegramId: 42, username: 'sara', name: 'Sara', age: 24,
       gender: 'woman', isActive: true, isSeed: false, bannedAt: null,
       deletedAt: null, createdAt: '2026-08-01T00:00:00Z', lastActive: '2026-08-04T00:00:00Z',
+      geoCity: 'Tehran', geoCountry: 'IR',
     })
     expect(body.total).toBe(42)
     expect(body.page).toBe(2)

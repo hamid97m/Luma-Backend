@@ -27,6 +27,8 @@ export function toListItem(u: any) {
     deletedAt: u.deleted_at,
     createdAt: u.created_at,
     lastActive: u.last_active,
+    geoCity: u.geo_city ?? null,
+    geoCountry: u.geo_country ?? null,
   }
 }
 
@@ -39,7 +41,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     let q: any = db
       .from('users')
       .select(
-        'id, telegram_id, username, name, age, gender, looking_for, is_active, is_seed, banned_at, paused_at, deleted_at, created_at, last_active',
+        'id, telegram_id, username, name, age, gender, looking_for, is_active, is_seed, banned_at, paused_at, deleted_at, created_at, last_active, geo_city, geo_country',
         { count: 'exact' }
       )
 

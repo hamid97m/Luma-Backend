@@ -46,21 +46,12 @@ export function shuffle<T>(arr: T[]): T[] {
   return arr
 }
 
-type Located = { location?: string | null; geo_city?: string | null; geo_country?: string | null }
+type Located = { geo_city?: string | null; geo_country?: string | null }
 
 /**
- * Same-city test for the "nearby" badge: both resolved to the same city in the
- * same country, or (when either side is unresolved) the same typed text.
+ * Same-city test for the "nearby" badge: both resolved to the same normalized
+ * city in the same country. The typed location is never compared.
  */
 export function isSameCity(a: Located, b: Located): boolean {
-  if (a.geo_city && a.geo_country && a.geo_city === b.geo_city && a.geo_country === b.geo_country) {
-    return true
-  }
-  const ta = (a.location ?? '').trim().toLowerCase()
-  return ta.length > 0 && ta === (b.location ?? '').trim().toLowerCase()
-}
-
-/** Escape ILIKE wildcards so a free-text value matches literally. */
-export function escapeIlike(value: string): string {
-  return value.replace(/[\\%_]/g, (m) => `\\${m}`)
+  return Boolean(a.geo_city && a.geo_country && a.geo_city === b.geo_city && a.geo_country === b.geo_country)
 }

@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
-import { interleaveBatch, escapeIlike, shuffle, isSameCity } from '../discoveryRanking.js'
+import { interleaveBatch, shuffle, isSameCity } from '../discoveryRanking.js'
 import { getSwipeLimitStatus } from '../premium/swipeLimit.js'
 import { getDirectChatStatus } from '../premium/directChatLimit.js'
 import { isPremiumActive } from '../premium/service.js'
@@ -137,17 +137,16 @@ export async function discoveryRoutes(app: FastifyInstance) {
       likers = shuffle(data ?? []).slice(0, MAX_LIKER_SLOTS)
     }
 
-    // Tier 2: same city — the hidden DeepSeek-normalized city when the viewer's
-    // is resolved, else a case-insensitive exact match on the typed location.
+    // Tier 2: same city. Ranking uses only the hidden normalized geo_city /
+    // geo_country, never the typed location — an unresolved viewer skips it.
     const likerPickedIds = [...excludeIds, ...likers.map((p: any) => p.id)]
-    const city = (viewer.location ?? '').trim()
     const geoCountry: string | null = viewer.geo_country ?? null
     const geoCity: string | null = geoCountry ? viewer.geo_city ?? null : null
     let sameCity: any[] = []
-    if (geoCity || city) {
-      let q = profileQuery()
-      q = geoCity ? q.eq('geo_country', geoCountry).eq('geo_city', geoCity) : q.ilike('location', escapeIlike(city))
-      const { data, error } = await q
+    if (geoCity) {
+      const { data, error } = await profileQuery()
+        .eq('geo_country', geoCountry)
+        .eq('geo_city', geoCity)
         .not('id', 'in', `(${likerPickedIds.join(',')})`)
         .order('last_active', { ascending: false })
         .limit(FILLER_POOL)
@@ -207,8 +206,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
       location: p.location ?? null,
       // Boolean only — the expiry timestamp stays server-side.
       premium: isPremiumActive(p.premium_until ?? null),
-      // "همین نزدیکی" badge only when the candidate shares the viewer's city
-      // (same normalized city, or same typed text when either is unresolved).
+      // "همین نزدیکی" badge only when both resolve to the same normalized city.
       nearby: isSameCity(viewer, p),
       photos: (p.user_photos as any[])
         .sort((a, b) => a.position - b.position)

@@ -250,9 +250,9 @@ describe('GET /discovery', () => {
   it('includes the liker, same-city, and rest profiles in the batch (order shuffled)', async () => {
     setupAuth()
 
-    // viewer — has a location so the city tier runs
+    // viewer — resolved geo so the city and country tiers run
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women', location: 'Tehran' }, error: null }) }) }),
+      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women', location: 'Tehran', geo_city: 'Tehran', geo_country: 'IR' }, error: null }) }) }),
     } as any)
     // recent swipes — empty
     vi.mocked(db.from).mockReturnValueOnce({
@@ -273,6 +273,8 @@ describe('GET /discovery', () => {
     // Each tier's profileQuery chain (now includes .gt('age', 0)) → chainable
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('liker-1', 'Tehran')], error: null }))
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('city-1', 'Tehran')], error: null }))
+    // same-country tier — nobody extra
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('rest-1', 'Mashhad')], error: null }))
     // seed top-up — 3 real profiles (< 10) still triggers it; no seeds so the
     // batch stays real-only. Seeds would otherwise land at the tail.
@@ -335,6 +337,39 @@ describe('GET /discovery', () => {
       expect(p).not.toHaveProperty('geo_city')
       expect(p).not.toHaveProperty('geo_country')
     }
+  })
+
+  it('ignores the typed city when the viewer has no resolved geo', async () => {
+    setupAuth()
+
+    // viewer typed a city but it is not resolved → no city/country tier, no text matching
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women', location: 'Tehran', geo_city: null, geo_country: null }, error: null }) }) }),
+    } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
+    } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ or: () => ({ data: [], error: null }) }),
+    } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+    } as any)
+    const restLog: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockReturnValueOnce(chainable({
+      data: [{ id: 'rest-1', name: 'N', age: 25, bio: null, telegram_id: 1, interests: [], location: 'Tehran', geo_city: null, geo_country: null, user_photos: [] }],
+      error: null,
+    }, restLog))
+    mockSeedTopUp()
+
+    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+
+    expect(res.statusCode).toBe(200)
+    // auth + viewer + swipes + blocks + likerSwipes + rest + seed — no city tier
+    expect(vi.mocked(db.from)).toHaveBeenCalledTimes(7)
+    expect(restLog.find((c) => c.method === 'ilike')).toBeUndefined()
+    // same typed text, but unresolved → not "nearby"
+    expect(res.json().profiles[0].nearby).toBe(false)
   })
 
   it('appends seed/fake profiles at the tail when real users run low', async () => {

@@ -6,6 +6,10 @@ vi.mock('../src/premium/swipeLimit.js', () => ({
   getSwipeLimitStatus: vi.fn().mockResolvedValue({ limited: false, resetAt: null }),
 }))
 vi.mock('../src/premium/directChatLimit.js', () => ({ getDirectChatStatus: vi.fn() }))
+vi.mock('../src/likes/reveal.js', () => ({
+  hiddenIncomingLikerIds: vi.fn().mockResolvedValue([]),
+  ensureDailyReveal: vi.fn(),
+}))
 
 import { buildApp } from '../src/server.js'
 import { verifyInitData } from '../src/auth.js'

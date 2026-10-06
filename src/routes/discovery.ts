@@ -4,6 +4,7 @@ import { interleaveBatch, shuffle, isSameCity, orderByProximity } from '../disco
 import { getSwipeLimitStatus } from '../premium/swipeLimit.js'
 import { getDirectChatStatus } from '../premium/directChatLimit.js'
 import { isPremiumActive } from '../premium/service.js'
+import { hiddenIncomingLikerIds } from '../likes/reveal.js'
 
 const BATCH_SIZE = 10
 const MAX_LIKER_SLOTS = 4
@@ -66,10 +67,13 @@ export async function discoveryRoutes(app: FastifyInstance) {
       b.blocker_id === req.userId ? b.blocked_id : b.blocker_id
     )
 
+    const hiddenLikers = await hiddenIncomingLikerIds(req.userId)
+
     const excludeIds = [
       req.userId,
       ...(recentSwipes?.map((s: { swiped_id: string }) => s.swiped_id) ?? []),
       ...blockedIds,
+      ...hiddenLikers,
     ]
     const excluded = new Set(excludeIds)
 

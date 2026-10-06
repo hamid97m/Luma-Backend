@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
-import { maybeAutoPauseForReports } from '../moderation/autoPause.js'
+import { maybeAutoPauseForReports, maybeWarnFakePhoto } from '../moderation/autoPause.js'
 
 const REASONS = ['fake', 'inappropriate', 'harassment', 'spam', 'other'] as const
 const CONTEXTS = ['discovery', 'chat'] as const
@@ -64,6 +64,13 @@ export async function reportsRoutes(app: FastifyInstance) {
       { blocker_id: req.userId, blocked_id: reportedUserId },
       { onConflict: 'blocker_id,blocked_id', ignoreDuplicates: true }
     )
+
+    // A new fake-photo report may be the one that crosses half the pause
+    // threshold. Best-effort — never fails the report. Skipped on a duplicate
+    // pending report so the warning is not sent again.
+    if (!insertErr && reason === 'fake') {
+      await maybeWarnFakePhoto(reportedUserId)
+    }
 
     // Auto-pause the reported user for photo re-verification once they cross
     // the admin-set report threshold. Best-effort — never fails the report.

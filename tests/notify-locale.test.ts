@@ -10,7 +10,7 @@ vi.mock('grammy', () => ({
 vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 
 import {
-  notifyMatch, notifyNewLike, notifyPaused, notifyNewMessage, notifyTicketReply,
+  notifyMatch, notifyNewLike, notifyPaused, notifyFakePhotoWarning, notifyNewMessage, notifyTicketReply,
 } from '../src/bot.js'
 import { fa } from '../src/i18n/fa.js'
 import { en } from '../src/i18n/en.js'
@@ -46,6 +46,15 @@ describe('notify helpers pick the recipient locale', () => {
   it('notifyPaused in English', async () => {
     await notifyPaused(9, 'en')
     expect(sendMessage.mock.calls[0][1]).toBe(en.notify.paused)
+  })
+
+  it('notifyFakePhotoWarning picks gender copy and falls back to Persian', async () => {
+    await notifyFakePhotoWarning(9, 'en', 'woman')
+    await notifyFakePhotoWarning(9, 'ar', 'man')
+    await notifyFakePhotoWarning(9, null, 'man')
+    expect(sendMessage.mock.calls[0][1]).toBe(en.notify.fakePhotoWarningWoman)
+    expect(sendMessage.mock.calls[1][1]).toBe(ar.notify.fakePhotoWarningMan)
+    expect(sendMessage.mock.calls[2][1]).toBe(fa.notify.fakePhotoWarningMan)
   })
 
   it('notifyNewMessage captions in the recipient locale', async () => {

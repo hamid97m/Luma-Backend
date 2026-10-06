@@ -34,6 +34,10 @@ export const en = {
     giftIntro: (name: string, emoji: string) =>
       `${name} sent you a gift ${emoji} — open Luma to see who!`,
     paused: 'Your profile is temporarily hidden. Upload a fresh photo of yourself in Luma to come back ✨',
+    fakePhotoWarningWoman:
+      'Your profile photo was reported as fake. You are beautiful, and there is no need for someone else\'s photo. People you know will not see you here. Upload a real photo of yourself.',
+    fakePhotoWarningMan:
+      'Your profile photo was reported as fake. Replace it with a real photo of yourself, or we will block your account.',
     fallbackName: 'Someone',
   },
   referral: {

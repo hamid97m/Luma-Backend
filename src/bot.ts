@@ -308,6 +308,20 @@ export async function notifyPaused(toTelegramId: number, locale: Locale | null):
   await bot.api.sendMessage(toTelegramId, t.notify.paused, { reply_markup: keyboard })
 }
 
+/** Halfway warning when fake-photo reports hit half the pause threshold.
+ * Women (and anyone who isn't a man) get a reassuring note; men get a block threat. */
+export async function notifyFakePhotoWarning(
+  toTelegramId: number,
+  locale: Locale | null,
+  gender: string | null,
+): Promise<void> {
+  const t = tFor(locale)
+  const text = gender === 'man' ? t.notify.fakePhotoWarningMan : t.notify.fakePhotoWarningWoman
+  const bot = getBot()
+  const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
+  await bot.api.sendMessage(toTelegramId, text, { reply_markup: keyboard })
+}
+
 /** Build the optional inline keyboard for an admin message. Returns undefined
  * when no button is configured — the message then goes out with no keyboard.
  * Exported for unit testing of the url/screen/none branches. */

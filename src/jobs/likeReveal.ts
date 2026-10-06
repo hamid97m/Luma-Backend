@@ -11,6 +11,8 @@ export async function runLikeRevealJob(now = new Date()): Promise<{ considered: 
       .from('swipes')
       .select('swiped_id, swiped:users!swipes_swiped_id_fkey(gender, deleted_at, banned_at)')
       .eq('direction', 'like')
+      .order('swiper_id', { ascending: true })
+      .order('swiped_id', { ascending: true })
       .range(from, from + PAGE - 1)
     if (error) throw error
     const rows = (data as any[] | null) ?? []
@@ -22,6 +24,12 @@ export async function runLikeRevealJob(now = new Date()): Promise<{ considered: 
     if (rows.length < PAGE) break
     from += PAGE
   }
-  for (const id of ids) await ensureDailyReveal(id, now)
+  for (const id of ids) {
+    try {
+      await ensureDailyReveal(id, now)
+    } catch (err) {
+      console.error('like-reveal: ensureDailyReveal failed', { id, err })
+    }
+  }
   return { considered: ids.size }
 }

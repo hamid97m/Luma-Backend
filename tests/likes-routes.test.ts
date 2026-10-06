@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
 vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
-vi.mock('../src/likes/service.js', () => ({ getIncomingLikers: vi.fn() }))
+vi.mock('../src/likes/service.js', () => ({ getIncomingLikers: vi.fn(), getIncomingLiker: vi.fn() }))
 vi.mock('../src/likes/reveal.js', () => ({
   ensureDailyReveal: vi.fn().mockResolvedValue({ applies: false }),
 }))
@@ -9,7 +9,7 @@ vi.mock('../src/likes/reveal.js', () => ({
 import { buildApp } from '../src/server.js'
 import { verifyInitData } from '../src/auth.js'
 import { db } from '../src/db.js'
-import { getIncomingLikers } from '../src/likes/service.js'
+import { getIncomingLikers, getIncomingLiker } from '../src/likes/service.js'
 import { ensureDailyReveal } from '../src/likes/reveal.js'
 import { chainable } from './admin-helpers.js'
 
@@ -82,6 +82,7 @@ describe('GET /likes', () => {
 
   it('shows a woman only her revealed liker', async () => {
     vi.mocked(ensureDailyReveal).mockResolvedValue({ applies: true, swiperId: 'm1' })
+    vi.mocked(getIncomingLiker).mockResolvedValue(man as any)
     vi.mocked(getIncomingLikers).mockResolvedValue([
       man,
       { ...man, id: 'm2', name: 'Reza', telegramId: 4, likedAt: '2026-10-07T00:00:00.000Z' },
@@ -91,6 +92,28 @@ describe('GET /likes', () => {
     expect(body.visible.map((v: any) => v.id)).toEqual(['m1'])
     expect(JSON.stringify(body)).not.toContain('Reza')
     expect(body.lockedCount).toBe(0)
+    expect(getIncomingLiker).toHaveBeenCalledWith('me', 'm1')
+    expect(getIncomingLikers).not.toHaveBeenCalled()
+  })
+
+  it('shows the revealed liker even when he is outside the newest 100', async () => {
+    vi.mocked(ensureDailyReveal).mockResolvedValue({ applies: true, swiperId: 'old-man' })
+    // The capped list is 100 newer likers and does not contain him.
+    vi.mocked(getIncomingLikers).mockResolvedValue(
+      Array.from({ length: 100 }, (_, i) => ({ ...man, id: `new-${i}`, likedAt: '2026-10-06T00:00:00.000Z' })) as any,
+    )
+    vi.mocked(getIncomingLiker).mockResolvedValue({ ...man, id: 'old-man', name: 'Old', likedAt: '2026-01-01T00:00:00.000Z' } as any)
+    mockDb({ enabled: false, myPremiumUntil: null })
+    const body = await get()
+    expect(body.visible.map((v: any) => v.id)).toEqual(['old-man'])
+  })
+
+  it('shows a woman nobody when the revealed liker no longer qualifies', async () => {
+    vi.mocked(ensureDailyReveal).mockResolvedValue({ applies: true, swiperId: 'm1' })
+    vi.mocked(getIncomingLiker).mockResolvedValue(null)
+    mockDb({ enabled: false, myPremiumUntil: null })
+    const body = await get()
+    expect(body.visible).toEqual([])
   })
 
   it('shows a woman nobody after today\'s reveal is spent', async () => {
@@ -131,6 +154,7 @@ describe('GET /likes/unread-count', () => {
 
   it('counts only the revealed like for a woman', async () => {
     vi.mocked(ensureDailyReveal).mockResolvedValue({ applies: true, swiperId: 'm1' })
+    vi.mocked(getIncomingLiker).mockResolvedValue(man as any)
     vi.mocked(getIncomingLikers).mockResolvedValue([woman, man] as any)
     mockDb({ enabled: true, myPremiumUntil: null, seenAt: null })
     expect(await count()).toBe(1)
@@ -138,8 +162,18 @@ describe('GET /likes/unread-count', () => {
 
   it('counts zero when the revealed like is older than the watermark', async () => {
     vi.mocked(ensureDailyReveal).mockResolvedValue({ applies: true, swiperId: 'm1' })
-    vi.mocked(getIncomingLikers).mockResolvedValue([man] as any) // likedAt 2026-08-07
+    vi.mocked(getIncomingLiker).mockResolvedValue(man as any) // likedAt 2026-08-07
     mockDb({ enabled: true, myPremiumUntil: null, seenAt: '2026-08-08T00:00:00.000Z' })
     expect(await count()).toBe(0)
+  })
+
+  it('counts the revealed liker outside the newest 100 against the watermark', async () => {
+    vi.mocked(ensureDailyReveal).mockResolvedValue({ applies: true, swiperId: 'old-man' })
+    vi.mocked(getIncomingLikers).mockResolvedValue(
+      Array.from({ length: 101 }, (_, i) => ({ ...man, id: `new-${i}`, likedAt: '2026-10-06T00:00:00.000Z' })) as any,
+    )
+    vi.mocked(getIncomingLiker).mockResolvedValue({ ...man, id: 'old-man', likedAt: '2026-09-01T00:00:00.000Z' } as any)
+    mockDb({ enabled: false, myPremiumUntil: null, seenAt: '2026-08-01T00:00:00.000Z' })
+    expect(await count()).toBe(1)
   })
 })

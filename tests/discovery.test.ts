@@ -593,6 +593,63 @@ describe('GET /discovery', () => {
       expect(String(notCall!.args[2])).toContain('hidden-man')
     })
 
+    it('pages past more than 50 hidden likers so a later tier still returns a non-liker', async () => {
+      const FILLER_POOL = 20
+      const hidden = Array.from({ length: 60 }, (_, i) => `hidden-${i}`)
+      vi.mocked(hiddenIncomingLikerIds).mockResolvedValue(hidden)
+      // Page 1 is a full FILLER_POOL of hidden men; the non-liker sits behind them on page 2.
+      const page1 = hidden.slice(0, FILLER_POOL).map(profile)
+      const page2 = [profile('stranger')]
+      setupAuth()
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'men', gender: 'woman', geo_city: null, geo_country: null, locale: null }, error: null }) }) }),
+      } as any)
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
+      } as any)
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ or: () => ({ data: [], error: null }) }),
+      } as any)
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: hidden.map((id) => ({ swiper_id: id })), error: null }) }) }) }) }),
+      } as any)
+      const rangeLog: Array<{ method: string; args: unknown[] }> = []
+      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: page1, error: null }, rangeLog))
+      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: page2, error: null }, rangeLog))
+      mockSeedTopUp()
+      const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+      expect(res.statusCode).toBe(200)
+      expect(res.json().profiles.map((p: { id: string }) => p.id)).toEqual(['stranger'])
+      expect(rangeLog.filter((c) => c.method === 'range').map((c) => c.args)).toEqual([[0, FILLER_POOL - 1], [FILLER_POOL, 2 * FILLER_POOL - 1]])
+    })
+
+    it('keeps a man\'s likers visible when the reveal read throws', async () => {
+      vi.mocked(hiddenIncomingLikerIds).mockRejectedValue(new Error('boom'))
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      setupAuth()
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women', gender: 'man', geo_city: null, geo_country: null, locale: null }, error: null }) }) }),
+      } as any)
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
+      } as any)
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ or: () => ({ data: [], error: null }) }),
+      } as any)
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [{ swiper_id: 'f1' }], error: null }) }) }) }) }),
+      } as any)
+      const likerLog: Array<{ method: string; args: unknown[] }> = []
+      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('f1')], error: null }, likerLog))
+      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
+      mockSeedTopUp()
+      const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+      expect(res.statusCode).toBe(200)
+      expect(res.json().profiles.map((p: { id: string }) => p.id)).toEqual(['f1'])
+      expect(likerLog.find((c) => c.method === 'in' && c.args[0] === 'id')?.args[1]).toEqual(['f1'])
+      errSpy.mockRestore()
+    })
+
     it('hides every liker, without a 500, when the reveal read throws', async () => {
       vi.mocked(hiddenIncomingLikerIds).mockRejectedValue(new Error('boom'))
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})

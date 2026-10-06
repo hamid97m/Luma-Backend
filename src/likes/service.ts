@@ -81,3 +81,47 @@ export async function getIncomingLikers(userId: string): Promise<IncomingLiker[]
   out.sort((a, b) => new Date(b.likedAt).getTime() - new Date(a.likedAt).getTime())
   return out
 }
+
+/**
+ * One specific liker, with the same exclusions as getIncomingLikers but for this
+ * pair only and without the newest-100 cap. Used for the daily reveal, whose pick
+ * can be older than the capped list. Null when he no longer qualifies.
+ */
+export async function getIncomingLiker(userId: string, swiperId: string): Promise<IncomingLiker | null> {
+  const { data: likeRows, error: likeErr } = await db
+    .from('swipes')
+    .select('swiper_id, created_at, swiper:users!swipes_swiper_id_fkey(id, name, age, bio, location, interests, telegram_id, gender, deleted_at, banned_at, premium_until)')
+    .eq('swiped_id', userId)
+    .eq('swiper_id', swiperId)
+    .eq('direction', 'like')
+    .limit(1)
+  if (likeErr) throw likeErr
+  const row = ((likeRows ?? []) as any[])[0]
+  const s = row?.swiper
+  if (!s || s.deleted_at || s.banned_at) return null
+
+  const [mine, blocks, matches] = await Promise.all([
+    db.from('swipes').select('swiped_id').eq('swiper_id', userId).eq('swiped_id', swiperId).limit(1),
+    db.from('blocks').select('blocker_id, blocked_id')
+      .or(`and(blocker_id.eq.${userId},blocked_id.eq.${swiperId}),and(blocker_id.eq.${swiperId},blocked_id.eq.${userId})`)
+      .limit(1),
+    db.from('matches').select('user1_id, user2_id')
+      .or(`and(user1_id.eq.${userId},user2_id.eq.${swiperId}),and(user1_id.eq.${swiperId},user2_id.eq.${userId})`)
+      .limit(1),
+  ])
+  for (const r of [mine, blocks, matches]) if (r.error) throw r.error
+  if ((mine.data ?? []).length > 0 || (blocks.data ?? []).length > 0 || (matches.data ?? []).length > 0) return null
+
+  return {
+    id: s.id,
+    name: s.name,
+    age: s.age ?? null,
+    bio: s.bio ?? null,
+    location: s.location ?? null,
+    interests: s.interests ?? [],
+    telegramId: s.telegram_id,
+    gender: s.gender ?? null,
+    likedAt: row.created_at,
+    premium: isPremiumActive(s.premium_until ?? null),
+  }
+}

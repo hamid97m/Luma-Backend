@@ -1,16 +1,17 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 import { isPremiumActive } from '../premium/service.js'
-import { getIncomingLikers } from '../likes/service.js'
+import { getIncomingLikers, getIncomingLiker } from '../likes/service.js'
 import { ensureDailyReveal } from '../likes/reveal.js'
 
 async function likersForViewer(userId: string) {
-  const [incoming, reveal] = await Promise.all([
-    getIncomingLikers(userId),
-    ensureDailyReveal(userId),
-  ])
-  if (!reveal.applies) return incoming
-  return incoming.filter((l) => l.id === reveal.swiperId)
+  const reveal = await ensureDailyReveal(userId)
+  if (!reveal.applies) return getIncomingLikers(userId)
+  // Her one revealed liker is loaded directly: the pick can fall outside the
+  // newest-100 window getIncomingLikers returns.
+  if (!reveal.swiperId) return []
+  const liker = await getIncomingLiker(userId, reveal.swiperId)
+  return liker ? [liker] : []
 }
 
 /** Is the premium gate active for this viewer right now? (toggle on AND not premium) */

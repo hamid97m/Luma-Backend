@@ -25,6 +25,9 @@ const SWIPE_PAGE = 1000
 // Above this many hidden ids, keep them out of the .not('id','in', …) URL and
 // filter the returned rows instead.
 const MAX_HIDDEN_IN_URL = 50
+// With a long hidden list the filler tiers are read page by page (hidden rows are
+// dropped client-side), so a block of hidden men can't starve the pool.
+const MAX_FILLER_PAGES = 20
 
 // user_photos!inner makes the embed an INNER JOIN, so users with zero photos
 // are excluded from discovery entirely — an incomplete/abandoned profile (no
@@ -88,14 +91,15 @@ export async function discoveryRoutes(app: FastifyInstance) {
       if (page.length < SWIPE_PAGE) break
     }
 
-    // A reveal failure must not 500 the feed, and must not show her every like:
-    // fail closed and treat every liker as hidden (tier 1 gets nobody).
+    // A reveal failure must not 500 the feed. For a woman, fail closed: treat every
+    // liker as hidden so she is never shown all her likes (tier 1 gets nobody). A
+    // man has no reveal gate, so he keeps seeing his likers.
     let hiddenLikers: string[]
     try {
       hiddenLikers = await hiddenIncomingLikerIds(req.userId)
     } catch (err) {
-      console.error('discovery: hiddenIncomingLikerIds failed; hiding every liker', err)
-      hiddenLikers = likerSwiperIds
+      console.error('discovery: hiddenIncomingLikerIds failed', err)
+      hiddenLikers = viewer.gender === 'woman' ? likerSwiperIds : []
     }
     const hiddenSet = new Set(hiddenLikers)
 
@@ -109,6 +113,41 @@ export async function discoveryRoutes(app: FastifyInstance) {
     const notIdsBase = hiddenLikers.length <= MAX_HIDDEN_IN_URL ? [...excludeIds, ...hiddenLikers] : excludeIds
     const dropHidden = (rows: any[] | null | undefined): any[] => (rows ?? []).filter((p: any) => !hiddenSet.has(p.id))
     const excluded = new Set([...excludeIds, ...hiddenLikers])
+    const pageFillers = hiddenLikers.length > MAX_HIDDEN_IN_URL
+
+    // One filler tier's rows. Short hidden list: a single `.limit(target)` read, as
+    // before. Long hidden list: the hidden ids are not in the URL, so a single page
+    // can be all hidden men — page by last_active and keep non-hidden, not-yet-chosen
+    // rows until the pool is full, a page comes back short, or 20 pages are read.
+    const fetchPool = async (
+      build: () => any,
+      target: number,
+      chosenIds: string[],
+    ): Promise<{ rows: any[]; error: unknown }> => {
+      if (!pageFillers) {
+        const { data, error } = await build().order('last_active', { ascending: false }).limit(target)
+        return { rows: dropHidden(data), error }
+      }
+      const chosen = new Set(chosenIds)
+      const rows: any[] = []
+      for (let page = 0; page < MAX_FILLER_PAGES && rows.length < target; page++) {
+        const from = page * FILLER_POOL
+        const { data, error } = await build()
+          .order('last_active', { ascending: false })
+          .order('id', { ascending: true })
+          .range(from, from + FILLER_POOL - 1)
+        if (error) return { rows, error }
+        const got = (data ?? []) as any[]
+        for (const p of got) {
+          if (rows.length >= target) break
+          if (hiddenSet.has(p.id) || chosen.has(p.id)) continue
+          chosen.add(p.id)
+          rows.push(p)
+        }
+        if (got.length < FILLER_POOL) break
+      }
+      return { rows, error: null }
+    }
 
     // Map looking_for to gender filter — 'both'/'everyone' means no gender filter
     const genderFilter =
@@ -151,9 +190,11 @@ export async function discoveryRoutes(app: FastifyInstance) {
     }
 
     // Tier 1: people who already liked the viewer (minus the hidden ones)
-    const likerIds = likerSwiperIds
-      .filter((id: string) => !excluded.has(id))
-      .slice(0, MAX_LIKER_IDS)
+    // Past the cap, shuffle before slicing: the ids arrive ordered by swiper_id, so
+    // a plain slice would always favour the lowest UUIDs.
+    let eligibleLikerIds = likerSwiperIds.filter((id: string) => !excluded.has(id))
+    if (eligibleLikerIds.length > MAX_LIKER_IDS) eligibleLikerIds = shuffle([...eligibleLikerIds])
+    const likerIds = eligibleLikerIds.slice(0, MAX_LIKER_IDS)
 
     let likers: any[] = []
     if (likerIds.length > 0) {
@@ -172,48 +213,51 @@ export async function discoveryRoutes(app: FastifyInstance) {
     const geoCity: string | null = geoCountry ? viewer.geo_city ?? null : null
     let sameCity: any[] = []
     if (geoCity) {
-      const { data, error } = await profileQuery()
-        .eq('geo_country', geoCountry)
-        .eq('geo_city', geoCity)
-        .not('id', 'in', `(${likerPickedIds.join(',')})`)
-        .order('last_active', { ascending: false })
-        .limit(FILLER_POOL)
+      const { rows, error } = await fetchPool(
+        () => profileQuery()
+          .eq('geo_country', geoCountry)
+          .eq('geo_city', geoCity)
+          .not('id', 'in', `(${likerPickedIds.join(',')})`),
+        FILLER_POOL, likerPickedIds,
+      )
       if (error) return reply.status(500).send({ error: 'discovery_failed' })
-      sameCity = shuffle(dropHidden(data))
+      sameCity = shuffle(rows)
     }
 
     // Tier 3: same country (only when the viewer's location is resolved)
     const cityPickedIds = [...likerPickedIds, ...sameCity.map((p: any) => p.id)]
     let sameCountry: any[] = []
     if (geoCountry) {
-      const { data, error } = await profileQuery()
-        .eq('geo_country', geoCountry)
-        .not('id', 'in', `(${cityPickedIds.join(',')})`)
-        .order('last_active', { ascending: false })
-        .limit(FILLER_POOL)
+      const { rows, error } = await fetchPool(
+        () => profileQuery()
+          .eq('geo_country', geoCountry)
+          .not('id', 'in', `(${cityPickedIds.join(',')})`),
+        FILLER_POOL, cityPickedIds,
+      )
       if (error) return reply.status(500).send({ error: 'discovery_failed' })
-      sameCountry = shuffle(dropHidden(data))
+      sameCountry = shuffle(rows)
     }
 
     // Tier 4: same app language (users.locale), when the viewer has one
     const countryPickedIds = [...cityPickedIds, ...sameCountry.map((p: any) => p.id)]
     let sameLanguage: any[] = []
     if (viewer.locale) {
-      const { data, error } = await profileQuery()
-        .eq('locale', viewer.locale)
-        .not('id', 'in', `(${countryPickedIds.join(',')})`)
-        .order('last_active', { ascending: false })
-        .limit(FILLER_POOL)
+      const { rows, error } = await fetchPool(
+        () => profileQuery()
+          .eq('locale', viewer.locale)
+          .not('id', 'in', `(${countryPickedIds.join(',')})`),
+        FILLER_POOL, countryPickedIds,
+      )
       if (error) return reply.status(500).send({ error: 'discovery_failed' })
-      sameLanguage = shuffle(dropHidden(data))
+      sameLanguage = shuffle(rows)
     }
 
     // Tier 5: everyone else, most recently active first
     const allPickedIds = [...countryPickedIds, ...sameLanguage.map((p: any) => p.id)]
-    const { data: rest, error } = await profileQuery()
-      .not('id', 'in', `(${allPickedIds.join(',')})`)
-      .order('last_active', { ascending: false })
-      .limit(FILLER_POOL)
+    const { rows: rest, error } = await fetchPool(
+      () => profileQuery().not('id', 'in', `(${allPickedIds.join(',')})`),
+      FILLER_POOL, allPickedIds,
+    )
 
     if (error) return reply.status(500).send({ error: 'discovery_failed' })
 
@@ -222,7 +266,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
     // within each tier, likers placed in their own tier rather than pinned.
     const merged = orderByProximity(
       viewer,
-      interleaveBatch(likers, [sameCity, sameCountry, sameLanguage, shuffle(dropHidden(rest))], BATCH_SIZE, LIKER_POSITIONS),
+      interleaveBatch(likers, [sameCity, sameCountry, sameLanguage, shuffle(rest)], BATCH_SIZE, LIKER_POSITIONS),
     )
 
     // Seed/fake profiles come last: only when real candidates can't fill the
@@ -232,13 +276,14 @@ export async function discoveryRoutes(app: FastifyInstance) {
     let batch = merged
     if (batch.length < BATCH_SIZE) {
       const seedExcludeIds = [...notIdsBase, ...batch.map((p: any) => p.id)]
-      const { data: seeds, error: seedErr } = await profileQuery(true)
-        .eq('is_seed', true)
-        .not('id', 'in', `(${seedExcludeIds.join(',')})`)
-        .order('last_active', { ascending: false })
-        .limit(BATCH_SIZE - batch.length)
+      const { rows: seeds, error: seedErr } = await fetchPool(
+        () => profileQuery(true)
+          .eq('is_seed', true)
+          .not('id', 'in', `(${seedExcludeIds.join(',')})`),
+        BATCH_SIZE - batch.length, seedExcludeIds,
+      )
       if (seedErr) return reply.status(500).send({ error: 'discovery_failed' })
-      batch = [...batch, ...shuffle(dropHidden(seeds))]
+      batch = [...batch, ...shuffle(seeds)]
     }
 
     const formatted = batch.map((p: any) => ({

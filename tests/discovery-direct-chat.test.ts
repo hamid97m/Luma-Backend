@@ -51,7 +51,7 @@ describe('GET /discovery — directChat gate', () => {
     } as any)
     // liker swipes — nobody has liked the viewer
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
     } as any)
     // tier-3 profiles query — chainable tolerates the full query-builder chain
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))

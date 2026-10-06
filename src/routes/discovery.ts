@@ -21,6 +21,10 @@ const PASS_RECYCLE_MS = 9 * 24 * 60 * 60 * 1000
 // Cap the id-list sent to the liker-profiles query; the newest likes are
 // not preferred here — any 500 likers is plenty to fill 4 slots.
 const MAX_LIKER_IDS = 500
+const SWIPE_PAGE = 1000
+// Above this many hidden ids, keep them out of the .not('id','in', …) URL and
+// filter the returned rows instead.
+const MAX_HIDDEN_IN_URL = 50
 
 // user_photos!inner makes the embed an INNER JOIN, so users with zero photos
 // are excluded from discovery entirely — an incomplete/abandoned profile (no
@@ -67,15 +71,44 @@ export async function discoveryRoutes(app: FastifyInstance) {
       b.blocker_id === req.userId ? b.blocked_id : b.blocker_id
     )
 
-    const hiddenLikers = await hiddenIncomingLikerIds(req.userId)
+    // Everyone who already liked the viewer (uses idx_swipes_match_check). Paged
+    // so an old liker past PostgREST's row cap can't slip into discovery.
+    const likerSwiperIds: string[] = []
+    for (let from = 0; ; from += SWIPE_PAGE) {
+      const { data, error: likersErr } = await db
+        .from('swipes')
+        .select('swiper_id')
+        .eq('swiped_id', req.userId)
+        .eq('direction', 'like')
+        .order('swiper_id', { ascending: true })
+        .range(from, from + SWIPE_PAGE - 1)
+      if (likersErr) return reply.status(500).send({ error: 'discovery_failed' })
+      const page = (data ?? []) as Array<{ swiper_id: string }>
+      likerSwiperIds.push(...page.map((s) => s.swiper_id))
+      if (page.length < SWIPE_PAGE) break
+    }
+
+    // A reveal failure must not 500 the feed, and must not show her every like:
+    // fail closed and treat every liker as hidden (tier 1 gets nobody).
+    let hiddenLikers: string[]
+    try {
+      hiddenLikers = await hiddenIncomingLikerIds(req.userId)
+    } catch (err) {
+      console.error('discovery: hiddenIncomingLikerIds failed; hiding every liker', err)
+      hiddenLikers = likerSwiperIds
+    }
+    const hiddenSet = new Set(hiddenLikers)
 
     const excludeIds = [
       req.userId,
       ...(recentSwipes?.map((s: { swiped_id: string }) => s.swiped_id) ?? []),
       ...blockedIds,
-      ...hiddenLikers,
     ]
-    const excluded = new Set(excludeIds)
+    // Hidden likers join the .not() list only while it stays short; otherwise
+    // they are dropped from the returned rows instead (see dropHidden).
+    const notIdsBase = hiddenLikers.length <= MAX_HIDDEN_IN_URL ? [...excludeIds, ...hiddenLikers] : excludeIds
+    const dropHidden = (rows: any[] | null | undefined): any[] => (rows ?? []).filter((p: any) => !hiddenSet.has(p.id))
+    const excluded = new Set([...excludeIds, ...hiddenLikers])
 
     // Map looking_for to gender filter — 'both'/'everyone' means no gender filter
     const genderFilter =
@@ -117,17 +150,8 @@ export async function discoveryRoutes(app: FastifyInstance) {
       return q
     }
 
-    // Tier 1: people who already liked the viewer (uses idx_swipes_match_check)
-    const { data: likerSwipes, error: likersErr } = await db
-      .from('swipes')
-      .select('swiper_id')
-      .eq('swiped_id', req.userId)
-      .eq('direction', 'like')
-
-    if (likersErr) return reply.status(500).send({ error: 'discovery_failed' })
-
-    const likerIds = (likerSwipes ?? [])
-      .map((s: { swiper_id: string }) => s.swiper_id)
+    // Tier 1: people who already liked the viewer (minus the hidden ones)
+    const likerIds = likerSwiperIds
       .filter((id: string) => !excluded.has(id))
       .slice(0, MAX_LIKER_IDS)
 
@@ -138,12 +162,12 @@ export async function discoveryRoutes(app: FastifyInstance) {
         .order('last_active', { ascending: false })
         .limit(LIKER_POOL)
       if (error) return reply.status(500).send({ error: 'discovery_failed' })
-      likers = shuffle(data ?? []).slice(0, MAX_LIKER_SLOTS)
+      likers = shuffle(dropHidden(data)).slice(0, MAX_LIKER_SLOTS)
     }
 
     // Tier 2: same city. Ranking uses only the hidden normalized geo_city /
     // geo_country, never the typed location — an unresolved viewer skips it.
-    const likerPickedIds = [...excludeIds, ...likers.map((p: any) => p.id)]
+    const likerPickedIds = [...notIdsBase, ...likers.map((p: any) => p.id)]
     const geoCountry: string | null = viewer.geo_country ?? null
     const geoCity: string | null = geoCountry ? viewer.geo_city ?? null : null
     let sameCity: any[] = []
@@ -155,7 +179,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
         .order('last_active', { ascending: false })
         .limit(FILLER_POOL)
       if (error) return reply.status(500).send({ error: 'discovery_failed' })
-      sameCity = shuffle(data ?? [])
+      sameCity = shuffle(dropHidden(data))
     }
 
     // Tier 3: same country (only when the viewer's location is resolved)
@@ -168,7 +192,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
         .order('last_active', { ascending: false })
         .limit(FILLER_POOL)
       if (error) return reply.status(500).send({ error: 'discovery_failed' })
-      sameCountry = shuffle(data ?? [])
+      sameCountry = shuffle(dropHidden(data))
     }
 
     // Tier 4: same app language (users.locale), when the viewer has one
@@ -181,7 +205,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
         .order('last_active', { ascending: false })
         .limit(FILLER_POOL)
       if (error) return reply.status(500).send({ error: 'discovery_failed' })
-      sameLanguage = shuffle(data ?? [])
+      sameLanguage = shuffle(dropHidden(data))
     }
 
     // Tier 5: everyone else, most recently active first
@@ -198,7 +222,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
     // within each tier, likers placed in their own tier rather than pinned.
     const merged = orderByProximity(
       viewer,
-      interleaveBatch(likers, [sameCity, sameCountry, sameLanguage, shuffle(rest ?? [])], BATCH_SIZE, LIKER_POSITIONS),
+      interleaveBatch(likers, [sameCity, sameCountry, sameLanguage, shuffle(dropHidden(rest))], BATCH_SIZE, LIKER_POSITIONS),
     )
 
     // Seed/fake profiles come last: only when real candidates can't fill the
@@ -207,14 +231,14 @@ export async function discoveryRoutes(app: FastifyInstance) {
     // people deplete over time and seeds only surface once they're exhausted.
     let batch = merged
     if (batch.length < BATCH_SIZE) {
-      const seedExcludeIds = [...excludeIds, ...batch.map((p: any) => p.id)]
+      const seedExcludeIds = [...notIdsBase, ...batch.map((p: any) => p.id)]
       const { data: seeds, error: seedErr } = await profileQuery(true)
         .eq('is_seed', true)
         .not('id', 'in', `(${seedExcludeIds.join(',')})`)
         .order('last_active', { ascending: false })
         .limit(BATCH_SIZE - batch.length)
       if (seedErr) return reply.status(500).send({ error: 'discovery_failed' })
-      batch = [...batch, ...shuffle(seeds ?? [])]
+      batch = [...batch, ...shuffle(dropHidden(seeds))]
     }
 
     const formatted = batch.map((p: any) => ({

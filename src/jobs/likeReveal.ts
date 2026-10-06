@@ -9,7 +9,7 @@ export async function runLikeRevealJob(now = new Date()): Promise<{ considered: 
   for (;;) {
     const { data, error } = await db
       .from('swipes')
-      .select('swiped_id, swiped:users!swipes_swiped_id_fkey(gender, deleted_at, banned_at)')
+      .select('swiped_id, swiped:users!swipes_swiped_id_fkey(gender, is_seed, deleted_at, banned_at)')
       .eq('direction', 'like')
       .order('swiper_id', { ascending: true })
       .order('swiped_id', { ascending: true })
@@ -18,7 +18,7 @@ export async function runLikeRevealJob(now = new Date()): Promise<{ considered: 
     const rows = (data as any[] | null) ?? []
     for (const row of rows) {
       const u = row.swiped
-      if (!u || u.gender !== 'woman' || u.deleted_at || u.banned_at) continue
+      if (!u || u.gender !== 'woman' || u.is_seed || u.deleted_at || u.banned_at) continue
       ids.add(row.swiped_id)
     }
     if (rows.length < PAGE) break

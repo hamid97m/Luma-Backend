@@ -20,10 +20,10 @@ describe('runLikeRevealJob', () => {
         return chainable(
           {
             data: [
-              { swiped_id: 'w1', swiped: { gender: 'woman', deleted_at: null, banned_at: null } },
-              { swiped_id: 'w1', swiped: { gender: 'woman', deleted_at: null, banned_at: null } },
-              { swiped_id: 'm1', swiped: { gender: 'man', deleted_at: null, banned_at: null } },
-              { swiped_id: 'w2', swiped: { gender: 'woman', deleted_at: 'x', banned_at: null } },
+              { swiped_id: 'w1', swiped: { gender: 'woman', is_seed: false, deleted_at: null, banned_at: null } },
+              { swiped_id: 'w1', swiped: { gender: 'woman', is_seed: false, deleted_at: null, banned_at: null } },
+              { swiped_id: 'm1', swiped: { gender: 'man', is_seed: false, deleted_at: null, banned_at: null } },
+              { swiped_id: 'w2', swiped: { gender: 'woman', is_seed: false, deleted_at: 'x', banned_at: null } },
             ],
           },
           queryLog,
@@ -36,5 +36,29 @@ describe('runLikeRevealJob', () => {
     expect(ensureDailyReveal).toHaveBeenCalledTimes(1)
     expect(ensureDailyReveal).toHaveBeenCalledWith('w1', new Date('2026-10-07T14:30:00.000Z'))
     expect(queryLog.some((e) => e.method === 'order' && e.args[0] === 'swiper_id')).toBe(true)
+  })
+
+  it('skips seed women and keeps going when one ensureDailyReveal throws', async () => {
+    const swipe = (id: string, extra: Record<string, unknown> = {}) => ({
+      swiped_id: id,
+      swiped: { gender: 'woman', is_seed: false, deleted_at: null, banned_at: null, ...extra },
+    })
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'swipes') {
+        return chainable({ data: [swipe('w1'), swipe('seed', { is_seed: true }), swipe('w2')] })
+      }
+      return chainable({ data: [] })
+    })
+    vi.mocked(ensureDailyReveal).mockRejectedValueOnce(new Error('boom'))
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const now = new Date('2026-10-07T14:30:00.000Z')
+    const result = await runLikeRevealJob(now)
+    expect(result.considered).toBe(2)
+    expect(ensureDailyReveal).toHaveBeenCalledTimes(2)
+    expect(ensureDailyReveal).toHaveBeenNthCalledWith(1, 'w1', now)
+    expect(ensureDailyReveal).toHaveBeenNthCalledWith(2, 'w2', now)
+    expect(ensureDailyReveal).not.toHaveBeenCalledWith('seed', now)
+    expect(errSpy).toHaveBeenCalled()
+    errSpy.mockRestore()
   })
 })

@@ -84,7 +84,8 @@ if (process.env.NODE_ENV === 'production') {
   }
   schedulePurchaseMessageRun(PURCHASE_MSG_FIRST_RUN_DELAY_MS)
 
-  const DAY_MS = 24 * 60 * 60 * 1000
+  // Re-anchor to 18:00 Tehran after every run (a flat 24h from completion would
+  // drift later each day by however long the job took).
   const scheduleLikeReveal = (delayMs: number) => {
     setTimeout(async () => {
       try {
@@ -92,7 +93,7 @@ if (process.env.NODE_ENV === 'production') {
       } catch (err) {
         app.log.warn({ err }, 'like-reveal: scheduled run failed')
       }
-      scheduleLikeReveal(DAY_MS)
+      scheduleLikeReveal(msUntilNextTehranHour(18, new Date()))
     }, delayMs)
   }
   scheduleLikeReveal(msUntilNextTehranHour(18, new Date()))

@@ -63,7 +63,7 @@ describe('GET /discovery', () => {
     } as any)
     // liker swipes — nobody has liked the viewer
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
     } as any)
     // profiles query — chainable tolerates the full is_active→banned→age→gender→… chain
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
@@ -93,7 +93,7 @@ describe('GET /discovery', () => {
     } as any)
     // liker swipes — nobody has liked the viewer
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
     } as any)
     // profiles query — chainable tolerates the full is_active→banned→age→gender→… chain
     vi.mocked(db.from).mockReturnValueOnce(chainable({
@@ -153,7 +153,7 @@ describe('GET /discovery', () => {
     } as any)
     // liker swipes — nobody has liked the viewer
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
     } as any)
     // rest-tier profile query — capture the chain calls
     const log: Array<{ method: string; args: unknown[] }> = []
@@ -187,7 +187,7 @@ describe('GET /discovery', () => {
     } as any)
     // liker swipes — nobody has liked the viewer
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
     } as any)
     // rest-tier profile query — capture the chain calls
     const restLog: Array<{ method: string; args: unknown[] }> = []
@@ -243,7 +243,7 @@ describe('GET /discovery', () => {
     } as any)
     // liker swipes — nobody has liked the viewer
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
     } as any)
     // profiles query — chainable tolerates the is_active→banned→age→(no gender)→… chain
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
@@ -272,7 +272,7 @@ describe('GET /discovery', () => {
     } as any)
     // liker swipes — one person liked the viewer
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ data: [{ swiper_id: 'liker-1' }], error: null }) }) }),
+      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [{ swiper_id: 'liker-1' }], error: null }) }) }) }) }),
     } as any)
     const profile = (id: string, location: string) => ({
       id, name: 'N', age: 25, bio: null, telegram_id: 1,
@@ -313,7 +313,7 @@ describe('GET /discovery', () => {
     } as any)
     // liker swipes — nobody
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
     } as any)
     const profile = (id: string, location: string, geo_city: string | null, geo_country: string | null, locale = 'en') => ({
       id, name: 'N', age: 25, bio: null, telegram_id: 1, interests: [], location, geo_city, geo_country, locale, user_photos: [],
@@ -370,7 +370,7 @@ describe('GET /discovery', () => {
       select: () => ({ or: () => ({ data: [], error: null }) }),
     } as any)
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
     } as any)
     const restLog: Array<{ method: string; args: unknown[] }> = []
     vi.mocked(db.from).mockReturnValueOnce(chainable({
@@ -406,7 +406,7 @@ describe('GET /discovery', () => {
     } as any)
     // liker swipes — nobody has liked the viewer
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
     } as any)
     const profile = (id: string) => ({
       id, name: 'N', age: 25, bio: null, telegram_id: 1, interests: [], location: null, user_photos: [],
@@ -441,7 +441,7 @@ describe('GET /discovery', () => {
     } as any)
     // liker swipes — only the excluded liker → liker-profiles query must NOT run
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ data: [{ swiper_id: 'liker-1' }], error: null }) }) }),
+      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [{ swiper_id: 'liker-1' }], error: null }) }) }) }) }),
     } as any)
     // rest profiles (no gender filter) — chainable tolerates the is_active→banned→age→… chain
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
@@ -473,7 +473,7 @@ describe('GET /discovery', () => {
     } as any)
     // liker swipes — nobody has liked the viewer
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ data: [], error: null }) }) }),
+      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
     } as any)
     // profiles query — chainable tolerates the full is_active→banned→age→gender→… chain
     vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
@@ -501,10 +501,10 @@ describe('GET /discovery', () => {
       select: () => ({ or: () => ({ data: [], error: null }) }),
     } as any)
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ data: [
+      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [
         { swiper_id: 'revealed-man' },
         { swiper_id: 'hidden-man' },
-      ], error: null }) }) }),
+      ], error: null }) }) }) }) }),
     } as any)
     const likerLog: Array<{ method: string; args: unknown[] }> = []
     vi.mocked(db.from).mockReturnValueOnce(chainable({
@@ -527,5 +527,84 @@ describe('GET /discovery', () => {
     expect(ids).not.toContain('hidden-man')
     const inCall = likerLog.find((c) => c.method === 'in' && c.args[0] === 'id')
     expect(inCall?.args[1]).toEqual(['revealed-man'])
+  })
+
+  describe('hidden likers never leak', () => {
+    const profile = (id: string) => ({
+      id, name: id, age: 30, bio: null, telegram_id: 3,
+      interests: [], location: null, premium_until: null,
+      user_photos: [{ id: `p-${id}`, url: `http://p/${id}.jpg`, position: 0 }],
+    })
+
+    // Viewer has no city/country/locale → the only real-profile query after tier 1
+    // is the "everyone else" tier, then the seed top-up.
+    function setupWoman(likerIds: string[], tierData: unknown[], opts: { likerQueryData?: unknown[] } = {}) {
+      setupAuth()
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'men', gender: 'woman', geo_city: null, geo_country: null, locale: null }, error: null }) }) }),
+      } as any)
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
+      } as any)
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ or: () => ({ data: [], error: null }) }),
+      } as any)
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: likerIds.map((id) => ({ swiper_id: id })), error: null }) }) }) }) }),
+      } as any)
+      const likerLog: Array<{ method: string; args: unknown[] }> = []
+      if (opts.likerQueryData) {
+        vi.mocked(db.from).mockReturnValueOnce(chainable({ data: opts.likerQueryData, error: null }, likerLog))
+      }
+      const tierLog: Array<{ method: string; args: unknown[] }> = []
+      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: tierData, error: null }, tierLog))
+      const seedLog: Array<{ method: string; args: unknown[] }> = []
+      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }, seedLog))
+      return { likerLog, tierLog, seedLog }
+    }
+
+    it('drops a hidden liker returned by a later-tier query', async () => {
+      vi.mocked(hiddenIncomingLikerIds).mockResolvedValue(['hidden-man'])
+      setupWoman(['hidden-man'], [profile('hidden-man'), profile('stranger')])
+      const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+      expect(res.statusCode).toBe(200)
+      expect(res.json().profiles.map((p: { id: string }) => p.id)).toEqual(['stranger'])
+    })
+
+    it('does not interpolate more than 50 hidden ids into .not(id, in, …) and still drops them', async () => {
+      const hidden = Array.from({ length: 60 }, (_, i) => `hidden-${i}`)
+      vi.mocked(hiddenIncomingLikerIds).mockResolvedValue(hidden)
+      const { tierLog, seedLog } = setupWoman(hidden, [profile('hidden-3'), profile('stranger')])
+      const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+      expect(res.statusCode).toBe(200)
+      expect(res.json().profiles.map((p: { id: string }) => p.id)).toEqual(['stranger'])
+      for (const log of [tierLog, seedLog]) {
+        const notCall = log.find((c) => c.method === 'not' && c.args[0] === 'id')
+        expect(notCall).toBeDefined()
+        expect(String(notCall!.args[2])).not.toContain('hidden-')
+      }
+    })
+
+    it('interpolates a short hidden list into .not(id, in, …)', async () => {
+      vi.mocked(hiddenIncomingLikerIds).mockResolvedValue(['hidden-man'])
+      const { tierLog } = setupWoman(['hidden-man'], [profile('stranger')])
+      await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+      const notCall = tierLog.find((c) => c.method === 'not' && c.args[0] === 'id')
+      expect(String(notCall!.args[2])).toContain('hidden-man')
+    })
+
+    it('hides every liker, without a 500, when the reveal read throws', async () => {
+      vi.mocked(hiddenIncomingLikerIds).mockRejectedValue(new Error('boom'))
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const { likerLog, tierLog } = setupWoman(['m1', 'm2'], [profile('m1'), profile('stranger')])
+      const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+      expect(res.statusCode).toBe(200)
+      expect(res.json().profiles.map((p: { id: string }) => p.id)).toEqual(['stranger'])
+      // tier 1 gets nobody, so no liker-profile query ran (the queued tier mock served tier 5)
+      expect(likerLog).toEqual([])
+      expect(String(tierLog.find((c) => c.method === 'not')!.args[2])).toContain('m1')
+      expect(errSpy).toHaveBeenCalled()
+      errSpy.mockRestore()
+    })
   })
 })

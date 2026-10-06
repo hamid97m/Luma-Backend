@@ -63,6 +63,8 @@ export async function swipesRoutes(app: FastifyInstance) {
 
     if (!reverseSwipe) {
       // New like, no match yet → nudge the liked user (names the liker; FOMO teaser).
+      // A woman is not DMed on this path: her one like DM is sent from
+      // ensureDailyReveal (the 18:00 job / her first Likes or discovery read).
       const { data: pair } = await db
         .from('users')
         .select('id, name, telegram_id, allows_write_to_pm, locale, gender')

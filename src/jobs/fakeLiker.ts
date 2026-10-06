@@ -87,7 +87,8 @@ interface LikeTarget {
 /**
  * A fake likes one target, then reconciles the outcome:
  *   - reverse like present → create the match (sorted pair) and notify the real user
- *   - no reverse like      → send the "someone liked you" DM
+ *   - no reverse like      → send the "someone liked you" DM to a man; a woman target
+ *                            gets no notifyNewLike (her one like DM comes from ensureDailyReveal)
  * Mutates `stats`. The caller is responsible for incrementing `fake.counter`
  * before calling (so load balancing sees the assignment immediately).
  * Shared by the like-back phase (reverse like is guaranteed) and the cold-outreach

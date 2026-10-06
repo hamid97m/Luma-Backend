@@ -10,6 +10,7 @@ const CAP = 200                // max users messaged per backstop run
 const BATCH = 25
 const PAUSE_MS = 1000
 const CANDIDATE_LIMIT = 1000
+const IRAN_COUNTRY = 'IR'
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 const isBlocked = (err: any) => err?.error_code === 403
@@ -99,7 +100,7 @@ async function deliverToUser(
 
 /** Load one user IFF they are eligible right now: has a pending (unpaid) purchase
  * attempt on/after the cutoff, never completed a purchase, hasn't been messaged,
- * and is a messageable real user. Returns null otherwise. */
+ * lives in Iran, and is a messageable real user. Returns null otherwise. */
 async function loadEligibleTargetForUser(
   dbClient: any, activeSince: string, userId: string,
 ): Promise<Target | null> {
@@ -119,8 +120,9 @@ async function loadEligibleTargetForUser(
   if (sent?.length) return null
 
   const { data: users } = await dbClient
-    .from('users').select('id, telegram_id, locale')
+    .from('users').select('id, telegram_id, locale, geo_country')
     .eq('id', userId).eq('is_seed', false).is('banned_at', null).is('deleted_at', null)
+    .eq('geo_country', IRAN_COUNTRY)
     .gt('telegram_id', 0).or('allows_write_to_pm.is.null,allows_write_to_pm.eq.true').limit(1)
   return users?.[0] ?? null
 }
@@ -160,9 +162,11 @@ export function schedulePurchaseCheckoutFollowup(userId: string, deps: PurchaseM
 
 /**
  * Backstop sweep: catches per-payment checks lost to a restart/sleep. Finds
- * users with an unpaid purchase attempt older than the grace window who were
- * never paid and never messaged, then messages them once. Runs infrequently and
- * is bounded (cap + batches + pauses), so it adds little load.
+ * Iranian users (geo_country IR) with an unpaid purchase attempt older than the
+ * grace window who were never paid and never messaged, then messages them once.
+ * The country filter is on the attempt scan itself so non-Iranian abandoners
+ * cannot fill the candidate window. Runs infrequently and is bounded
+ * (cap + batches + pauses), so it adds little load.
  */
 export async function runPurchaseMessageJob(deps: RunPurchaseMessageJobDeps = {}): Promise<PurchaseMessageStats> {
   const dbClient = deps.db ?? db
@@ -183,9 +187,10 @@ export async function runPurchaseMessageJob(deps: RunPurchaseMessageJobDeps = {}
 
   const { data: attempts, error: attemptsErr } = await dbClient
     .from('premium_transactions')
-    .select('user_id')
+    .select('user_id, users!inner(geo_country)')
     .eq('source', 'purchase')
     .eq('status', 'pending_payment')
+    .eq('users.geo_country', IRAN_COUNTRY)
     .lte('created_at', cutoffIso)
     .gte('created_at', activeSince)
     .order('created_at', { ascending: true })
@@ -209,8 +214,9 @@ export async function runPurchaseMessageJob(deps: RunPurchaseMessageJobDeps = {}
   if (freshIds.length === 0) return empty
 
   const { data: users, error: usersErr } = await dbClient
-    .from('users').select('id, telegram_id, locale')
+    .from('users').select('id, telegram_id, locale, geo_country')
     .in('id', freshIds).eq('is_seed', false).is('banned_at', null).is('deleted_at', null)
+    .eq('geo_country', IRAN_COUNTRY)
     .gt('telegram_id', 0).or('allows_write_to_pm.is.null,allows_write_to_pm.eq.true').limit(cap)
   if (usersErr) throw usersErr
   const targets = (users ?? []) as Target[]

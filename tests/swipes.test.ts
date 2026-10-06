@@ -123,6 +123,48 @@ describe('POST /swipes — like with no reverse', () => {
     expect(notifyNewLike).toHaveBeenCalledWith(2, 'Ali', 'en')
   })
 
+  it('does not DM a woman when she is liked', async () => {
+    setupAuth()
+    mockTarget()
+    vi.mocked(db.from).mockReturnValueOnce({ upsert: vi.fn().mockReturnValue({ error: null }) } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: null, error: null }) }) }) }) }),
+    } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ in: () => ({ data: [
+        { id: USER_ID, name: 'Ali', telegram_id: 1, allows_write_to_pm: null, locale: 'fa', gender: 'man' },
+        { id: TARGET_ID, name: 'Sara', telegram_id: 2, allows_write_to_pm: null, locale: 'en', gender: 'woman' },
+      ], error: null }) }),
+    } as any)
+    const res = await app.inject({
+      method: 'POST', url: '/swipes', headers: AUTH,
+      payload: { targetUserId: TARGET_ID, direction: 'like' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().matched).toBe(false)
+    expect(notifyNewLike).not.toHaveBeenCalled()
+  })
+
+  it('still DMs a man immediately', async () => {
+    setupAuth()
+    mockTarget()
+    vi.mocked(db.from).mockReturnValueOnce({ upsert: vi.fn().mockReturnValue({ error: null }) } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ eq: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: null, error: null }) }) }) }) }),
+    } as any)
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ in: () => ({ data: [
+        { id: USER_ID, name: 'Sara', telegram_id: 1, allows_write_to_pm: null, locale: 'fa', gender: 'woman' },
+        { id: TARGET_ID, name: 'Ali', telegram_id: 2, allows_write_to_pm: null, locale: 'en', gender: 'man' },
+      ], error: null }) }),
+    } as any)
+    await app.inject({
+      method: 'POST', url: '/swipes', headers: AUTH,
+      payload: { targetUserId: TARGET_ID, direction: 'like' },
+    })
+    expect(notifyNewLike).toHaveBeenCalledWith(2, 'Sara', 'en')
+  })
+
   it('passes a null locale for a liked user who has not picked a language yet', async () => {
     setupAuth()
     mockTarget()

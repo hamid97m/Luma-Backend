@@ -65,11 +65,11 @@ export async function swipesRoutes(app: FastifyInstance) {
       // New like, no match yet → nudge the liked user (names the liker; FOMO teaser).
       const { data: pair } = await db
         .from('users')
-        .select('id, name, telegram_id, allows_write_to_pm, locale')
+        .select('id, name, telegram_id, allows_write_to_pm, locale, gender')
         .in('id', [req.userId, targetUserId])
       const me = pair?.find((u: { id: string }) => u.id === req.userId)
       const target = pair?.find((u: { id: string }) => u.id === targetUserId)
-      if (me && target && target.telegram_id > 0 && target.allows_write_to_pm !== false) {
+      if (me && target && target.gender !== 'woman' && target.telegram_id > 0 && target.allows_write_to_pm !== false) {
         notifyNewLike(target.telegram_id, me.name, target.locale ?? null).catch(console.error)
       }
       return { matched: false, ...swipeLimit }

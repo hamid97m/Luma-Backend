@@ -131,8 +131,7 @@ async function likeTargetAndMatch(
     return
   }
   if (!reverse) {
-    // Fake liked a real user without matching → send the "someone liked you" DM.
-    if (target.telegram_id > 0 && target.allows_write_to_pm !== false) {
+    if (target.gender !== 'woman' && target.telegram_id > 0 && target.allows_write_to_pm !== false) {
       notifyNewLike(target.telegram_id, fake.name, target.locale ?? null)
         .catch((err) => logger.warn({ err }, 'fake liker: new-like notify failed'))
     }

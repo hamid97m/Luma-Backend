@@ -558,6 +558,23 @@ describe('runFakeLikerJob — new-like notification', () => {
     expect(notifyNewLike).not.toHaveBeenCalled()
   })
 
+  it('does not DM a woman target', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1', { name: 'Sara' }),
+        mkUser('t1', { created_at: OLD, gender: 'woman', looking_for: 'both', telegram_id: 777, locale: 'fa' }),
+      ],
+      user_photos: [{ user_id: 'f1', url: 'https://p/f1.jpg', position: 0 }],
+    }
+    useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    await flush()
+
+    expect(res.likesSent).toBe(1)
+    expect(notifyNewLike).not.toHaveBeenCalled()
+  })
+
   it('does not send a new-like DM when the like results in a match', async () => {
     const store: Store = {
       fake_liker_config: enabledConfig(),

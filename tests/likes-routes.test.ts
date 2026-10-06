@@ -2,11 +2,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
 vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/likes/service.js', () => ({ getIncomingLikers: vi.fn() }))
+vi.mock('../src/likes/reveal.js', () => ({
+  ensureDailyReveal: vi.fn().mockResolvedValue({ applies: false }),
+}))
 
 import { buildApp } from '../src/server.js'
 import { verifyInitData } from '../src/auth.js'
 import { db } from '../src/db.js'
 import { getIncomingLikers } from '../src/likes/service.js'
+import { ensureDailyReveal } from '../src/likes/reveal.js'
 import { chainable } from './admin-helpers.js'
 
 const woman = { id: 'w1', name: 'Sara', age: 27, bio: null, location: 'Tehran', interests: ['Yoga'], telegramId: 2, gender: 'woman', likedAt: '2026-08-08T00:00:00Z' }
@@ -28,7 +32,11 @@ function mockDb(opts: { enabled: boolean; myPremiumUntil: string | null; seenAt?
 
 describe('GET /likes', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
-  beforeEach(async () => { vi.clearAllMocks(); app = await buildApp() })
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    vi.mocked(ensureDailyReveal).mockResolvedValue({ applies: false })
+    app = await buildApp()
+  })
 
   async function get() {
     const res = await app.inject({ method: 'GET', url: '/likes', headers: { authorization: 'x' } })
@@ -71,11 +79,37 @@ describe('GET /likes', () => {
     expect(body.lockedCount).toBe(0)
     expect(body.visible.length).toBe(2)
   })
+
+  it('shows a woman only her revealed liker', async () => {
+    vi.mocked(ensureDailyReveal).mockResolvedValue({ applies: true, swiperId: 'm1' })
+    vi.mocked(getIncomingLikers).mockResolvedValue([
+      man,
+      { ...man, id: 'm2', name: 'Reza', telegramId: 4, likedAt: '2026-10-07T00:00:00.000Z' },
+    ] as any)
+    mockDb({ enabled: false, myPremiumUntil: null })
+    const body = await get()
+    expect(body.visible.map((v: any) => v.id)).toEqual(['m1'])
+    expect(JSON.stringify(body)).not.toContain('Reza')
+    expect(body.lockedCount).toBe(0)
+  })
+
+  it('shows a woman nobody after today\'s reveal is spent', async () => {
+    vi.mocked(ensureDailyReveal).mockResolvedValue({ applies: true, swiperId: null })
+    vi.mocked(getIncomingLikers).mockResolvedValue([man] as any)
+    mockDb({ enabled: false, myPremiumUntil: null })
+    const body = await get()
+    expect(body.visible).toEqual([])
+    expect(body.lockedCount).toBe(0)
+  })
 })
 
 describe('GET /likes/unread-count', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
-  beforeEach(async () => { vi.clearAllMocks(); app = await buildApp() })
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    vi.mocked(ensureDailyReveal).mockResolvedValue({ applies: false })
+    app = await buildApp()
+  })
 
   async function count() {
     const res = await app.inject({ method: 'GET', url: '/likes/unread-count', headers: { authorization: 'x' } })
@@ -93,5 +127,19 @@ describe('GET /likes/unread-count', () => {
     vi.mocked(getIncomingLikers).mockResolvedValue([woman, man] as any) // 08-08 and 08-07
     mockDb({ enabled: true, myPremiumUntil: null, seenAt: '2026-08-07T12:00:00Z' })
     expect(await count()).toBe(1) // only the 08-08 like is newer
+  })
+
+  it('counts only the revealed like for a woman', async () => {
+    vi.mocked(ensureDailyReveal).mockResolvedValue({ applies: true, swiperId: 'm1' })
+    vi.mocked(getIncomingLikers).mockResolvedValue([woman, man] as any)
+    mockDb({ enabled: true, myPremiumUntil: null, seenAt: null })
+    expect(await count()).toBe(1)
+  })
+
+  it('counts zero when the revealed like is older than the watermark', async () => {
+    vi.mocked(ensureDailyReveal).mockResolvedValue({ applies: true, swiperId: 'm1' })
+    vi.mocked(getIncomingLikers).mockResolvedValue([man] as any) // likedAt 2026-08-07
+    mockDb({ enabled: true, myPremiumUntil: null, seenAt: '2026-08-08T00:00:00.000Z' })
+    expect(await count()).toBe(0)
   })
 })

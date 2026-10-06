@@ -2,6 +2,16 @@ import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 import { isPremiumActive } from '../premium/service.js'
 import { getIncomingLikers } from '../likes/service.js'
+import { ensureDailyReveal } from '../likes/reveal.js'
+
+async function likersForViewer(userId: string) {
+  const [incoming, reveal] = await Promise.all([
+    getIncomingLikers(userId),
+    ensureDailyReveal(userId),
+  ])
+  if (!reveal.applies) return incoming
+  return incoming.filter((l) => l.id === reveal.swiperId)
+}
 
 /** Is the premium gate active for this viewer right now? (toggle on AND not premium) */
 async function gateActiveFor(userId: string): Promise<boolean> {
@@ -16,7 +26,7 @@ export async function likesRoutes(app: FastifyInstance) {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
     const [likers, gateActive] = await Promise.all([
-      getIncomingLikers(req.userId),
+      likersForViewer(req.userId),
       gateActiveFor(req.userId),
     ])
 
@@ -73,7 +83,7 @@ export async function likesRoutes(app: FastifyInstance) {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
     const [likers, { data: me }] = await Promise.all([
-      getIncomingLikers(req.userId),
+      likersForViewer(req.userId),
       db.from('users').select('likes_seen_at').eq('id', req.userId).single(),
     ])
     const seenAt = me?.likes_seen_at ? new Date(me.likes_seen_at).getTime() : 0

@@ -4,6 +4,8 @@ import { mountWebhook, initWebhook } from './bot.js'
 import { runFakeLikerJob, setNextScheduledRunAt } from './jobs/fakeLiker.js'
 import { getLastFakeLikerRunAt } from './jobs/fakeLikerConfig.js'
 import { runPurchaseMessageJob } from './jobs/purchaseMessage.js'
+import { runLikeRevealJob } from './jobs/likeReveal.js'
+import { msUntilNextTehranHour } from './likes/revealPick.js'
 import { cleanupInterruptedBroadcasts } from './messaging/broadcast.js'
 import { db } from './db.js'
 
@@ -81,6 +83,19 @@ if (process.env.NODE_ENV === 'production') {
     }, delayMs)
   }
   schedulePurchaseMessageRun(PURCHASE_MSG_FIRST_RUN_DELAY_MS)
+
+  const DAY_MS = 24 * 60 * 60 * 1000
+  const scheduleLikeReveal = (delayMs: number) => {
+    setTimeout(async () => {
+      try {
+        await runLikeRevealJob()
+      } catch (err) {
+        app.log.warn({ err }, 'like-reveal: scheduled run failed')
+      }
+      scheduleLikeReveal(DAY_MS)
+    }, delayMs)
+  }
+  scheduleLikeReveal(msUntilNextTehranHour(18, new Date()))
 } else {
   // Skip bot in dev — fake BOT_TOKEN would crash the process
   console.log('[dev] Bot disabled (set NODE_ENV=production and a real BOT_TOKEN to enable)')

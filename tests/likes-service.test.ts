@@ -4,10 +4,10 @@ import { getIncomingLikers, getIncomingLiker } from '../src/likes/service.js'
 import { db } from '../src/db.js'
 import { chainable } from './admin-helpers.js'
 
-function liker(id: string, gender: string, opts: Partial<{ deleted_at: string; banned_at: string; premium_until: string | null }> = {}) {
+function liker(id: string, gender: string, opts: Partial<{ deleted_at: string; banned_at: string; paused_at: string; premium_until: string | null }> = {}) {
   return {
     swiper_id: id, created_at: `2026-08-0${id.slice(-1)}T00:00:00Z`,
-    swiper: { id, name: `U${id}`, age: 25, bio: null, location: 'Tehran', interests: ['Hiking', 'Music'], telegram_id: 10, gender, deleted_at: opts.deleted_at ?? null, banned_at: opts.banned_at ?? null, premium_until: opts.premium_until ?? null },
+    swiper: { id, name: `U${id}`, age: 25, bio: null, location: 'Tehran', interests: ['Hiking', 'Music'], telegram_id: 10, gender, deleted_at: opts.deleted_at ?? null, banned_at: opts.banned_at ?? null, paused_at: opts.paused_at ?? null, premium_until: opts.premium_until ?? null },
   }
 }
 
@@ -47,9 +47,9 @@ describe('getIncomingLikers', () => {
     expect(await getIncomingLikers('me')).toEqual([])
   })
 
-  it('excludes blocked, deleted, and banned likers', async () => {
+  it('excludes blocked, deleted, banned, and paused likers', async () => {
     mockDb(
-      [liker('a1', 'woman'), liker('a2', 'man', { deleted_at: 'x' }), liker('a3', 'man', { banned_at: 'x' })],
+      [liker('a1', 'woman'), liker('a2', 'man', { deleted_at: 'x' }), liker('a3', 'man', { banned_at: 'x' }), liker('a4', 'woman', { paused_at: 'x' })],
       [], [{ blocker_id: 'me', blocked_id: 'a1' }], [],
     )
     expect(await getIncomingLikers('me')).toEqual([])
@@ -87,6 +87,7 @@ describe('getIncomingLiker', () => {
   it.each([
     ['deleted', [liker('a1', 'man', { deleted_at: 'x' })], [], [], []],
     ['banned', [liker('a1', 'man', { banned_at: 'x' })], [], [], []],
+    ['paused', [liker('a1', 'man', { paused_at: 'x' })], [], [], []],
     ['already swiped by her', [liker('a1', 'man')], [{ swiped_id: 'a1' }], [], []],
     ['blocked either way', [liker('a1', 'man')], [], [{ blocker_id: 'a1', blocked_id: 'me' }], []],
     ['already matched', [liker('a1', 'man')], [], [], [{ user1_id: 'a1', user2_id: 'me' }]],

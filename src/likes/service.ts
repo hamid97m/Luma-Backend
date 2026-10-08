@@ -21,7 +21,7 @@ export async function getIncomingLikers(userId: string): Promise<IncomingLiker[]
   // (1) People who liked me, with their profile joined (mirrors the matches join pattern).
   const { data: incoming } = await db
     .from('swipes')
-    .select('swiper_id, created_at, swiper:users!swipes_swiper_id_fkey(id, name, age, bio, location, interests, telegram_id, gender, deleted_at, banned_at, premium_until)')
+    .select('swiper_id, created_at, swiper:users!swipes_swiper_id_fkey(id, name, age, bio, location, interests, telegram_id, gender, deleted_at, banned_at, paused_at, premium_until)')
     .eq('swiped_id', userId)
     .eq('direction', 'like')
     .order('created_at', { ascending: false })
@@ -61,7 +61,7 @@ export async function getIncomingLikers(userId: string): Promise<IncomingLiker[]
   const out: IncomingLiker[] = []
   for (const row of rows) {
     const s = row.swiper
-    if (!s || s.deleted_at || s.banned_at) continue
+    if (!s || s.deleted_at || s.banned_at || s.paused_at) continue
     if (swipedIds.has(s.id) || blockedIds.has(s.id) || matchedIds.has(s.id)) continue
     out.push({
       id: s.id,
@@ -90,7 +90,7 @@ export async function getIncomingLikers(userId: string): Promise<IncomingLiker[]
 export async function getIncomingLiker(userId: string, swiperId: string): Promise<IncomingLiker | null> {
   const { data: likeRows, error: likeErr } = await db
     .from('swipes')
-    .select('swiper_id, created_at, swiper:users!swipes_swiper_id_fkey(id, name, age, bio, location, interests, telegram_id, gender, deleted_at, banned_at, premium_until)')
+    .select('swiper_id, created_at, swiper:users!swipes_swiper_id_fkey(id, name, age, bio, location, interests, telegram_id, gender, deleted_at, banned_at, paused_at, premium_until)')
     .eq('swiped_id', userId)
     .eq('swiper_id', swiperId)
     .eq('direction', 'like')
@@ -98,7 +98,7 @@ export async function getIncomingLiker(userId: string, swiperId: string): Promis
   if (likeErr) throw likeErr
   const row = ((likeRows ?? []) as any[])[0]
   const s = row?.swiper
-  if (!s || s.deleted_at || s.banned_at) return null
+  if (!s || s.deleted_at || s.banned_at || s.paused_at) return null
 
   const [mine, blocks, matches] = await Promise.all([
     db.from('swipes').select('swiped_id').eq('swiper_id', userId).eq('swiped_id', swiperId).limit(1),

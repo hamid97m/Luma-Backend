@@ -124,23 +124,23 @@ async function loadMatchedIds(userId: string): Promise<Set<string>> {
 }
 
 /**
- * Is `likerId` still a live incoming liker of `userId`? Paused / seed / no-photo
- * do NOT count as gone (Likes can still show them). Gone = deleted, banned,
- * blocked either way, or matched (any route). Throws on any read error.
+ * Is `likerId` still a live incoming liker of `userId`? Seed / no-photo do NOT
+ * count as gone (an already-shown reveal can stay). Gone = deleted, banned,
+ * paused, blocked either way, or matched (any route). Throws on any read error.
  */
 async function isStillLiveLiker(userId: string, likerId: string): Promise<boolean> {
   const pair = (a: string, b: string, x: string, y: string) =>
     `and(${x}.eq.${a},${y}.eq.${b}),and(${x}.eq.${b},${y}.eq.${a})`
   const [userRes, blockRes, matchRes] = await Promise.all([
-    db.from('users').select('id, deleted_at, banned_at').eq('id', likerId).maybeSingle(),
+    db.from('users').select('id, deleted_at, banned_at, paused_at').eq('id', likerId).maybeSingle(),
     db.from('blocks').select('blocker_id').or(pair(userId, likerId, 'blocker_id', 'blocked_id')).limit(1),
     db.from('matches').select('user1_id').or(pair(userId, likerId, 'user1_id', 'user2_id')).limit(1),
   ])
   if (userRes.error) throw userRes.error
   if (blockRes.error) throw blockRes.error
   if (matchRes.error) throw matchRes.error
-  const u = userRes.data as { deleted_at: string | null; banned_at: string | null } | null
-  if (!u || u.deleted_at || u.banned_at) return false
+  const u = userRes.data as { deleted_at: string | null; banned_at: string | null; paused_at: string | null } | null
+  if (!u || u.deleted_at || u.banned_at || u.paused_at) return false
   if (((blockRes.data as unknown[] | null) ?? []).length > 0) return false
   if (((matchRes.data as unknown[] | null) ?? []).length > 0) return false
   return true

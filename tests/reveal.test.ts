@@ -249,7 +249,6 @@ describe('ensureDailyReveal', () => {
   })
 
   it.each([
-    ['paused', { paused_at: '2026-10-05T00:00:00.000Z' }, 1],
     ['a seed', { is_seed: true }, 1],
     ['photo-less', {}, 0],
   ])('does not clear an unanswered reveal who is %s', async (_name, user, photos) => {
@@ -285,6 +284,7 @@ describe('ensureDailyReveal', () => {
     ['blocking her', (id: string) => world.blocks.push({ blocker_id: id, blocked_id: WOMAN })],
     ['banned', (id: string) => { world.users[id].banned_at = '2026-10-06T00:00:00.000Z' }],
     ['deleted', (id: string) => { world.users[id].deleted_at = '2026-10-06T00:00:00.000Z' }],
+    ['paused', (id: string) => { world.users[id].paused_at = '2026-10-06T00:00:00.000Z' }],
     ['matched', (id: string) => world.matches.push({ user1_id: id, user2_id: WOMAN })],
   ] as Array<[string, (id: string) => void]>)('a dead current reveal (%s)', (_name, kill) => {
     beforeEach(() => {

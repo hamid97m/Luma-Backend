@@ -57,6 +57,7 @@ class QB {
   insert(row: any) { this.op = 'insert'; this._insert = row; return this }
   update(patch: any) { this.op = 'update'; this._update = patch; return this }
   eq(col: string, val: any) { this.filters.push(['eq', col, val]); return this }
+  or(expr: string) { this.filters.push(['or', '', expr]); return this }
   is(col: string, val: any) { this.filters.push(['is', col, val]); return this }
   in(col: string, val: any[]) { this.filters.push(['in', col, val]); return this }
   lte(col: string, val: any) { this.filters.push(['lte', col, val]); return this }
@@ -77,6 +78,7 @@ class QB {
     let rows = (this.store[this.table] ?? []).slice()
     for (const [t, col, val] of this.filters) {
       if (t === 'eq') rows = rows.filter((r) => r[col] === val)
+      else if (t === 'or') rows = rows.filter((r) => matchesOr(r, val))
       else if (t === 'is') rows = rows.filter((r) => (r[col] ?? null) === val)
       else if (t === 'in') rows = rows.filter((r) => (val as any[]).includes(r[col]))
       else if (t === 'lte') rows = rows.filter((r) => r[col] <= val)
@@ -138,6 +140,18 @@ class QB {
     if (this.store.__failInsert?.[this.table]) return { data: null, error: { code: 'XX', message: 'forced' } }
     return { data: null, error: null }
   }
+}
+
+/** PostgREST `.or('col.eq.x,col.is.null')` — enough for the job's locale filter. */
+function matchesOr(row: any, expr: string): boolean {
+  return expr.split(',').some((clause) => {
+    const m = /^([a-z_]+)\.(eq|is)\.(.+)$/.exec(clause)
+    if (!m) return false
+    const [, col, op, raw] = m
+    const cell = row[col] ?? null
+    if (op === 'is') return raw === 'null' ? cell === null : String(cell) === raw
+    return cell === raw
+  })
 }
 
 function useStore(store: Store): Logs {
@@ -228,6 +242,72 @@ describe('runFakeLikerJob — target selection', () => {
   })
 })
 
+describe('runFakeLikerJob — same language', () => {
+  it('Iranian fakes only like Persian users (fa, or unset which is Persian)', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1'),
+        mkUser('fa', { created_at: '2020-04-01T00:00:00Z', gender: 'man', looking_for: 'both', locale: 'fa' }),
+        mkUser('unset', { created_at: '2020-03-01T00:00:00Z', gender: 'man', looking_for: 'both', locale: null }),
+        mkUser('en', { created_at: '2020-02-01T00:00:00Z', gender: 'man', looking_for: 'both', locale: 'en' }),
+        mkUser('ar', { created_at: '2020-01-01T00:00:00Z', gender: 'man', looking_for: 'both', locale: 'ar' }),
+      ],
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    expect(res.likesSent).toBe(2)
+    expect(logs.inserts.swipes.map((s: any) => s.swiped_id).sort()).toEqual(['fa', 'unset'])
+  })
+
+  it('does not like back a non-Persian user who liked an Iranian fake', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1'),
+        mkUser('en', { gender: 'man', looking_for: 'both', locale: 'en', telegram_id: 42 }),
+      ],
+      swipes: [{ swiper_id: 'en', swiped_id: 'f1', direction: 'like' }],
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    expect(res.likesSent).toBe(0)
+    expect(res.matchesCreated).toBe(0)
+    expect(logs.inserts.swipes).toBeUndefined()
+    expect(logs.inserts.messages).toBeUndefined()
+  })
+
+  it('does not open a chat with a non-Persian user on an existing match', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1'),
+        mkUser('en', { looking_for: 'men', created_at: OLD, locale: 'en', telegram_id: 42 }),
+      ],
+      matches: [{ id: 'm1', user1_id: 'en', user2_id: 'f1', created_at: OLD }],
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    expect(res.salamsSent).toBe(0)
+    expect(logs.inserts.messages).toBeUndefined()
+  })
+
+  it('an English fake messages English users and skips Persian ones', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('enBot', { locale: 'en' }),
+        mkUser('fa', { created_at: '2020-02-01T00:00:00Z', gender: 'man', looking_for: 'both', locale: 'fa' }),
+        mkUser('en', { created_at: '2020-01-01T00:00:00Z', gender: 'man', looking_for: 'both', locale: 'en' }),
+      ],
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    expect(res.likesSent).toBe(1)
+    expect(logs.inserts.swipes).toEqual([{ swiper_id: 'enBot', swiped_id: 'en', direction: 'like' }])
+  })
+})
+
 describe('runFakeLikerJob — compatibility filter', () => {
   it('a fake only likes targets whose gender her looking_for allows', async () => {
     const store: Store = {
@@ -309,7 +389,7 @@ describe('runFakeLikerJob — match creation', () => {
       fake_liker_config: enabledConfig(),
       users: [
         mkFake('f1', { name: 'Sara' }),
-        mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', telegram_id: 555, last_active: RECENT, locale: 'en' }),
+        mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', telegram_id: 555, last_active: RECENT, locale: 'fa' }),
       ],
       // target already liked the fake → reverse like present
       swipes: [{ swiper_id: 't1', swiped_id: 'f1', direction: 'like' }],
@@ -325,7 +405,7 @@ describe('runFakeLikerJob — match creation', () => {
     expect(notifyMatch).toHaveBeenCalledTimes(1)
     // The DM carries the REAL user's locale (fakes have none).
     expect(notifyMatch).toHaveBeenCalledWith([
-      { telegramId: 555, matchName: 'Sara', matchPhoto: 'https://p/f1.jpg', locale: 'en' },
+      { telegramId: 555, matchName: 'Sara', matchPhoto: 'https://p/f1.jpg', locale: 'fa' },
     ])
   })
 
@@ -369,7 +449,7 @@ describe('runFakeLikerJob — like-back phase', () => {
       users: [
         mkFake('f1', { name: 'Ava' }),
         mkFake('f2', { name: 'Bea' }),
-        mkUser('r1', { gender: 'man', looking_for: 'both', telegram_id: 777, last_active: RECENT, locale: 'ar' }),
+        mkUser('r1', { gender: 'man', looking_for: 'both', telegram_id: 777, last_active: RECENT, locale: 'fa' }),
       ],
       // r1 liked f2 specifically (not f1)
       swipes: [{ swiper_id: 'r1', swiped_id: 'f2', direction: 'like' }],
@@ -384,7 +464,7 @@ describe('runFakeLikerJob — like-back phase', () => {
     expect(logs.inserts.swipes).toEqual([{ swiper_id: 'f2', swiped_id: 'r1', direction: 'like' }])
     expect(logs.inserts.matches[0]).toMatchObject({ user1_id: 'f2', user2_id: 'r1' }) // 'f2' < 'r1'
     expect(notifyMatch).toHaveBeenCalledWith([
-      { telegramId: 777, matchName: 'Bea', matchPhoto: 'https://p/f2.jpg', locale: 'ar' },
+      { telegramId: 777, matchName: 'Bea', matchPhoto: 'https://p/f2.jpg', locale: 'fa' },
     ])
   })
 
@@ -515,7 +595,7 @@ describe('runFakeLikerJob — new-like notification', () => {
       fake_liker_config: enabledConfig(),
       users: [
         mkFake('f1', { name: 'Sara' }),
-        mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', telegram_id: 777, locale: 'en' }),
+        mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', telegram_id: 777, locale: 'fa' }),
       ],
       user_photos: [{ user_id: 'f1', url: 'https://p/f1.jpg', position: 0 }],
     }
@@ -525,7 +605,7 @@ describe('runFakeLikerJob — new-like notification', () => {
 
     expect(res.likesSent).toBe(1)
     expect(res.matchesCreated).toBe(0)
-    expect(notifyNewLike).toHaveBeenCalledWith(777, 'Sara', 'en')
+    expect(notifyNewLike).toHaveBeenCalledWith(777, 'Sara', 'fa')
   })
 
   it('passes a null locale for a target who has not picked a language yet', async () => {

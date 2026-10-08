@@ -50,6 +50,7 @@ describe('GET /admin/users/:id', () => {
     const body = res.json()
     expect(body.user.name).toBe('Sara')
     expect(body.user.lookingFor).toBe('men')
+    expect(body.user.locale).toBeNull()
     expect(body.user.photos).toEqual(['https://p1.jpg'])
     expect(body.counts).toEqual({ swipesGiven: 7, likesReceived: 7, matches: 1, messagesSent: 3 })
     expect(body.matches).toEqual([

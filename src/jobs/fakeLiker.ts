@@ -2,7 +2,7 @@ import { db } from '../db.js'
 import { notifyMatch, notifyNewLike } from '../bot.js'
 import { getFakeLikerConfig } from './fakeLikerConfig.js'
 import { deliverMessageNotification } from '../messaging/deliver.js'
-import { tFor, type Locale } from '../i18n/index.js'
+import { effectiveLocale, tFor, type Locale } from '../i18n/index.js'
 
 export interface RunStats {
   likesSent: number
@@ -48,7 +48,19 @@ interface Fake {
   name: string
   looking_for: string
   location: string | null
+  locale: string | null
   counter: number
+}
+
+/** PostgREST `.or()` filter for users whose effective language is one of `languages`.
+ * Unset locale is Persian, so `fa` also matches `locale IS NULL`. */
+function localeOrFilter(languages: Iterable<Locale>): string {
+  const clauses: string[] = []
+  for (const lang of languages) {
+    clauses.push(`locale.eq.${lang}`)
+    if (lang === 'fa') clauses.push('locale.is.null')
+  }
+  return clauses.join(',')
 }
 
 /** A fake (always gender=woman) is eligible to like a target iff her `looking_for` allows the target's gender. */
@@ -186,7 +198,7 @@ export async function runFakeLikerJob(
     // --- Fake pool: active, non-banned women seeds ---
     const { data: pool, error: poolErr } = await db
       .from('users')
-      .select('id, name, looking_for, location')
+      .select('id, name, looking_for, location, locale')
       .eq('is_seed', true)
       .eq('gender', 'woman')
       .eq('is_active', true)
@@ -239,6 +251,7 @@ export async function runFakeLikerJob(
       name: f.name,
       looking_for: f.looking_for,
       location: f.location ?? null,
+      locale: f.locale ?? null,
       counter: counters[f.id] ?? 0,
     }))
     const fakeById = new Map(fakes.map((f) => [f.id, f]))
@@ -354,6 +367,7 @@ export async function runFakeLikerJob(
               const fake = fakeById.get(fakeId)
               if (!fake) continue // liked fake is no longer in the active pool → skip
               if (!fakeAllowsGender(fake.looking_for, real.gender)) continue // she isn't looking for that gender
+              if (effectiveLocale(fake.locale) !== effectiveLocale(real.locale)) continue // same language only
 
               fake.counter++ // count the assignment immediately so load stays balanced
               await likeTargetAndMatch(
@@ -389,6 +403,7 @@ export async function runFakeLikerJob(
         .is('deleted_at', null)
         .lte('created_at', cutoff)
         .in('looking_for', TARGET_LOOKING_FOR)
+        .or(localeOrFilter(new Set(fakes.map((f) => effectiveLocale(f.locale)))))
         .order('created_at', { ascending: false })
         .range(offset, offset + CANDIDATE_BATCH - 1)
 
@@ -447,7 +462,11 @@ export async function runFakeLikerJob(
     // --- Cold-outreach like phase: one fake likes each zero-liked target ---
     for (const target of targets) {
       try {
-        const compatible = fakes.filter((f) => fakeAllowsGender(f.looking_for, target.gender))
+        const compatible = fakes.filter(
+          (f) =>
+            fakeAllowsGender(f.looking_for, target.gender) &&
+            effectiveLocale(f.locale) === effectiveLocale(target.locale),
+        )
         if (compatible.length === 0) continue
 
         const fake = pickFake(compatible, target.location)
@@ -531,6 +550,7 @@ export async function runFakeLikerJob(
 
           const fake = fakes.find((f) => f.id === fakeId)
           if (!fake) continue
+          if (effectiveLocale(fake.locale) !== effectiveLocale(real.locale)) continue
 
           // The greeting is written in the real user's language — they're the reader.
           const realLocale = (real.locale as Locale | null) ?? null

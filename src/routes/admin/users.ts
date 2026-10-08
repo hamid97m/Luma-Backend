@@ -5,6 +5,7 @@ import { deleteAllPhotosForUser } from '../../photos/deleteAllPhotosForUser.js'
 import { validateButton } from '../../messaging/messageButton.js'
 import { parseChannelMessageLink } from '../../messaging/channelLink.js'
 import { scheduleUserGeo } from '../../geo/resolveCity.js'
+import { isLocale } from '../../i18n/index.js'
 
 export const PAGE_SIZE = 20
 
@@ -29,6 +30,7 @@ export function toListItem(u: any) {
     lastActive: u.last_active,
     geoCity: u.geo_city ?? null,
     geoCountry: u.geo_country ?? null,
+    locale: u.locale ?? null,
   }
 }
 
@@ -41,7 +43,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     let q: any = db
       .from('users')
       .select(
-        'id, telegram_id, username, name, age, gender, looking_for, is_active, is_seed, banned_at, paused_at, deleted_at, created_at, last_active, geo_city, geo_country',
+        'id, telegram_id, username, name, age, gender, looking_for, is_active, is_seed, banned_at, paused_at, deleted_at, created_at, last_active, geo_city, geo_country, locale',
         { count: 'exact' }
       )
 
@@ -89,6 +91,9 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     if (!GENDERS.includes(gender)) return reply.status(400).send({ error: 'invalid_gender' })
     if (!LOOKING.includes(looking_for)) return reply.status(400).send({ error: 'invalid_looking_for' })
     if (photos.length > 6) return reply.status(400).send({ error: 'too_many_photos' })
+    // Omitted language is Persian: the current fake profiles are Iranian.
+    const locale = body.locale === undefined ? 'fa' : body.locale
+    if (!isLocale(locale)) return reply.status(400).send({ error: 'invalid_locale' })
 
     const { data: user, error } = await db
       .from('users')
@@ -103,6 +108,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
         location: typeof body.location === 'string' ? body.location : null,
         icebreaker_prompt: typeof body.icebreaker_prompt === 'string' ? body.icebreaker_prompt : null,
         icebreaker_answer: typeof body.icebreaker_answer === 'string' ? body.icebreaker_answer : null,
+        locale,
         is_seed: true,
         is_active: true,
       })
@@ -253,6 +259,10 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     if ('is_active' in body) {
       if (typeof body.is_active !== 'boolean') return reply.status(400).send({ error: 'invalid_is_active' })
       patch.is_active = body.is_active
+    }
+    if ('locale' in body) {
+      if (!isLocale(body.locale)) return reply.status(400).send({ error: 'invalid_locale' })
+      patch.locale = body.locale
     }
 
     let photos: string[] | null = null

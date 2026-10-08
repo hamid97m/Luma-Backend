@@ -5,6 +5,7 @@ import { getSwipeLimitStatus } from '../premium/swipeLimit.js'
 import { getDirectChatStatus } from '../premium/directChatLimit.js'
 import { isPremiumActive } from '../premium/service.js'
 import { hiddenIncomingLikerIds } from '../likes/reveal.js'
+import { effectiveLocale } from '../i18n/index.js'
 
 const BATCH_SIZE = 10
 const MAX_LIKER_SLOTS = 4
@@ -287,12 +288,18 @@ export async function discoveryRoutes(app: FastifyInstance) {
     // batch do we top up with seeds, appended at the tail (never shuffled in
     // among real profiles). Since swiped users are excluded each request, real
     // people deplete over time and seeds only surface once they're exhausted.
+    // Seeds only fill a deck in the viewer's language. Unset locale is Persian,
+    // so Iranian fakes (no locale of their own) reach Persian viewers only.
+    const seedLanguage = effectiveLocale(viewer.locale)
+    const seedLocaleFilter =
+      seedLanguage === 'fa' ? 'locale.eq.fa,locale.is.null' : `locale.eq.${seedLanguage}`
     let batch = merged
     if (batch.length < BATCH_SIZE) {
       const seedExcludeIds = [...notIdsBase, ...batch.map((p: any) => p.id)]
       const { rows: seeds, error: seedErr } = await fetchPool(
         () => profileQuery(true)
           .eq('is_seed', true)
+          .or(seedLocaleFilter)
           .not('id', 'in', `(${seedExcludeIds.join(',')})`),
         BATCH_SIZE - batch.length, seedExcludeIds,
       )

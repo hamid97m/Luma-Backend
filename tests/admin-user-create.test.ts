@@ -40,6 +40,8 @@ describe('POST /admin/users', () => {
     expect(inserted.is_seed).toBe(true)
     expect(inserted.is_active).toBe(true)
     expect(inserted.name).toBe('Seed Sara')
+    // Omitted language is Persian — current fake profiles are Iranian.
+    expect(inserted.locale).toBe('fa')
 
     expect(photoInsert).toHaveBeenCalledWith([
       { user_id: 'new-1', url: 'https://p1.jpg', position: 0 },
@@ -47,11 +49,27 @@ describe('POST /admin/users', () => {
     ])
   })
 
+  it('stores an explicit language', async () => {
+    const userInsert = vi.fn(() => chainable({ data: { id: 'new-1' }, error: null }))
+    vi.mocked(db.from).mockImplementation((table: string) =>
+      table === 'users' ? ({ insert: userInsert } as any) : ({ insert: vi.fn(() => chainable({ error: null })) } as any)
+    )
+
+    const res = await app.inject({
+      method: 'POST', url: '/admin/users', headers,
+      payload: { ...VALID_BODY, locale: 'en' },
+    })
+
+    expect(res.statusCode).toBe(201)
+    expect((userInsert.mock.calls[0][0] as any).locale).toBe('en')
+  })
+
   it.each([
     [{ ...VALID_BODY, name: '  ' }, 'invalid_name'],
     [{ ...VALID_BODY, age: 15 }, 'invalid_age'],
     [{ ...VALID_BODY, gender: 'robot' }, 'invalid_gender'],
     [{ ...VALID_BODY, looking_for: 'aliens' }, 'invalid_looking_for'],
+    [{ ...VALID_BODY, locale: 'de' }, 'invalid_locale'],
   ])('rejects invalid input %#', async (payload, error) => {
     const res = await app.inject({ method: 'POST', url: '/admin/users', headers, payload })
     expect(res.statusCode).toBe(400)

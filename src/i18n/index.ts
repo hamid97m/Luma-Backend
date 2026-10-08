@@ -12,4 +12,4 @@ const messages: Record<Locale, Messages> = { fa, en, ar }
 export function tFor(locale: Locale | null | undefined): Messages {
   return messages[locale ?? 'fa']
 }
-export { isLocale, mapTelegramLang, LOCALES, type Locale } from './locale.js'
+export { isLocale, effectiveLocale, mapTelegramLang, LOCALES, type Locale } from './locale.js'

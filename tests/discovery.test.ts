@@ -428,6 +428,39 @@ describe('GET /discovery', () => {
     expect(body.profiles.map((p: any) => p.id)).toEqual(['real-1', 'seed-1'])
   })
 
+  it('fills the deck with seeds only in the viewer language', async () => {
+    const seedOr = async (locale: string | null) => {
+      setupAuth()
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women', location: null, locale }, error: null }) }) }),
+      } as any)
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
+      } as any)
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ or: () => ({ data: [], error: null }) }),
+      } as any)
+      vi.mocked(db.from).mockReturnValueOnce({
+        select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
+      } as any)
+      // A set locale adds the same-language tier before the rest tier.
+      if (locale) vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
+      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
+      const seedLog: Array<{ method: string; args: unknown[] }> = []
+      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }, seedLog))
+      const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+      expect(res.statusCode).toBe(200)
+      return seedLog.find((c) => c.method === 'or')?.args[0]
+    }
+
+    // Unset locale is Persian, same as an explicit fa viewer. Current fakes
+    // have no locale, so they match this filter and not en/ar.
+    expect(await seedOr(null)).toBe('locale.eq.fa,locale.is.null')
+    expect(await seedOr('fa')).toBe('locale.eq.fa,locale.is.null')
+    expect(await seedOr('en')).toBe('locale.eq.en')
+    expect(await seedOr('ar')).toBe('locale.eq.ar')
+  })
+
   it('excludes already-swiped likers and skips the city tier without a location', async () => {
     setupAuth()
 

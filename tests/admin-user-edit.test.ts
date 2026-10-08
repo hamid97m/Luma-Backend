@@ -65,6 +65,8 @@ describe('PUT /admin/users/:id', () => {
     [{ interests: 'music' }, 'invalid_interests'],
     [{ interests: [1, 2] }, 'invalid_interests'],
     [{ is_active: 'yes' }, 'invalid_is_active'],
+    [{ locale: 'de' }, 'invalid_locale'],
+    [{ locale: null }, 'invalid_locale'],
     [{ photos: 'not-an-array' }, 'invalid_photos'],
     [{ photos: ['ok.jpg', ''] }, 'invalid_photos'],
     [{ photos: ['1', '2', '3', '4', '5', '6', '7'] }, 'too_many_photos'],
@@ -125,6 +127,15 @@ describe('PUT /admin/users/:id', () => {
     // No photos in the body → photos untouched
     expect(photoDelete).not.toHaveBeenCalled()
     expect(photoInsert).not.toHaveBeenCalled()
+  })
+
+  it('updates the language a fake user messages in', async () => {
+    const { userUpdate } = mockTables()
+    const res = await app.inject({
+      method: 'PUT', url: '/admin/users/u1', headers, payload: { locale: 'ar' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(userUpdate.mock.calls[0][0]).toEqual({ locale: 'ar' })
   })
 
   it('replaces photos: deletes existing rows then inserts with positions 0..n', async () => {

@@ -197,7 +197,16 @@ async function loadCandidates(userId: string): Promise<RevealCandidate[]> {
   return candidates
 }
 
-export async function ensureDailyReveal(userId: string, now = new Date()): Promise<RevealResult> {
+/**
+ * `waitForNotify: false` sends the like DM in the background so a user-facing
+ * read isn't held up by Telegram. The reveal job keeps the default (await) so
+ * its per-woman loop stays sequential and under the bot's send rate limit.
+ */
+export async function ensureDailyReveal(
+  userId: string,
+  now = new Date(),
+  { waitForNotify = true }: { waitForNotify?: boolean } = {},
+): Promise<RevealResult> {
   const viewer = await loadViewer(userId)
   if (!viewer || viewer.gender !== 'woman' || viewer.is_seed) return { applies: false }
 
@@ -231,18 +240,21 @@ export async function ensureDailyReveal(userId: string, now = new Date()): Promi
 
   const name = (await db.from('users').select('name').eq('id', picked.id).maybeSingle()).data as { name?: string } | null
   if (viewer.telegram_id > 0 && viewer.allows_write_to_pm !== false) {
-    try {
-      await notifyNewLike(viewer.telegram_id, name?.name ?? '', (viewer.locale as 'fa' | 'en' | 'ar' | null) ?? null)
-      await db.from('like_reveals').update({ notified_at: new Date().toISOString() }).eq('user_id', userId).eq('revealed_on', today)
-    } catch (err) {
-      console.error(err)
-    }
+    const notify = (async () => {
+      try {
+        await notifyNewLike(viewer.telegram_id, name?.name ?? '', (viewer.locale as 'fa' | 'en' | 'ar' | null) ?? null)
+        await db.from('like_reveals').update({ notified_at: new Date().toISOString() }).eq('user_id', userId).eq('revealed_on', today)
+      } catch (err) {
+        console.error(err)
+      }
+    })()
+    if (waitForNotify) await notify
   }
   return { applies: true, swiperId: picked.id }
 }
 
 export async function hiddenIncomingLikerIds(userId: string, now = new Date()): Promise<string[]> {
-  const reveal = await ensureDailyReveal(userId, now)
+  const reveal = await ensureDailyReveal(userId, now, { waitForNotify: false })
   if (!reveal.applies) return []
   const likes = await loadLikeSwipes(userId)
   return likes.map((l) => l.swiper_id).filter((id) => id !== reveal.swiperId)

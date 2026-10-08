@@ -391,6 +391,14 @@ describe('hiddenIncomingLikerIds', () => {
     expect(hidden).toContain('m1199')
   })
 
+  it('does not wait for the like DM before returning', async () => {
+    addLiker('ali', { user: { last_active: '2026-10-07T09:00:00.000Z' } })
+    addLiker('reza', { user: { last_active: '2026-09-01T09:00:00.000Z' } })
+    vi.mocked(notifyNewLike).mockReturnValueOnce(new Promise(() => {}))
+    await expect(hiddenIncomingLikerIds(WOMAN, NOW)).resolves.toEqual(['reza'])
+    expect(notifyNewLike).toHaveBeenCalledTimes(1)
+  })
+
   it('hides everyone (incl. a dead reveal) when nobody is revealed', async () => {
     addLiker('ali')
     addLiker('reza')

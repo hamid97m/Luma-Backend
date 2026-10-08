@@ -40,67 +40,81 @@ export async function discoveryRoutes(app: FastifyInstance) {
   app.get('/discovery', async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
-    // Get viewer's preference, gender, city/country and app language
-    const { data: viewer } = await db
-      .from('users')
-      .select('looking_for, gender, location, geo_city, geo_country, locale')
-      .eq('id', req.userId)
-      .single()
-
-    if (!viewer) return reply.status(404).send({ error: 'user_not_found' })
-
-    const swipeLimit = await getSwipeLimitStatus(req.userId)
-    const directChat = await getDirectChatStatus(req.userId)
-
+    const userId = req.userId
     const recycleTime = new Date(Date.now() - PASS_RECYCLE_MS).toISOString()
-
-    // Swipes to exclude: all likes + recent passes (passes older than 9 days are recycled)
-    const { data: recentSwipes, error: swipesErr } = await db
-      .from('swipes')
-      .select('swiped_id')
-      .eq('swiper_id', req.userId)
-      .or(`direction.eq.like,and(direction.eq.pass,created_at.gt.${recycleTime})`)
-
-    if (swipesErr) return reply.status(500).send({ error: 'discovery_failed' })
-
-    const { data: blocks, error: blocksErr } = await db
-      .from('blocks')
-      .select('blocker_id, blocked_id')
-      .or(`blocker_id.eq.${req.userId},blocked_id.eq.${req.userId}`)
-
-    if (blocksErr) return reply.status(500).send({ error: 'discovery_failed' })
-
-    const blockedIds = (blocks ?? []).map((b: { blocker_id: string; blocked_id: string }) =>
-      b.blocker_id === req.userId ? b.blocked_id : b.blocker_id
-    )
 
     // Everyone who already liked the viewer (uses idx_swipes_match_check). Paged
     // so an old liker past PostgREST's row cap can't slip into discovery.
-    const likerSwiperIds: string[] = []
-    for (let from = 0; ; from += SWIPE_PAGE) {
-      const { data, error: likersErr } = await db
-        .from('swipes')
-        .select('swiper_id')
-        .eq('swiped_id', req.userId)
-        .eq('direction', 'like')
-        .order('swiper_id', { ascending: true })
-        .range(from, from + SWIPE_PAGE - 1)
-      if (likersErr) return reply.status(500).send({ error: 'discovery_failed' })
-      const page = (data ?? []) as Array<{ swiper_id: string }>
-      likerSwiperIds.push(...page.map((s) => s.swiper_id))
-      if (page.length < SWIPE_PAGE) break
+    const loadLikerSwiperIds = async (): Promise<{ ids: string[]; error: unknown }> => {
+      const ids: string[] = []
+      for (let from = 0; ; from += SWIPE_PAGE) {
+        const { data, error } = await db
+          .from('swipes')
+          .select('swiper_id')
+          .eq('swiped_id', userId)
+          .eq('direction', 'like')
+          .order('swiper_id', { ascending: true })
+          .range(from, from + SWIPE_PAGE - 1)
+        if (error) return { ids, error }
+        const page = (data ?? []) as Array<{ swiper_id: string }>
+        ids.push(...page.map((s) => s.swiper_id))
+        if (page.length < SWIPE_PAGE) break
+      }
+      return { ids, error: null }
     }
+
+    // These reads are independent of each other, so they run concurrently —
+    // sequentially they were most of the feed's latency.
+    const [
+      { data: viewer },
+      swipeLimit,
+      directChat,
+      // Swipes to exclude: all likes + recent passes (passes older than 9 days are recycled)
+      { data: recentSwipes, error: swipesErr },
+      { data: blocks, error: blocksErr },
+      { ids: likerSwiperIds, error: likersErr },
+      hiddenRead,
+    ] = await Promise.all([
+      // Viewer's preference, gender, city/country and app language
+      db
+        .from('users')
+        .select('looking_for, gender, location, geo_city, geo_country, locale')
+        .eq('id', userId)
+        .single(),
+      getSwipeLimitStatus(userId),
+      getDirectChatStatus(userId),
+      db
+        .from('swipes')
+        .select('swiped_id')
+        .eq('swiper_id', userId)
+        .or(`direction.eq.like,and(direction.eq.pass,created_at.gt.${recycleTime})`),
+      db
+        .from('blocks')
+        .select('blocker_id, blocked_id')
+        .or(`blocker_id.eq.${userId},blocked_id.eq.${userId}`),
+      loadLikerSwiperIds(),
+      hiddenIncomingLikerIds(userId).then(
+        (ids) => ({ ids, failed: false }),
+        (err) => {
+          console.error('discovery: hiddenIncomingLikerIds failed', err)
+          return { ids: [] as string[], failed: true }
+        },
+      ),
+    ])
+
+    if (!viewer) return reply.status(404).send({ error: 'user_not_found' })
+    if (swipesErr || blocksErr || likersErr) return reply.status(500).send({ error: 'discovery_failed' })
+
+    const blockedIds = (blocks ?? []).map((b: { blocker_id: string; blocked_id: string }) =>
+      b.blocker_id === userId ? b.blocked_id : b.blocker_id
+    )
 
     // A reveal failure must not 500 the feed. For a woman, fail closed: treat every
     // liker as hidden so she is never shown all her likes (tier 1 gets nobody). A
     // man has no reveal gate, so he keeps seeing his likers.
-    let hiddenLikers: string[]
-    try {
-      hiddenLikers = await hiddenIncomingLikerIds(req.userId)
-    } catch (err) {
-      console.error('discovery: hiddenIncomingLikerIds failed', err)
-      hiddenLikers = viewer.gender === 'woman' ? likerSwiperIds : []
-    }
+    const hiddenLikers: string[] = hiddenRead.failed
+      ? (viewer.gender === 'woman' ? likerSwiperIds : [])
+      : hiddenRead.ids
     const hiddenSet = new Set(hiddenLikers)
 
     const excludeIds = [

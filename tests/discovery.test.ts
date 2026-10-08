@@ -220,6 +220,10 @@ describe('GET /discovery', () => {
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ eq: () => ({ single: () => ({ data: null, error: { message: 'not found' } }) }) }),
     } as any)
+    // recent swipes, blocks, liker swipes — read concurrently with the viewer
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
+    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
 
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
     expect(res.statusCode).toBe(404)

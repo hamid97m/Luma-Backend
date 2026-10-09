@@ -6,10 +6,13 @@ vi.mock('../src/bot.js', () => ({
   notifyNewMessage: vi.fn().mockResolvedValue(undefined),
   notifyNewLike: vi.fn().mockResolvedValue(undefined),
 }))
+vi.mock('../src/icebreakers/seed.js', () => ({ seedIcebreakers: vi.fn().mockResolvedValue(undefined) }))
 
 import { db } from '../src/db.js'
 import { notifyMatch, notifyNewMessage, notifyNewLike } from '../src/bot.js'
 import { runFakeLikerJob } from '../src/jobs/fakeLiker.js'
+import { seedIcebreakers } from '../src/icebreakers/seed.js'
+import { icebreakerQuestion } from '../src/icebreakers/catalog.js'
 
 // ---------------------------------------------------------------------------
 // In-memory Supabase mock: a thenable query builder resolving against seeded
@@ -57,6 +60,7 @@ class QB {
   insert(row: any) { this.op = 'insert'; this._insert = row; return this }
   update(patch: any) { this.op = 'update'; this._update = patch; return this }
   eq(col: string, val: any) { this.filters.push(['eq', col, val]); return this }
+  neq(col: string, val: any) { this.filters.push(['neq', col, val]); return this }
   or(expr: string) { this.filters.push(['or', '', expr]); return this }
   is(col: string, val: any) { this.filters.push(['is', col, val]); return this }
   in(col: string, val: any[]) { this.filters.push(['in', col, val]); return this }
@@ -78,6 +82,7 @@ class QB {
     let rows = (this.store[this.table] ?? []).slice()
     for (const [t, col, val] of this.filters) {
       if (t === 'eq') rows = rows.filter((r) => r[col] === val)
+      else if (t === 'neq') rows = rows.filter((r) => (r[col] ?? 'text') !== val) // messages.type defaults to 'text'
       else if (t === 'or') rows = rows.filter((r) => matchesOr(r, val))
       else if (t === 'is') rows = rows.filter((r) => (r[col] ?? null) === val)
       else if (t === 'in') rows = rows.filter((r) => (val as any[]).includes(r[col]))
@@ -403,9 +408,30 @@ describe('runFakeLikerJob — match creation', () => {
     // sorted: 'f1' < 't1'
     expect(logs.inserts.matches[0]).toMatchObject({ user1_id: 'f1', user2_id: 't1' })
     expect(notifyMatch).toHaveBeenCalledTimes(1)
-    // The DM carries the REAL user's locale (fakes have none).
+    // The DM carries the REAL user's locale (fakes have none) and deep-links the chat.
     expect(notifyMatch).toHaveBeenCalledWith([
-      { telegramId: 555, matchName: 'Sara', matchPhoto: 'https://p/f1.jpg', locale: 'fa' },
+      { telegramId: 555, matchName: 'Sara', matchPhoto: 'https://p/f1.jpg', locale: 'fa', matchId: 'match-1', question: null },
+    ])
+    // Fake's icebreaker first, then the real user's.
+    expect(seedIcebreakers).toHaveBeenCalledTimes(1)
+    expect(seedIcebreakers).toHaveBeenCalledWith('match-1', ['f1', 't1'])
+  })
+
+  it("asks the fake's question in the real user's language when she has an icebreaker", async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1', { name: 'Sara', locale: 'en', icebreaker_prompt: 'جمعه ایده‌آل من…', icebreaker_answer: 'Beach' }),
+        mkUser('t1', { gender: 'man', looking_for: 'both', telegram_id: 555, last_active: RECENT, locale: 'en' }),
+      ],
+      swipes: [{ swiper_id: 't1', swiped_id: 'f1', direction: 'like' }],
+    }
+    useStore(store)
+    await runFakeLikerJob('schedule', silent)
+    await flush()
+
+    expect(notifyMatch).toHaveBeenCalledWith([
+      expect.objectContaining({ matchId: 'match-1', question: icebreakerQuestion('جمعه ایده‌آل من…', 'en') }),
     ])
   })
 
@@ -424,6 +450,7 @@ describe('runFakeLikerJob — match creation', () => {
     expect(res.matchesCreated).toBe(0)
     expect(res.likesSent).toBe(1)
     expect(notifyMatch).not.toHaveBeenCalled()
+    expect(seedIcebreakers).not.toHaveBeenCalled()
   })
 
   it('does not notify a match when the real user opted out or has a sentinel id', async () => {
@@ -464,8 +491,9 @@ describe('runFakeLikerJob — like-back phase', () => {
     expect(logs.inserts.swipes).toEqual([{ swiper_id: 'f2', swiped_id: 'r1', direction: 'like' }])
     expect(logs.inserts.matches[0]).toMatchObject({ user1_id: 'f2', user2_id: 'r1' }) // 'f2' < 'r1'
     expect(notifyMatch).toHaveBeenCalledWith([
-      { telegramId: 777, matchName: 'Bea', matchPhoto: 'https://p/f2.jpg', locale: 'fa' },
+      { telegramId: 777, matchName: 'Bea', matchPhoto: 'https://p/f2.jpg', locale: 'fa', matchId: 'match-1', question: null },
     ])
+    expect(seedIcebreakers).toHaveBeenCalledWith('match-1', ['f2', 'r1'])
   })
 
   it('likes back even a user who already has a received like (bypasses the cold-pass exclusion)', async () => {
@@ -700,6 +728,22 @@ describe('runFakeLikerJob — salam phase', () => {
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.salamsSent).toBe(1)
     expect(logs.inserts.messages).toEqual([{ match_id: 'm1', sender_id: 'f1', body: 'salam' }])
+  })
+
+  it('still salams a match whose only messages are auto-posted icebreakers', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [mkFake('f1'), mkUser('r1', { ...realOpts, last_active: RECENT })],
+      matches: [{ id: 'm1', user1_id: 'f1', user2_id: 'r1' }],
+      messages: [
+        { match_id: 'm1', sender_id: 'f1', type: 'icebreaker', body: 'My ideal Friday…', icebreaker_answer: 'x' },
+        { match_id: 'm1', sender_id: 'r1', type: 'icebreaker', body: 'Two truths and a lie…', icebreaker_answer: 'y' },
+      ],
+    }
+    const logs = useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    expect(res.salamsSent).toBe(1)
+    expect(logs.inserts.messages).toEqual([expect.objectContaining({ match_id: 'm1', sender_id: 'f1' })])
   })
 
   it('skips matches whose real side is deleted or banned', async () => {

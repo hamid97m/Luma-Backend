@@ -30,6 +30,8 @@ export const fa = {
   },
   notify: {
     match: (name: string) => `${name} لایکت کرد! لوما را باز کن ❤️`,
+    matchWithQuestion: (name: string, question: string) =>
+      `${name} لایکت کرد و ازت پرسیده:\n«${question}»\nلوما را باز کن و جوابش را بده ❤️`,
     newLike: (name: string) => `${name} لایکت کرد 💛 — برای دیدن، لوما را باز کن`,
     newMessage: (name: string, body: string) => `پیام جدید از ${name}\n${body}`,
     giftIntro: (name: string, emoji: string) =>

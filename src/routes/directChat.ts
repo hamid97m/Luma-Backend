@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 import { checkAndCountDirectChat } from '../premium/directChatLimit.js'
+import { seedIcebreakers } from '../icebreakers/seed.js'
 
 // Create (or fetch the existing) match between two users without a mutual like.
 // Mirrors the acceptIntro pattern: normalized pair, 23505 = already matched.
@@ -57,6 +58,7 @@ export async function directChatRoutes(app: FastifyInstance) {
 
     const match = await ensureMatch(req.userId, targetUserId)
     if (!match) return reply.status(500).send({ error: 'match_failed' })
+    if (match.created) await seedIcebreakers(match.matchId, [targetUserId, req.userId])
     // For quota users, return the post-consume window so the client keeps an
     // accurate remaining + resetAt (drives the 3/day limit sheet countdown).
     // Absent for the existing-match short-circuit above, so re-chatting the same

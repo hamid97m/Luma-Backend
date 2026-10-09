@@ -2,6 +2,8 @@ import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
 import { notifyMatch, notifyNewLike } from '../bot.js'
 import { checkAndCountSwipe } from '../premium/swipeLimit.js'
+import { seedIcebreakers } from '../icebreakers/seed.js'
+import { ownerQuestion } from '../icebreakers/question.js'
 
 export async function swipesRoutes(app: FastifyInstance) {
   app.post('/swipes', {
@@ -89,10 +91,14 @@ export async function swipesRoutes(app: FastifyInstance) {
     if (matchErr?.code === '23505') return { matched: false, ...swipeLimit } // race — already matched
     if (matchErr) return reply.status(500).send({ error: 'match_failed' })
 
+    // Post both icebreakers (the earlier liker's first) before responding, so the
+    // chat the swiper opens from the match popup already contains them.
+    await seedIcebreakers(match!.id, [targetUserId, req.userId])
+
     // Fetch both users for notification
     const { data: users, error: usersErr } = await db
       .from('users')
-      .select('id, name, telegram_id, username, allows_write_to_pm, locale')
+      .select('id, name, telegram_id, username, allows_write_to_pm, locale, icebreaker_prompt, icebreaker_answer')
       .in('id', [req.userId, targetUserId])
 
     if (usersErr || !users || users.length < 2) {
@@ -123,7 +129,15 @@ export async function swipesRoutes(app: FastifyInstance) {
       { user: them, matchName: me.name, matchPhoto: primaryPhoto(me.id) },
     ]
       .filter((r) => r.user.allows_write_to_pm !== false)
-      .map((r) => ({ telegramId: r.user.telegram_id, matchName: r.matchName, matchPhoto: r.matchPhoto, locale: r.user.locale ?? null }))
+      .map((r) => ({
+        telegramId: r.user.telegram_id,
+        matchName: r.matchName,
+        matchPhoto: r.matchPhoto,
+        locale: r.user.locale ?? null,
+        matchId: match!.id,
+        // The swiper's own icebreaker, asked in the recipient's language.
+        question: ownerQuestion(me, r.user.locale),
+      }))
 
     if (recipients.length > 0) notifyMatch(recipients).catch(console.error)
 

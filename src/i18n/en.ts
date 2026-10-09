@@ -29,6 +29,8 @@ export const en = {
   },
   notify: {
     match: (name: string) => `${name} liked you back! Open Luma ❤️`,
+    matchWithQuestion: (name: string, question: string) =>
+      `${name} liked you back and asks:\n“${question}”\nOpen Luma and answer ❤️`,
     newLike: (name: string) => `${name} liked you 💛 — open Luma to see`,
     newMessage: (name: string, body: string) => `New message from ${name}\n${body}`,
     giftIntro: (name: string, emoji: string) =>

@@ -194,20 +194,31 @@ export async function initWebhook(publicBaseUrl: string): Promise<void> {
   console.log(`[bot] webhook set (@${botUsername})`)
 }
 
+/** Mini-app URL that opens straight into a match's chat (screen=matches + chat=<id>). */
+function chatUrl(matchId: string): string {
+  return `${process.env.WEB_URL!}?screen=matches&chat=${encodeURIComponent(matchId)}`
+}
+
 export interface MatchNotifyRecipient {
   telegramId: number
   matchName: string
   matchPhoto: string | null
   locale: Locale | null
+  /** The match's icebreaker question, already in the recipient's locale. */
+  question?: string | null
+  /** Deep-links the button to the new chat when set. */
+  matchId?: string
 }
 
 export async function notifyMatch(recipients: MatchNotifyRecipient[]): Promise<void> {
   const bot = getBot()
 
-  const send = ({ telegramId, matchName, matchPhoto, locale }: MatchNotifyRecipient) => {
+  const send = ({ telegramId, matchName, matchPhoto, locale, question, matchId }: MatchNotifyRecipient) => {
     const t = tFor(locale)
-    const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
-    const caption = t.notify.match(matchName)
+    const keyboard = matchId
+      ? new InlineKeyboard().webApp(t.bot.replyButton, chatUrl(matchId))
+      : new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
+    const caption = question ? t.notify.matchWithQuestion(matchName, question) : t.notify.match(matchName)
 
     return matchPhoto
       ? bot.api.sendPhoto(telegramId, matchPhoto, { caption, reply_markup: keyboard })
@@ -399,9 +410,7 @@ export async function notifyNewMessage(
   // Deep-link the button straight to this chat (screen=matches + chat=<id>), so
   // tapping the notification opens the conversation, not the app's home tab.
   // Falls back to the app root when no matchId is supplied.
-  const url = matchId
-    ? `${process.env.WEB_URL!}?screen=matches&chat=${encodeURIComponent(matchId)}`
-    : process.env.WEB_URL!
+  const url = matchId ? chatUrl(matchId) : process.env.WEB_URL!
   // "Reply" when we can open the chat directly; the generic "open app" label
   // only when there's no matchId to deep-link to.
   const buttonLabel = matchId ? t.bot.replyButton : t.bot.openAppButton

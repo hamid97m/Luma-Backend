@@ -5,8 +5,10 @@ vi.mock('../src/bot.js', () => ({
   refundGift: vi.fn().mockResolvedValue(undefined), notifyNewMessage: vi.fn().mockResolvedValue(undefined),
   notifyGiftIntro: vi.fn().mockResolvedValue(undefined),
 }))
+vi.mock('../src/icebreakers/seed.js', () => ({ seedIcebreakers: vi.fn().mockResolvedValue(undefined) }))
 import { db } from '../src/db.js'
 import { acceptIntro, dismissIntro, listPendingIntros } from '../src/gifts/service.js'
+import { seedIcebreakers } from '../src/icebreakers/seed.js'
 
 /**
  * Claim step: update -> eq -> eq -> eq -> select -> maybeSingle, returning `data`.
@@ -120,6 +122,24 @@ describe('acceptIntro', () => {
     expect(msgInserts[0]).toMatchObject({
       match_id: 'match1', sender_id: 'buyer1', type: 'gift', gift_transaction_id: 'tx1', body: null,
     })
+
+    // Icebreakers follow the gift, buyer's first.
+    expect(seedIcebreakers).toHaveBeenCalledTimes(1)
+    expect(seedIcebreakers).toHaveBeenCalledWith('match1', ['buyer1', 'rec1'])
+  })
+
+  it('seeds icebreakers only after the gift message is inserted', async () => {
+    const order: string[] = []
+    vi.mocked(seedIcebreakers).mockImplementationOnce(async () => { order.push('seed') })
+    scriptDb([
+      claimStep({ id: 'tx1', buyer_id: 'buyer1', recipient_id: 'rec1' }),
+      aliveBuyerStep(),
+      matchesInsertStep({ id: 'match1' }, null),
+      updateSpyStep(() => {}),
+      insertSpyStep(() => order.push('gift')),
+    ])
+    await acceptIntro('tx1', 'rec1')
+    expect(order).toEqual(['gift', 'seed'])
   })
 
   it('reuses the existing match on a 23505 unique-constraint conflict', async () => {
@@ -133,6 +153,7 @@ describe('acceptIntro', () => {
     ])
     const result = await acceptIntro('tx1', 'rec1')
     expect(result).toEqual({ matchId: 'existing-match' })
+    expect(seedIcebreakers).not.toHaveBeenCalled()
   })
 
   it('returns match_failed and reverts the claim if the 23505 re-select finds nothing', async () => {

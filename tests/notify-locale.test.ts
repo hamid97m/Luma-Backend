@@ -2,9 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const sendPhoto = vi.fn().mockResolvedValue(undefined)
 const sendMessage = vi.fn().mockResolvedValue(undefined)
+const webApp = vi.fn(function (this: unknown) { return this })
 vi.mock('grammy', () => ({
   Bot: vi.fn().mockImplementation(() => ({ api: { sendPhoto, sendMessage } })),
-  InlineKeyboard: vi.fn().mockImplementation(() => ({ webApp() { return this } })),
+  InlineKeyboard: vi.fn().mockImplementation(() => ({ webApp })),
   Context: class {},
 }))
 vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
@@ -29,6 +30,39 @@ describe('notify helpers pick the recipient locale', () => {
     expect(texts).toContain(en.notify.match('Sara'))
     expect(texts).toContain(ar.notify.match('Sara'))
     expect(texts).toContain(fa.notify.match('Sara'))
+  })
+
+  it('notifyMatch asks the match question and deep-links to the chat when both are given', async () => {
+    await notifyMatch([
+      { telegramId: 1, matchName: 'Sara', matchPhoto: null, locale: 'en', question: 'What makes you laugh?', matchId: 'm 1' },
+    ])
+    expect(sendMessage.mock.calls[0][1]).toBe(en.notify.matchWithQuestion('Sara', 'What makes you laugh?'))
+    expect(webApp).toHaveBeenCalledWith(en.bot.replyButton, 'https://luma.test?screen=matches&chat=m%201')
+  })
+
+  it('notifyMatch puts the question in the photo caption', async () => {
+    await notifyMatch([
+      { telegramId: 1, matchName: 'Sara', matchPhoto: 'https://p/s.jpg', locale: 'ar', question: 'وأنت؟', matchId: 'm1' },
+    ])
+    expect(sendPhoto.mock.calls[0][2].caption).toBe(ar.notify.matchWithQuestion('Sara', 'وأنت؟'))
+  })
+
+  it('notifyMatch keeps the plain caption and app button without a question or matchId', async () => {
+    await notifyMatch([{ telegramId: 1, matchName: 'Sara', matchPhoto: null, locale: 'en', question: null }])
+    expect(sendMessage.mock.calls[0][1]).toBe(en.notify.match('Sara'))
+    expect(webApp).toHaveBeenCalledWith(en.bot.openAppButton, 'https://luma.test')
+  })
+
+  it('notifyMatch deep-links with the plain caption when there is a matchId but no question', async () => {
+    await notifyMatch([{ telegramId: 1, matchName: 'Sara', matchPhoto: null, locale: null, question: null, matchId: 'm1' }])
+    expect(sendMessage.mock.calls[0][1]).toBe(fa.notify.match('Sara'))
+    expect(webApp).toHaveBeenCalledWith(fa.bot.replyButton, 'https://luma.test?screen=matches&chat=m1')
+  })
+
+  it('matchWithQuestion copy is exact in every locale', () => {
+    expect(fa.notify.matchWithQuestion('سارا', 'س؟')).toBe('سارا لایکت کرد و ازت پرسیده:\n«س؟»\nلوما را باز کن و جوابش را بده ❤️')
+    expect(en.notify.matchWithQuestion('Sara', 'Q?')).toBe('Sara liked you back and asks:\n“Q?”\nOpen Luma and answer ❤️')
+    expect(ar.notify.matchWithQuestion('سارة', 'س؟')).toBe('سارة أعجب بك أيضًا ويسألك:\n«س؟»\nافتح لوما وأجب ❤️')
   })
 
   it('notifyNewLike with null locale falls back to Persian', async () => {

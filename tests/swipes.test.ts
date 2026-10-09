@@ -9,11 +9,14 @@ vi.mock('../src/bot.js', () => ({
 vi.mock('../src/premium/swipeLimit.js', () => ({
   checkAndCountSwipe: vi.fn().mockResolvedValue({ blocked: false, swipeLimit: null }),
 }))
+vi.mock('../src/icebreakers/seed.js', () => ({ seedIcebreakers: vi.fn().mockResolvedValue(undefined) }))
 
 import { buildApp } from '../src/server.js'
 import { verifyInitData } from '../src/auth.js'
 import { db } from '../src/db.js'
 import { notifyMatch, notifyNewLike } from '../src/bot.js'
+import { seedIcebreakers } from '../src/icebreakers/seed.js'
+import { icebreakerQuestion } from '../src/icebreakers/catalog.js'
 
 const AUTH = { authorization: 'valid_init_data' }
 const USER_ID = 'aaaaaaaa-0000-0000-0000-000000000001'
@@ -255,12 +258,12 @@ describe('POST /swipes — liking someone previously passed on', () => {
 
 describe('POST /swipes — mutual like', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
-  beforeEach(async () => { app = await buildApp() })
+  beforeEach(async () => { vi.clearAllMocks(); app = await buildApp() })
 
-  it('creates match and calls notifyMatch', async () => {
+  // Everything up to (and including) a successful match insert.
+  function mockUpToMatch(matchResult: { data: any; error: any } = { data: { id: 'match-uuid' }, error: null }) {
     setupAuth()
     mockTarget()
-
     // upsert swipe
     vi.mocked(db.from).mockReturnValueOnce({
       upsert: vi.fn().mockReturnValue({ error: null }),
@@ -272,41 +275,118 @@ describe('POST /swipes — mutual like', () => {
     // insert match
     vi.mocked(db.from).mockReturnValueOnce({
       insert: vi.fn().mockReturnValue({
-        select: () => ({ single: () => ({ data: { id: 'match-uuid' }, error: null }) }),
+        select: () => ({ single: () => matchResult }),
       }),
     } as any)
-    // fetch both users — the match DM goes to Sara, in Sara's language
+  }
+
+  function mockUsersAndPhotos(users: any[]) {
     vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ in: () => ({ data: [
-        { id: USER_ID, name: 'Ali', telegram_id: 1, locale: 'fa' },
-        { id: TARGET_ID, name: 'Sara', telegram_id: 2, locale: 'ar' },
-      ], error: null }) }),
+      select: () => ({ in: () => ({ data: users, error: null }) }),
     } as any)
-    // fetch primary photos
     vi.mocked(db.from).mockReturnValueOnce({
       select: () => ({ in: () => ({ order: () => ({ data: [
         { user_id: USER_ID, url: 'https://example.com/ali.jpg' },
         { user_id: TARGET_ID, url: 'https://example.com/sara.jpg' },
       ] }) }) }),
     } as any)
+  }
 
-    const res = await app.inject({
-      method: 'POST',
-      url: '/swipes',
-      headers: AUTH,
-      payload: { targetUserId: TARGET_ID, direction: 'like' },
-    })
+  const like = () => app.inject({
+    method: 'POST',
+    url: '/swipes',
+    headers: AUTH,
+    payload: { targetUserId: TARGET_ID, direction: 'like' },
+  })
+
+  it('creates match and calls notifyMatch', async () => {
+    mockUpToMatch()
+    // fetch both users — the match DM goes to Sara, in Sara's language
+    mockUsersAndPhotos([
+      { id: USER_ID, name: 'Ali', telegram_id: 1, locale: 'fa' },
+      { id: TARGET_ID, name: 'Sara', telegram_id: 2, locale: 'ar' },
+    ])
+
+    const res = await like()
 
     expect(res.statusCode).toBe(200)
     expect(res.json().matched).toBe(true)
     expect(res.json().match.id).toBe('match-uuid')
     // Only the OTHER user (the earlier liker, away from the app) is DM'd — the
     // active swiper already sees the match live in-app, so no self-notification.
+    // Ali has no icebreaker → no question, but the button still opens the chat.
     expect(notifyMatch).toHaveBeenCalledWith([
-      { telegramId: 2, matchName: 'Ali', matchPhoto: 'https://example.com/ali.jpg', locale: 'ar' },
+      { telegramId: 2, matchName: 'Ali', matchPhoto: 'https://example.com/ali.jpg', locale: 'ar', matchId: 'match-uuid', question: null },
     ])
     // The match path uses notifyMatch, not the new-like DM — no double notification.
     expect(notifyNewLike).not.toHaveBeenCalled()
+  })
+
+  it('seeds both icebreakers (earlier liker first) before responding', async () => {
+    let seeded = false
+    vi.mocked(seedIcebreakers).mockImplementationOnce(async () => {
+      await new Promise((r) => setImmediate(r))
+      seeded = true
+    })
+    mockUpToMatch()
+    mockUsersAndPhotos([
+      { id: USER_ID, name: 'Ali', telegram_id: 1, locale: 'fa' },
+      { id: TARGET_ID, name: 'Sara', telegram_id: 2, locale: 'ar' },
+    ])
+
+    await like()
+
+    expect(seedIcebreakers).toHaveBeenCalledTimes(1)
+    expect(seedIcebreakers).toHaveBeenCalledWith('match-uuid', [TARGET_ID, USER_ID])
+    expect(seeded).toBe(true)
+  })
+
+  it("DMs the swiper's question in the recipient's language when the swiper has an icebreaker", async () => {
+    mockUpToMatch()
+    mockUsersAndPhotos([
+      { id: USER_ID, name: 'Ali', telegram_id: 1, locale: 'fa', icebreaker_prompt: 'My ideal Friday…', icebreaker_answer: 'Hiking' },
+      { id: TARGET_ID, name: 'Sara', telegram_id: 2, locale: 'ar', icebreaker_prompt: 'حقيقتان وكذبة…', icebreaker_answer: 'x' },
+    ])
+
+    await like()
+
+    expect(notifyMatch).toHaveBeenCalledWith([
+      expect.objectContaining({ matchId: 'match-uuid', question: icebreakerQuestion('My ideal Friday…', 'ar') }),
+    ])
+  })
+
+  it('sends no question when the swiper has a prompt but a blank answer', async () => {
+    mockUpToMatch()
+    mockUsersAndPhotos([
+      { id: USER_ID, name: 'Ali', telegram_id: 1, locale: 'fa', icebreaker_prompt: 'My ideal Friday…', icebreaker_answer: '   ' },
+      { id: TARGET_ID, name: 'Sara', telegram_id: 2, locale: 'en' },
+    ])
+
+    await like()
+
+    expect(notifyMatch).toHaveBeenCalledWith([expect.objectContaining({ question: null })])
+  })
+
+  it('still seeds when the users lookup fails (minimal response path)', async () => {
+    mockUpToMatch()
+    vi.mocked(db.from).mockReturnValueOnce({
+      select: () => ({ in: () => ({ data: null, error: { message: 'boom' } }) }),
+    } as any)
+
+    const res = await like()
+
+    expect(res.json().matched).toBe(true)
+    expect(seedIcebreakers).toHaveBeenCalledWith('match-uuid', [TARGET_ID, USER_ID])
+    expect(notifyMatch).not.toHaveBeenCalled()
+  })
+
+  it('does not seed on the 23505 already-matched race', async () => {
+    mockUpToMatch({ data: null, error: { code: '23505' } })
+
+    const res = await like()
+
+    expect(res.json()).toEqual({ matched: false })
+    expect(seedIcebreakers).not.toHaveBeenCalled()
   })
 })
 

@@ -29,6 +29,8 @@ export const ar = {
   },
   notify: {
     match: (name: string) => `${name} أعجب بك أيضًا! افتح لوما ❤️`,
+    matchWithQuestion: (name: string, question: string) =>
+      `${name} أعجب بك أيضًا ويسألك:\n«${question}»\nافتح لوما وأجب ❤️`,
     newLike: (name: string) => `${name} أعجب بك 💛 — افتح لوما لترى`,
     newMessage: (name: string, body: string) => `رسالة جديدة من ${name}\n${body}`,
     giftIntro: (name: string, emoji: string) =>

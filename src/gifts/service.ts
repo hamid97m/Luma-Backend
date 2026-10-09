@@ -6,6 +6,7 @@ import {
 } from '../bot.js'
 import { formatGiftPaidNotice } from '../payments/paymentNotify.js'
 import { tFor, type Locale } from '../i18n/index.js'
+import { seedIcebreakers } from '../icebreakers/seed.js'
 
 const CATALOG_TTL_MS = 5 * 60 * 1000
 let catalogCache: { at: number; gifts: { id: string; emoji: string | null; starCost: number }[] } | null = null
@@ -250,10 +251,12 @@ export async function acceptIntro(introId: string, userId: string) {
   // Normalise pair order to satisfy UNIQUE(user1_id, user2_id).
   const [u1, u2] = [claimed.buyer_id, claimed.recipient_id].sort()
   let matchId: string
+  let matchCreated = false
   const { data: created, error: insErr } = await db
     .from('matches').insert({ user1_id: u1, user2_id: u2 }).select('id').maybeSingle()
   if (created) {
     matchId = created.id
+    matchCreated = true
   } else if (insErr?.code === '23505') {
     const { data: existing } = await db
       .from('matches').select('id').eq('user1_id', u1).eq('user2_id', u2).single()
@@ -268,6 +271,7 @@ export async function acceptIntro(introId: string, userId: string) {
   await db.from('messages').insert({
     match_id: matchId, sender_id: claimed.buyer_id, type: 'gift', gift_transaction_id: claimed.id, body: null,
   })
+  if (matchCreated) await seedIcebreakers(matchId, [claimed.buyer_id, claimed.recipient_id])
   return { matchId }
 }
 

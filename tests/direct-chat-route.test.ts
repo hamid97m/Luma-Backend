@@ -3,11 +3,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
 vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/premium/directChatLimit.js', () => ({ checkAndCountDirectChat: vi.fn() }))
+vi.mock('../src/icebreakers/seed.js', () => ({ seedIcebreakers: vi.fn().mockResolvedValue(undefined) }))
 
 import { buildApp } from '../src/server.js'
 import { verifyInitData } from '../src/auth.js'
 import { db } from '../src/db.js'
 import { checkAndCountDirectChat } from '../src/premium/directChatLimit.js'
+import { seedIcebreakers } from '../src/icebreakers/seed.js'
 
 const AUTH = { authorization: 'valid_init_data' }
 const USER_ID = 'aaaaaaaa-0000-0000-0000-000000000001'
@@ -31,6 +33,11 @@ const mockExistingMatch = (id: string | null) =>
   vi.mocked(db.from).mockReturnValueOnce({ select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: () => ({ data: id ? { id } : null }) }) }) }) } as any)
 const mockInsertMatch = (id: string) =>
   vi.mocked(db.from).mockReturnValueOnce({ insert: () => ({ select: () => ({ maybeSingle: () => ({ data: { id }, error: null }) }) }) } as any)
+// ensureMatch losing the insert race: 23505, then the re-select finds the row.
+const mockInsertConflict = (existingId: string) => {
+  vi.mocked(db.from).mockReturnValueOnce({ insert: () => ({ select: () => ({ maybeSingle: () => ({ data: null, error: { code: '23505' } }) }) }) } as any)
+  vi.mocked(db.from).mockReturnValueOnce({ select: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: { id: existingId } }) }) }) }) } as any)
+}
 
 function post() {
   return app.inject({ method: 'POST', url: '/discovery/direct-chat', headers: AUTH, payload: { targetUserId: TARGET_ID } })
@@ -48,12 +55,29 @@ describe('POST /discovery/direct-chat', () => {
     expect(res.json()).toEqual({ created: true, match: { id: MATCH_ID, user: { id: TARGET_ID, name: 'Sara', telegramId: 99, username: 'sara' } } })
   })
 
+  it('seeds icebreakers (target first, then caller) for a newly created match', async () => {
+    mockAuth(); mockTarget(); mockBlocks(); mockExistingMatch(null); mockInsertMatch(MATCH_ID)
+    vi.mocked(checkAndCountDirectChat).mockResolvedValue({ gate: 'free' } as any)
+    await post()
+    expect(seedIcebreakers).toHaveBeenCalledTimes(1)
+    expect(seedIcebreakers).toHaveBeenCalledWith(MATCH_ID, [TARGET_ID, USER_ID])
+  })
+
+  it('does not seed when the insert loses the race to an existing match', async () => {
+    mockAuth(); mockTarget(); mockBlocks(); mockExistingMatch(null); mockInsertConflict(MATCH_ID)
+    vi.mocked(checkAndCountDirectChat).mockResolvedValue({ gate: 'free' } as any)
+    const res = await post()
+    expect(res.json()).toMatchObject({ created: false, match: { id: MATCH_ID } })
+    expect(seedIcebreakers).not.toHaveBeenCalled()
+  })
+
   it('returns the existing match without consuming quota', async () => {
     mockAuth(); mockTarget(); mockBlocks(); mockExistingMatch(MATCH_ID)
     const res = await post()
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ created: false, match: { id: MATCH_ID, user: { id: TARGET_ID, name: 'Sara', telegramId: 99, username: 'sara' } } })
     expect(checkAndCountDirectChat).not.toHaveBeenCalled()
+    expect(seedIcebreakers).not.toHaveBeenCalled()
   })
 
   it('403 premium_required for a non-premium cohort man', async () => {

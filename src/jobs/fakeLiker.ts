@@ -3,6 +3,8 @@ import { notifyMatch, notifyNewLike } from '../bot.js'
 import { getFakeLikerConfig } from './fakeLikerConfig.js'
 import { deliverMessageNotification } from '../messaging/deliver.js'
 import { effectiveLocale, tFor, type Locale } from '../i18n/index.js'
+import { seedIcebreakers } from '../icebreakers/seed.js'
+import { ownerQuestion } from '../icebreakers/question.js'
 
 export interface RunStats {
   likesSent: number
@@ -49,6 +51,8 @@ interface Fake {
   looking_for: string
   location: string | null
   locale: string | null
+  icebreaker_prompt: string | null
+  icebreaker_answer: string | null
   counter: number
 }
 
@@ -166,9 +170,18 @@ async function likeTargetAndMatch(
   }
   stats.matchesCreated++
 
+  await seedIcebreakers(match.id, [fake.id, target.id])
+
   // Notify the real user only (fakes have a negative sentinel telegram_id).
   if (target.telegram_id > 0 && target.allows_write_to_pm !== false) {
-    notifyMatch([{ telegramId: target.telegram_id, matchName: fake.name, matchPhoto: fakePhoto(fake.id), locale: target.locale ?? null }])
+    notifyMatch([{
+      telegramId: target.telegram_id,
+      matchName: fake.name,
+      matchPhoto: fakePhoto(fake.id),
+      locale: target.locale ?? null,
+      matchId: match.id,
+      question: ownerQuestion(fake, target.locale),
+    }])
       .catch((err) => logger.warn({ err }, 'fake liker: match notify failed'))
   }
 }
@@ -198,7 +211,7 @@ export async function runFakeLikerJob(
     // --- Fake pool: active, non-banned women seeds ---
     const { data: pool, error: poolErr } = await db
       .from('users')
-      .select('id, name, looking_for, location, locale')
+      .select('id, name, looking_for, location, locale, icebreaker_prompt, icebreaker_answer')
       .eq('is_seed', true)
       .eq('gender', 'woman')
       .eq('is_active', true)
@@ -252,6 +265,8 @@ export async function runFakeLikerJob(
       looking_for: f.looking_for,
       location: f.location ?? null,
       locale: f.locale ?? null,
+      icebreaker_prompt: f.icebreaker_prompt ?? null,
+      icebreaker_answer: f.icebreaker_answer ?? null,
       counter: counters[f.id] ?? 0,
     }))
     const fakeById = new Map(fakes.map((f) => [f.id, f]))
@@ -522,12 +537,14 @@ export async function runFakeLikerJob(
       // matches with an active conversation look zero-message, so the fake would send
       // "salam" into it every run. On a count error we SKIP that match (never treat the
       // error as "no messages"); a match only qualifies when its count is confirmed 0.
+      // Auto-posted icebreakers aren't conversation, so they don't count.
       const zeroMessageMatchIds = new Set<string>()
       for (const m of candidateMatches) {
         const { count, error: countErr } = await db
           .from('messages')
           .select('id', { count: 'exact', head: true })
           .eq('match_id', m.id)
+          .neq('type', 'icebreaker')
         if (countErr) {
           stats.errors++
           logger.warn({ err: countErr, match: m.id }, 'fake liker: message-count query failed')

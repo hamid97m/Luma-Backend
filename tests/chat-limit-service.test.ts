@@ -57,6 +57,7 @@ function mockDb(opts: {
   userError?: boolean
   messageMatchIds?: string[]
 }) {
+  const messagesNeq = vi.fn(() => ({ data: (opts.messageMatchIds ?? []).map((match_id) => ({ match_id })), error: null }))
   vi.mocked(db.from).mockImplementation(((table: string) => {
     if (table === 'users') {
       return {
@@ -71,13 +72,12 @@ function mockDb(opts: {
     }
     if (table === 'messages') {
       return {
-        select: () => ({
-          eq: () => ({ data: (opts.messageMatchIds ?? []).map((match_id) => ({ match_id })), error: null }),
-        }),
+        select: () => ({ eq: () => ({ neq: messagesNeq }) }),
       }
     }
     throw new Error(`unexpected table ${table}`)
   }) as any)
+  return { messagesNeq }
 }
 
 const LIMITED_MAN = { gender: 'man', looking_for: 'women', premium_until: null }
@@ -91,6 +91,13 @@ describe('chatGateContext', () => {
     const ctx = await chatGateContext('u1', NOW)
     expect(ctx.gated).toBe(true)
     expect([...ctx.chattedMatchIds].sort()).toEqual(['m1', 'm2'])
+  })
+
+  it('does not count auto-posted icebreaker messages as chatting', async () => {
+    const { messagesNeq } = mockDb({ user: LIMITED_MAN, messageMatchIds: ['m1'] })
+    vi.mocked(isPremiumEnabled).mockResolvedValue(true)
+    await chatGateContext('u1', NOW)
+    expect(messagesNeq).toHaveBeenCalledWith('type', 'icebreaker')
   })
 
   it('is not gated when the premium toggle is off', async () => {

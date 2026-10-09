@@ -52,16 +52,16 @@ function mockPhotos() {
   } as any)
 }
 
-function mockLastMessage(row: { body: string; created_at: string; sender_id: string } | null) {
-  vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({
-      eq: () => ({
-        order: () => ({
-          limit: () => ({ data: row ? [row] : [], error: null }),
-        }),
+function mockLastMessage(row: { body: string; created_at: string; sender_id: string; type?: string } | null) {
+  const select = vi.fn(() => ({
+    eq: () => ({
+      order: () => ({
+        limit: () => ({ data: row ? [row] : [], error: null }),
       }),
     }),
-  } as any)
+  }))
+  vi.mocked(db.from).mockReturnValueOnce({ select } as any)
+  return select
 }
 
 function mockUnreadCount(count: number) {
@@ -95,12 +95,13 @@ describe('GET /matches', () => {
     mockMatchesRow()
     mockChatGateExempt()
     mockPhotos()
-    mockLastMessage({ body: 'hey there', created_at: '2026-01-02T00:00:00Z', sender_id: 'other-user' })
+    const lastMessageSelect = mockLastMessage({ body: 'hey there', created_at: '2026-01-02T00:00:00Z', sender_id: 'other-user', type: 'text' })
     mockUnreadCount(2)
 
     const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
 
     expect(res.statusCode).toBe(200)
+    expect((lastMessageSelect.mock.calls[0] as unknown[])[0]).toContain('type')
     const body = res.json()
     expect(body.matches).toHaveLength(1)
     expect(body.matches[0].user.name).toBe('Sara')
@@ -111,9 +112,35 @@ describe('GET /matches', () => {
     expect(body.matches[0].user.icebreakerPrompt).toBe('My perfect Sunday')
     expect(body.matches[0].user.icebreakerAnswer).toBe('Hiking then pancakes')
     expect(body.matches[0].lastMessage).toEqual({
-      body: 'hey there', createdAt: '2026-01-02T00:00:00Z', senderId: 'other-user',
+      body: 'hey there', createdAt: '2026-01-02T00:00:00Z', senderId: 'other-user', type: 'text',
     })
     expect(body.matches[0].unreadCount).toBe(2)
+  })
+
+  it("returns the last message's type so an auto-posted icebreaker can be labelled", async () => {
+    setupAuth()
+    mockNoBlocks()
+    mockMatchesRow()
+    mockChatGateExempt()
+    mockPhotos()
+    mockLastMessage({ body: 'My weirdest skill…', created_at: '2026-01-02T00:00:00Z', sender_id: 'other-user', type: 'icebreaker' })
+    mockUnreadCount(1)
+
+    const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
+    expect(res.json().matches[0].lastMessage.type).toBe('icebreaker')
+  })
+
+  it("defaults lastMessage.type to 'text' when the row has none", async () => {
+    setupAuth()
+    mockNoBlocks()
+    mockMatchesRow()
+    mockChatGateExempt()
+    mockPhotos()
+    mockLastMessage({ body: 'hey', created_at: '2026-01-02T00:00:00Z', sender_id: 'other-user' })
+    mockUnreadCount(0)
+
+    const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
+    expect(res.json().matches[0].lastMessage.type).toBe('text')
   })
 
   it('marks the other user premium only while premium_until is still in the future', async () => {

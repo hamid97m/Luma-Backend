@@ -51,7 +51,7 @@ export async function matchesRoutes(app: FastifyInstance) {
 
         const { data: lastMsgRows } = await db
           .from('messages')
-          .select('body, created_at, sender_id')
+          .select('body, created_at, sender_id, type')
           .eq('match_id', row.id)
           .order('created_at', { ascending: false })
           .limit(1)
@@ -81,7 +81,7 @@ export async function matchesRoutes(app: FastifyInstance) {
             premium: isPremiumActive(other.premium_until ?? null),
           },
           lastMessage: lastMsg
-            ? { body: lastMsg.body, createdAt: lastMsg.created_at, senderId: lastMsg.sender_id }
+            ? { body: lastMsg.body, createdAt: lastMsg.created_at, senderId: lastMsg.sender_id, type: lastMsg.type ?? 'text' }
             : null,
           unreadCount: unreadCount ?? 0,
           // Locks the composer client-side for a 4th+ new conversation; the

@@ -65,4 +65,21 @@ export const en = {
   chat: {
     seedGreeting: 'Hi',
   },
+  icebreaker: {
+    questions: [
+      'What does your ideal Friday look like?',
+      'Can you guess which one is the lie?',
+      "And what's the way to your heart?",
+      'What are you crazy about?',
+      "What's your perfect first date?",
+      'Agree or disagree?',
+      'So — will we get along?',
+      'And you — slow morning or packed schedule?',
+      "What's your weirdest skill?",
+      'Would you come along?',
+      'What made you laugh lately?',
+      'What green flags do you look for?',
+    ],
+    fallbackQuestion: 'What about you?',
+  },
 } satisfies Messages

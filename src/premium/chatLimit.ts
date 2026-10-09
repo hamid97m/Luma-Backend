@@ -54,9 +54,10 @@ async function isGated(userId: string, nowMs: number): Promise<boolean> {
   return true
 }
 
-/** Distinct match ids the user has sent a message in (deduped in memory). */
+/** Distinct match ids the user has sent a message in (deduped in memory).
+ * Auto-posted icebreakers don't count — the owner hasn't started a chat. */
 async function distinctChattedMatchIds(userId: string): Promise<Set<string>> {
-  const { data } = await db.from('messages').select('match_id').eq('sender_id', userId)
+  const { data } = await db.from('messages').select('match_id').eq('sender_id', userId).neq('type', 'icebreaker')
   return new Set((data ?? []).map((r: { match_id: string }) => r.match_id))
 }
 

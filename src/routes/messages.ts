@@ -47,7 +47,7 @@ export async function messagesRoutes(app: FastifyInstance) {
 
     const { data: rows, error } = await db
       .from('messages')
-      .select('id, sender_id, body, created_at, read_at, edited_at, reply_to_message_id, type, gift_transaction_id, gift:gift_transactions!messages_gift_transaction_id_fkey(gift_emoji, gift_star_cost)')
+      .select('id, sender_id, body, icebreaker_answer, created_at, read_at, edited_at, reply_to_message_id, type, gift_transaction_id, gift:gift_transactions!messages_gift_transaction_id_fkey(gift_emoji, gift_star_cost)')
       .eq('match_id', matchId)
       .order('created_at', { ascending: true })
 
@@ -66,6 +66,7 @@ export async function messagesRoutes(app: FastifyInstance) {
         senderId: m.sender_id,
         body: m.body,
         type: m.type ?? 'text',
+        icebreakerAnswer: m.icebreaker_answer ?? null,
         gift: m.gift ? { emoji: m.gift.gift_emoji ?? null, starCost: m.gift.gift_star_cost } : null,
         createdAt: m.created_at,
         readAt: m.read_at,
@@ -152,13 +153,15 @@ export async function messagesRoutes(app: FastifyInstance) {
     if (!match) return reply.status(404).send({ error: 'match_not_found' })
 
     // Ownership is enforced atomically by the filter — a non-sender can never
-    // match a row, so there is no fetch-then-check race.
+    // match a row, so there is no fetch-then-check race. Only text is
+    // editable; gift and icebreaker rows fall through to 404.
     const { data: message, error } = await db
       .from('messages')
       .update({ body: trimmed, edited_at: new Date().toISOString() })
       .eq('id', messageId)
       .eq('match_id', matchId)
       .eq('sender_id', req.userId)
+      .eq('type', 'text')
       .select('id, sender_id, body, created_at, read_at, edited_at, reply_to_message_id')
       .maybeSingle()
 

@@ -61,8 +61,8 @@ export async function adminStatsRoutes(app: FastifyInstance) {
         count('users', (q) => q.is('deleted_at', null).eq('gender', 'nonbinary')),
         count('matches'),
         count('matches', (q) => q.gte('created_at', today)),
-        count('messages'),
-        count('messages', (q) => q.gte('created_at', today)),
+        count('messages', (q) => q.neq('type', 'icebreaker')),
+        count('messages', (q) => q.neq('type', 'icebreaker').gte('created_at', today)),
         count('swipes'),
         count('swipes', (q) => q.eq('direction', 'like')),
         db.from('users').select('created_at').gte('created_at', monthAgo)

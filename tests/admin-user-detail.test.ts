@@ -58,6 +58,26 @@ describe('GET /admin/users/:id', () => {
     ])
   })
 
+  it('excludes icebreaker rows from messages sent', async () => {
+    const messageCalls: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      const results: Record<string, unknown> = {
+        users: { data: USER_ROW, error: null },
+        user_photos: { data: [], error: null },
+        swipes: { count: 0, error: null },
+        messages: { count: 3, error: null },
+        matches: { data: [], error: null },
+      }
+      return chainable(results[table], table === 'messages' ? messageCalls : undefined)
+    })
+
+    const res = await app.inject({ method: 'GET', url: '/admin/users/u1', headers })
+
+    expect(res.statusCode).toBe(200)
+    expect(messageCalls).toContainEqual({ method: 'eq', args: ['sender_id', 'u1'] })
+    expect(messageCalls).toContainEqual({ method: 'neq', args: ['type', 'icebreaker'] })
+  })
+
   it('returns 404 for an unknown user', async () => {
     mockTables({ users: { data: null, error: { message: 'not found' } } })
     const res = await app.inject({ method: 'GET', url: '/admin/users/nope', headers })

@@ -53,6 +53,7 @@ async function fakeUnreadMatchIds(): Promise<string[]> {
     .from('messages')
     .select('match_id, sender_id')
     .is('read_at', null)
+    .neq('type', 'icebreaker')
     .in('match_id', matchIds)
 
   const result = new Set<string>()
@@ -88,8 +89,8 @@ export async function adminChatsRoutes(app: FastifyInstance) {
       if (error) return reply.status(500).send({ error: 'chats_fetch_failed' })
       const items = await Promise.all((rows ?? []).map(async (row: any) => {
         const [{ count: messageCount }, { data: lastRows }] = await Promise.all([
-          db.from('messages').select('id', { count: 'exact', head: true }).eq('match_id', row.id),
-          db.from('messages').select('body, created_at').eq('match_id', row.id).order('created_at', { ascending: false }).limit(1),
+          db.from('messages').select('id', { count: 'exact', head: true }).eq('match_id', row.id).neq('type', 'icebreaker'),
+          db.from('messages').select('body, created_at').eq('match_id', row.id).neq('type', 'icebreaker').order('created_at', { ascending: false }).limit(1),
         ])
         const last = lastRows?.[0]
         return {
@@ -115,8 +116,8 @@ export async function adminChatsRoutes(app: FastifyInstance) {
       items = await Promise.all(
         (rows ?? []).map(async (row: any) => {
           const [{ count: messageCount, error: countErr }, { data: lastRows, error: lastErr }] = await Promise.all([
-            db.from('messages').select('id', { count: 'exact', head: true }).eq('match_id', row.id),
-            db.from('messages').select('body, created_at').eq('match_id', row.id)
+            db.from('messages').select('id', { count: 'exact', head: true }).eq('match_id', row.id).neq('type', 'icebreaker'),
+            db.from('messages').select('body, created_at').eq('match_id', row.id).neq('type', 'icebreaker')
               .order('created_at', { ascending: false }).limit(1),
           ])
           if (countErr || lastErr) throw new Error('chats sub-query failed')
@@ -172,7 +173,7 @@ export async function adminChatsRoutes(app: FastifyInstance) {
 
     const { data: rows, count, error } = await db
       .from('messages')
-      .select('id, sender_id, body, created_at, read_at', { count: 'exact' })
+      .select('id, sender_id, body, created_at, read_at, type, icebreaker_answer', { count: 'exact' })
       .eq('match_id', matchId)
       .order('created_at', { ascending: true })
       .range(from, from + MESSAGES_PAGE_SIZE - 1)
@@ -189,6 +190,7 @@ export async function adminChatsRoutes(app: FastifyInstance) {
       messages: {
         items: (rows ?? []).map((m: any) => ({
           id: m.id, senderId: m.sender_id, body: m.body, createdAt: m.created_at, readAt: m.read_at,
+          type: m.type, icebreakerAnswer: m.icebreaker_answer ?? null,
         })),
         total,
         page: pageNum,

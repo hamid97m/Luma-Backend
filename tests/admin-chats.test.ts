@@ -87,7 +87,7 @@ describe('admin chats', () => {
       matches: { data: MATCH_ROW, error: null },
       messages: {
         count: 1,
-        data: [{ id: 'msg1', sender_id: 'u1', body: 'hi', created_at: '2026-08-03T00:00:00Z', read_at: null }],
+        data: [{ id: 'msg1', sender_id: 'u1', body: 'hi', created_at: '2026-08-03T00:00:00Z', read_at: null, type: 'text', icebreaker_answer: null }],
         error: null,
       },
     })
@@ -99,7 +99,7 @@ describe('admin chats', () => {
     expect(body.match.id).toBe('m1')
     expect(body.match.users).toHaveLength(2)
     expect(body.messages.items).toEqual([
-      { id: 'msg1', senderId: 'u1', body: 'hi', createdAt: '2026-08-03T00:00:00Z', readAt: null },
+      { id: 'msg1', senderId: 'u1', body: 'hi', createdAt: '2026-08-03T00:00:00Z', readAt: null, type: 'text', icebreakerAnswer: null },
     ])
     expect(body.messages.pageCount).toBe(1)
   })
@@ -250,6 +250,95 @@ describe('admin chats', () => {
 
       expect(res.statusCode).toBe(200)
       expect(res.json()).toEqual({ count: 0 })
+    })
+  })
+
+  describe('icebreaker rows', () => {
+    type Chain = { table: string; calls: Array<{ method: string; args: unknown[] }> }
+    function mockLogged(results: Record<string, unknown>): Chain[] {
+      const chains: Chain[] = []
+      vi.mocked(db.from).mockImplementation((table: string) => {
+        const chain: Chain = { table, calls: [] }
+        chains.push(chain)
+        return chainable(results[table], chain.calls)
+      })
+      return chains
+    }
+    const excludesIcebreakers = (c: Chain) =>
+      c.calls.some((x) => x.method === 'neq' && x.args[0] === 'type' && x.args[1] === 'icebreaker')
+    const messageReads = (chains: Chain[]) =>
+      chains.filter((c) => c.table === 'messages' && c.calls.some((x) => x.method === 'select'))
+
+    it('the fake-unread count ignores icebreaker rows', async () => {
+      const chains = mockLogged({
+        users: { data: [{ id: 'seed1' }], error: null },
+        matches: { data: [{ id: 'm1', user1_id: 'seed1', user2_id: 'real1' }], error: null },
+        messages: { data: [], error: null },
+      })
+
+      await app.inject({ method: 'GET', url: '/admin/chats/unread-count', headers })
+
+      const reads = messageReads(chains)
+      expect(reads).toHaveLength(1)
+      expect(reads.every(excludesIcebreakers)).toBe(true)
+    })
+
+    it('the chat list message count and last-message preview ignore icebreaker rows', async () => {
+      const chains = mockLogged({
+        matches: { data: [MATCH_ROW], count: 1, error: null },
+        messages: { count: 4, data: [{ body: 'hey', created_at: '2026-08-03T00:00:00Z' }], error: null },
+      })
+
+      const res = await app.inject({ method: 'GET', url: '/admin/chats', headers })
+
+      expect(res.statusCode).toBe(200)
+      const reads = messageReads(chains)
+      expect(reads).toHaveLength(2)
+      expect(reads.every(excludesIcebreakers)).toBe(true)
+    })
+
+    it('the fake-unread chat list ignores icebreaker rows in unread, count and preview', async () => {
+      const chains = mockLogged({
+        users: { data: [{ id: 'seed1' }], error: null },
+        matches: { data: [FAKE_MATCH_ROW], error: null },
+        messages: {
+          data: [{ match_id: 'm1', sender_id: 'real1', body: 'hi there', created_at: '2026-08-06T00:00:00Z' }],
+          count: 1,
+          error: null,
+        },
+      })
+
+      const res = await app.inject({ method: 'GET', url: '/admin/chats?filter=fake-unread', headers })
+
+      expect(res.statusCode).toBe(200)
+      const reads = messageReads(chains)
+      expect(reads).toHaveLength(3)
+      expect(reads.every(excludesIcebreakers)).toBe(true)
+    })
+
+    it('the transcript returns type and icebreakerAnswer for each message', async () => {
+      const chains = mockLogged({
+        matches: { data: MATCH_ROW, error: null },
+        messages: {
+          count: 2,
+          data: [
+            { id: 'ib1', sender_id: 'u1', body: 'Best trip?', created_at: '2026-08-02T00:00:00Z', read_at: null, type: 'icebreaker', icebreaker_answer: 'Shiraz' },
+            { id: 'msg1', sender_id: 'u2', body: 'hi', created_at: '2026-08-03T00:00:00Z', read_at: null, type: 'text', icebreaker_answer: null },
+          ],
+          error: null,
+        },
+      })
+
+      const res = await app.inject({ method: 'GET', url: '/admin/chats/m1', headers })
+
+      expect(res.statusCode).toBe(200)
+      const select = messageReads(chains)[0].calls.find((x) => x.method === 'select')
+      expect(String(select?.args[0])).toContain('type')
+      expect(String(select?.args[0])).toContain('icebreaker_answer')
+      expect(res.json().messages.items).toEqual([
+        { id: 'ib1', senderId: 'u1', body: 'Best trip?', createdAt: '2026-08-02T00:00:00Z', readAt: null, type: 'icebreaker', icebreakerAnswer: 'Shiraz' },
+        { id: 'msg1', senderId: 'u2', body: 'hi', createdAt: '2026-08-03T00:00:00Z', readAt: null, type: 'text', icebreakerAnswer: null },
+      ])
     })
   })
 

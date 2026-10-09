@@ -152,7 +152,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
       const [swipesGiven, likesReceived, messagesSent] = await Promise.all([
         countOf('swipes', (q) => q.eq('swiper_id', id)),
         countOf('swipes', (q) => q.eq('swiped_id', id).eq('direction', 'like')),
-        countOf('messages', (q) => q.eq('sender_id', id)),
+        countOf('messages', (q) => q.eq('sender_id', id).neq('type', 'icebreaker')),
       ])
 
       const { data: matchRows, error: matchesErr } = await db

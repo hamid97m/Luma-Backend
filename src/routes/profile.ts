@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { db } from '../db.js'
+import { icebreakerIndex } from '../icebreakers/catalog.js'
 import { maybeQualifyReferral } from '../referrals/rewards.js'
 import { isLocale } from '../i18n/index.js'
 import { scheduleUserGeo } from '../geo/resolveCity.js'
@@ -66,6 +67,24 @@ export async function profileRoutes(app: FastifyInstance) {
 
     if ('locale' in updates && !isLocale(updates.locale)) {
       return reply.status(400).send({ error: 'invalid_locale' })
+    }
+
+    // Users pick from the catalog; only admins may set a custom prompt.
+    if ('icebreaker_prompt' in updates) {
+      const prompt = updates.icebreaker_prompt
+      if (prompt !== null && (typeof prompt !== 'string' || icebreakerIndex(prompt) === null)) {
+        return reply.status(400).send({ error: 'invalid_icebreaker' })
+      }
+    }
+
+    if ('icebreaker_answer' in updates) {
+      const answer = updates.icebreaker_answer
+      if (answer !== null) {
+        if (typeof answer !== 'string') return reply.status(400).send({ error: 'invalid_icebreaker' })
+        const trimmed = answer.trim()
+        if (trimmed.length > 140) return reply.status(400).send({ error: 'invalid_icebreaker' })
+        updates.icebreaker_answer = trimmed || null
+      }
     }
 
     // City is free text stored in `location`. Required when sent: 2–40 chars,

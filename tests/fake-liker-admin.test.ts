@@ -271,6 +271,20 @@ describe('admin fake-liker fakes', () => {
     expect(body.items[1]).toEqual({ id: 'f1', name: 'Aaron', likesSent: 0, matches: 0, unreadCount: 0 })
   })
 
+  it('ignores icebreaker rows when counting unread chats', async () => {
+    const messageCalls: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'users') return chainable({ data: [{ id: 'f1', name: 'Zed' }], error: null })
+      if (table === 'matches') return chainable({ data: [{ id: 'm1', user1_id: 'f1', user2_id: 'real1' }], error: null })
+      if (table === 'messages') return chainable({ data: [], error: null }, messageCalls)
+      if (table === 'swipes') return chainable({ count: 0, error: null })
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'GET', url: '/admin/fake-liker/fakes?page=1', headers })
+    expect(res.statusCode).toBe(200)
+    expect(messageCalls).toContainEqual({ method: 'neq', args: ['type', 'icebreaker'] })
+  })
+
   it('returns an empty page for an empty pool', async () => {
     vi.mocked(db.from).mockImplementation((table: string) => {
       if (table === 'users') return chainable({ data: [], error: null })

@@ -133,6 +133,7 @@ export async function adminFakeLikerRoutes(app: FastifyInstance) {
         .from('messages')
         .select('match_id, sender_id')
         .is('read_at', null)
+        .neq('type', 'icebreaker')
         .in('match_id', [...realByMatch.keys()])
       if (unreadErr) return reply.status(500).send({ error: 'fakes_fetch_failed' })
 

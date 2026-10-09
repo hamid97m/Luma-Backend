@@ -71,6 +71,24 @@ describe('GET /admin/stats', () => {
     expect(log.some((c) => c.method === 'eq' && c.args[0] === 'direction' && c.args[1] === 'like')).toBe(true)
   })
 
+  it('excludes icebreaker rows from message totals', async () => {
+    const chains: Array<{ table: string; calls: Array<{ method: string; args: unknown[] }> }> = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      const chain = { table, calls: [] as Array<{ method: string; args: unknown[] }> }
+      chains.push(chain)
+      return table === 'premium_transactions'
+        ? chainable({ count: 0, data: [], error: null }, chain.calls)
+        : chainable({ count: 5, data: [{ created_at: new Date().toISOString() }], error: null }, chain.calls)
+    })
+    const res = await app.inject({ method: 'GET', url: '/admin/stats', headers })
+    expect(res.statusCode).toBe(200)
+    const messageChains = chains.filter((c) => c.table === 'messages')
+    expect(messageChains).toHaveLength(2)
+    for (const c of messageChains) {
+      expect(c.calls).toContainEqual({ method: 'neq', args: ['type', 'icebreaker'] })
+    }
+  })
+
   it('includes premium stats', async () => {
     const today = new Date().toISOString()
     vi.mocked(db.from).mockImplementation((table: string) =>

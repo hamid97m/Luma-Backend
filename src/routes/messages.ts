@@ -88,8 +88,8 @@ export async function messagesRoutes(app: FastifyInstance) {
     const match = await getUsableMatch(matchId, req.userId)
     if (!match) return reply.status(404).send({ error: 'match_not_found' })
 
-    // Free men seeking women may chat with 3 distinct people for free; starting a
-    // 4th conversation requires premium. Continuing any of their existing chats,
+    // Free men and women whose preference includes women may chat with 2 distinct
+    // people for free; starting a 3rd conversation requires premium. Continuing any of their existing chats,
     // women, premium members, and everyone while the toggle is off are unaffected.
     if (await chatSendBlocked(req.userId, matchId)) {
       return reply.status(403).send({ error: 'premium_required' })

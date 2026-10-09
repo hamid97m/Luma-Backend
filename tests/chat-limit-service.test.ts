@@ -16,10 +16,12 @@ const NOW = new Date('2026-08-31T12:00:00Z').getTime()
 const iso = (ms: number) => new Date(ms).toISOString()
 
 describe('chatLimitApplies (shared swipe cohort)', () => {
-  it('applies to men seeking women, exempts everyone else', () => {
+  it('applies to men and women whose preference includes women', () => {
     expect(chatLimitApplies('man', 'women')).toBe(true)
     expect(chatLimitApplies('man', 'both')).toBe(true)
-    expect(chatLimitApplies('woman', 'women')).toBe(false)
+    expect(chatLimitApplies('woman', 'women')).toBe(true)
+    expect(chatLimitApplies('woman', 'both')).toBe(true)
+    expect(chatLimitApplies('woman', 'men')).toBe(false)
     expect(chatLimitApplies('man', 'men')).toBe(false)
   })
 })
@@ -36,16 +38,16 @@ describe('matchPremiumRequired (pure decision)', () => {
   })
 
   it('allows a new chat while under the free limit', () => {
-    expect(matchPremiumRequired(ctx(true, ['a', 'b']), 'new')).toBe(false)
+    expect(matchPremiumRequired(ctx(true, ['a']), 'new')).toBe(false)
   })
 
   it('blocks a new chat once the free limit is reached', () => {
-    expect(matchPremiumRequired(ctx(true, ['a', 'b', 'c']), 'fourth')).toBe(true)
+    expect(matchPremiumRequired(ctx(true, ['a', 'b']), 'third')).toBe(true)
   })
 
-  it('the 3rd new partner is still free, the 4th is not', () => {
-    expect(matchPremiumRequired(ctx(true, ['a', 'b']), 'third')).toBe(false)
-    expect(matchPremiumRequired(ctx(true, ['a', 'b', 'c']), 'fourth')).toBe(true)
+  it('the 2nd new partner is still free, the 3rd is not', () => {
+    expect(matchPremiumRequired(ctx(true, ['a']), 'second')).toBe(false)
+    expect(matchPremiumRequired(ctx(true, ['a', 'b']), 'third')).toBe(true)
   })
 })
 
@@ -103,8 +105,8 @@ describe('chatGateContext', () => {
     expect((await chatGateContext('u1', NOW)).gated).toBe(false)
   })
 
-  it('is not gated for a woman and never touches the toggle', async () => {
-    mockDb({ user: { ...LIMITED_MAN, gender: 'woman' } })
+  it('is not gated for a woman seeking only men and never touches the toggle', async () => {
+    mockDb({ user: { ...LIMITED_MAN, gender: 'woman', looking_for: 'men' } })
     expect((await chatGateContext('u1', NOW)).gated).toBe(false)
     expect(isPremiumEnabled).not.toHaveBeenCalled()
   })
@@ -118,30 +120,30 @@ describe('chatGateContext', () => {
 describe('chatSendBlocked', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('blocks a limited free man starting a 4th conversation', async () => {
-    mockDb({ user: LIMITED_MAN, messageMatchIds: ['m1', 'm2', 'm3'] })
+  it('blocks a limited free man starting a 3rd conversation', async () => {
+    mockDb({ user: LIMITED_MAN, messageMatchIds: ['m1', 'm2'] })
     vi.mocked(isPremiumEnabled).mockResolvedValue(true)
-    expect(await chatSendBlocked('u1', 'm4', NOW)).toBe(true)
+    expect(await chatSendBlocked('u1', 'm3', NOW)).toBe(true)
   })
 
-  it('allows replying in one of his 3 existing conversations', async () => {
-    mockDb({ user: LIMITED_MAN, messageMatchIds: ['m1', 'm2', 'm3'] })
+  it('allows replying in one of his existing conversations', async () => {
+    mockDb({ user: LIMITED_MAN, messageMatchIds: ['m1', 'm2'] })
     vi.mocked(isPremiumEnabled).mockResolvedValue(true)
     expect(await chatSendBlocked('u1', 'm2', NOW)).toBe(false)
   })
 
-  it('allows a 3rd new conversation (still within the free limit)', async () => {
-    mockDb({ user: LIMITED_MAN, messageMatchIds: ['m1', 'm2'] })
+  it('allows a 2nd new conversation (still within the free limit)', async () => {
+    mockDb({ user: LIMITED_MAN, messageMatchIds: ['m1'] })
     vi.mocked(isPremiumEnabled).mockResolvedValue(true)
-    expect(await chatSendBlocked('u1', 'm3', NOW)).toBe(false)
+    expect(await chatSendBlocked('u1', 'm2', NOW)).toBe(false)
   })
 
   it('never blocks an exempt viewer', async () => {
-    mockDb({ user: { ...LIMITED_MAN, gender: 'woman' }, messageMatchIds: ['m1', 'm2', 'm3'] })
+    mockDb({ user: { ...LIMITED_MAN, gender: 'woman', looking_for: 'men' }, messageMatchIds: ['m1', 'm2', 'm3'] })
     expect(await chatSendBlocked('u1', 'm4', NOW)).toBe(false)
   })
 
-  it('exposes the free limit as 3', () => {
-    expect(FREE_CHAT_LIMIT).toBe(3)
+  it('exposes the free limit as 2', () => {
+    expect(FREE_CHAT_LIMIT).toBe(2)
   })
 })

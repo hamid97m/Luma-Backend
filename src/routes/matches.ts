@@ -32,8 +32,8 @@ export async function matchesRoutes(app: FastifyInstance) {
       return !other.deleted_at && !blockedIds.has(other.id)
     })
 
-    // One read backs the per-match premium flag (free men seeking women get 3
-    // free chats). Non-gated viewers — and an empty list — get an empty context
+    // One read backs the per-match premium flag (free men and women whose
+    // preference includes women get 2 free chats). Non-gated viewers — and an empty list — get an empty context
     // → every match free, and we skip the read when there's nothing to flag.
     const gateCtx = activeRows.length
       ? await chatGateContext(req.userId)

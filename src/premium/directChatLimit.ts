@@ -2,10 +2,11 @@ import { db } from '../db.js'
 import { isPremiumEnabled, isPremiumActive } from './service.js'
 import { swipeLimitApplies } from './swipeLimit.js'
 
-// Premium men seeking women may START up to DIRECT_CHAT_LIMIT direct chats
-// (chatting without a mutual like) per rolling window. Women, everyone outside
-// the cohort, and everyone while premium is off chat freely & unlimited;
-// non-premium men in the cohort are routed to the paywall instead.
+// Premium members of the paying cohort (a man or woman whose preference
+// includes women) may START up to DIRECT_CHAT_LIMIT direct chats (chatting
+// without a mutual like) per rolling window. People seeking only men,
+// nonbinary users, and everyone while premium is off chat freely and
+// unlimited; non-premium members of the cohort are routed to the paywall.
 export const DIRECT_CHAT_LIMIT = 3
 export const DIRECT_CHAT_WINDOW_MS = 24 * 60 * 60 * 1000
 
@@ -42,8 +43,8 @@ const WINDOW_COLUMNS = 'gender, looking_for, premium_until, direct_chat_window_s
 
 export type DirectChatGate = 'free' | 'paywall' | 'quota'
 
-// 'free' = no gate (women / non-cohort / premium-off). 'paywall' = cohort man,
-// premium on, not subscribed. 'quota' = cohort man, premium on, subscribed.
+// 'free' = no gate (outside the cohort, or premium off). 'paywall' = in the
+// cohort, premium on, not subscribed. 'quota' = in the cohort, premium on, subscribed.
 async function classifyGate(
   row: { gender: string | null; looking_for: string | null; premium_until: string | null },
   nowMs: number,

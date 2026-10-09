@@ -2,13 +2,14 @@ import { db } from '../db.js'
 import { isPremiumEnabled, isPremiumActive } from './service.js'
 import { swipeLimitApplies } from './swipeLimit.js'
 
-// A free man seeking women may chat with FREE_CHAT_LIMIT distinct people for
-// free; a "chat" is counted the first time he SENDS a message in a match.
-// Continuing any conversation he's already messaged in stays free forever —
-// only *starting* a new one beyond the limit requires premium. Women, everyone
-// outside the cohort, premium members, and everyone while the premium toggle
-// is off are unlimited. Reading is never gated (this only guards sending).
-export const FREE_CHAT_LIMIT = 3
+// A free user in the paying cohort (a man or woman whose preference includes
+// women) may chat with FREE_CHAT_LIMIT distinct people for free; a "chat" is
+// counted the first time they SEND a message in a match. Continuing any
+// conversation they've already messaged in stays free forever — only
+// *starting* a new one beyond the limit requires premium. People seeking only
+// men, nonbinary users, premium members, and everyone while the premium
+// toggle is off are unlimited. Reading is never gated (this only guards sending).
+export const FREE_CHAT_LIMIT = 2
 
 // Reuse the swipe-limit cohort so the two free-tier gates stay in lockstep.
 // Wrapped (not re-exported) so this module doesn't touch swipeLimitApplies at

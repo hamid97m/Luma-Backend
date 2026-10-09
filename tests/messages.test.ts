@@ -81,11 +81,12 @@ function mockMatchLookup(overrides: Partial<{
   }
 }
 
-// POST reads the sender's cohort for the free-chat gate. A woman short-circuits
-// as exempt (no premium_config / messages reads), so sending is always allowed.
+// POST reads the sender's cohort for the free-chat gate. A woman seeking only
+// men short-circuits as exempt (no premium_config / messages reads), so sending
+// is always allowed.
 function mockChatGateExempt() {
   vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({ eq: () => ({ single: () => ({ data: { gender: 'woman', looking_for: 'women', premium_until: null }, error: null }) }) }),
+    select: () => ({ eq: () => ({ single: () => ({ data: { gender: 'woman', looking_for: 'men', premium_until: null }, error: null }) }) }),
   } as any)
 }
 

@@ -1,15 +1,19 @@
 import { db } from '../db.js'
 import { isPremiumEnabled, isPremiumActive } from './service.js'
 
-// Free men seeking women get SWIPE_LIMIT swipes (likes AND passes) per
-// 4-hour window; the window starts at their first counted swipe and fully
-// refills when it ends. Everyone else — and premium members, and everyone
-// while the premium toggle is off — is unlimited.
+// Free men and women whose preference includes women get SWIPE_LIMIT swipes
+// (likes AND passes) per 4-hour window; the window starts at their first
+// counted swipe and fully refills when it ends. Everyone else — men seeking
+// only men, women seeking only men, nonbinary users, premium members, and
+// everyone while the premium toggle is off — is unlimited.
 export const SWIPE_LIMIT = 20
 export const SWIPE_WINDOW_MS = 4 * 60 * 60 * 1000
 
+const SEEKS_WOMEN = ['women', 'both', 'everyone']
+
 export function swipeLimitApplies(gender: string | null, lookingFor: string | null): boolean {
-  return gender === 'man' && ['women', 'both', 'everyone'].includes(lookingFor ?? '')
+  if (gender !== 'man' && gender !== 'woman') return false
+  return SEEKS_WOMEN.includes(lookingFor ?? '')
 }
 
 export interface SwipeWindow {

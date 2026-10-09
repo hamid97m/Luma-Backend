@@ -76,9 +76,11 @@ const QUOTA_USER = {
 }
 
 describe('directChatLimitApplies', () => {
-  it('matches the swipe cohort (men seeking women/both/everyone)', () => {
+  it('matches the swipe cohort (men and women whose preference includes women)', () => {
     expect(directChatLimitApplies('man', 'women')).toBe(true)
     expect(directChatLimitApplies('man', 'everyone')).toBe(true)
+    expect(directChatLimitApplies('woman', 'women')).toBe(true)
+    expect(directChatLimitApplies('woman', 'everyone')).toBe(true)
     expect(directChatLimitApplies('woman', 'men')).toBe(false)
     expect(directChatLimitApplies('man', 'men')).toBe(false)
   })
@@ -101,8 +103,8 @@ describe('evaluateDirectChatWindow', () => {
 describe('checkAndCountDirectChat', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('gate=free for a woman (never checks the toggle)', async () => {
-    mockUserRow({ ...QUOTA_USER, gender: 'woman' })
+  it('gate=free for a woman seeking only men (never checks the toggle)', async () => {
+    mockUserRow({ ...QUOTA_USER, gender: 'woman', looking_for: 'men' })
     expect(await checkAndCountDirectChat('u1', NOW)).toEqual({ gate: 'free' })
     expect(isPremiumEnabled).not.toHaveBeenCalled()
   })
@@ -212,8 +214,8 @@ describe('getDirectChatStatus (read-only, never counts)', () => {
     expect(updated).toBe(false)
   })
 
-  it('reports gate=free with full remaining for a woman', async () => {
-    mockUserRow({ ...QUOTA_USER, gender: 'woman' })
+  it('reports gate=free with full remaining for a woman seeking only men', async () => {
+    mockUserRow({ ...QUOTA_USER, gender: 'woman', looking_for: 'men' })
     expect(await getDirectChatStatus('u1', NOW)).toEqual({ gate: 'free', remaining: DIRECT_CHAT_LIMIT, limit: DIRECT_CHAT_LIMIT, resetAt: null })
   })
 

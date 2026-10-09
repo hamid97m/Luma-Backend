@@ -17,15 +17,17 @@ const NOW = new Date('2026-08-07T12:00:00Z').getTime()
 const iso = (ms: number) => new Date(ms).toISOString()
 
 describe('swipeLimitApplies', () => {
-  it('applies to men whose preference includes women', () => {
+  it('applies to men and women whose preference includes women', () => {
     expect(swipeLimitApplies('man', 'women')).toBe(true)
     expect(swipeLimitApplies('man', 'both')).toBe(true)
     expect(swipeLimitApplies('man', 'everyone')).toBe(true)
+    expect(swipeLimitApplies('woman', 'women')).toBe(true)
+    expect(swipeLimitApplies('woman', 'both')).toBe(true)
+    expect(swipeLimitApplies('woman', 'everyone')).toBe(true)
   })
   it('exempts everyone else', () => {
     expect(swipeLimitApplies('man', 'men')).toBe(false)
-    expect(swipeLimitApplies('woman', 'women')).toBe(false)
-    expect(swipeLimitApplies('woman', 'everyone')).toBe(false)
+    expect(swipeLimitApplies('woman', 'men')).toBe(false)
     expect(swipeLimitApplies('nonbinary', 'women')).toBe(false)
     expect(swipeLimitApplies(null, 'women')).toBe(false)
     expect(swipeLimitApplies('man', null)).toBe(false)
@@ -174,8 +176,8 @@ describe('checkAndCountSwipe', () => {
     expect(res).toEqual({ blocked: false, swipeLimit: null })
   })
 
-  it('is exempt for a woman regardless of preference (never touches the toggle)', async () => {
-    mockUserRow({ ...LIMITED_USER, gender: 'woman' })
+  it('is exempt for a woman seeking only men (never touches the toggle)', async () => {
+    mockUserRow({ ...LIMITED_USER, gender: 'woman', looking_for: 'men' })
     const res = await checkAndCountSwipe('u1', NOW)
     expect(res).toEqual({ blocked: false, swipeLimit: null })
     expect(isPremiumEnabled).not.toHaveBeenCalled()
@@ -257,7 +259,7 @@ describe('getSwipeLimitStatus', () => {
     vi.mocked(isPremiumEnabled).mockResolvedValue(true)
     expect(await getSwipeLimitStatus('u1', NOW)).toEqual({ limited: false, resetAt: null })
 
-    mockUserRow({ ...LIMITED_USER, gender: 'woman' })
+    mockUserRow({ ...LIMITED_USER, gender: 'woman', looking_for: 'men' })
     expect(await getSwipeLimitStatus('u1', NOW)).toEqual({ limited: false, resetAt: null })
   })
 

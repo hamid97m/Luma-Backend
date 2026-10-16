@@ -187,16 +187,17 @@ export async function discoveryRoutes(app: FastifyInstance) {
         .from('users')
         .select(PROFILE_COLUMNS)
         .eq('is_active', true)
+        // Signup state. preparing = opened the app but has not finished
+        // (age + city + photo). Only active accounts enter the feed.
+        .eq('account_status', 'active')
         .is('banned_at', null)
         .is('paused_at', null)
         // Explicit soft-delete guard. Deleting also sets is_active=false today,
         // so this looks redundant — but discovery must never depend on that
         // coincidence (e.g. a future re-activation path that forgets deleted_at).
         .is('deleted_at', null)
-        // age > 0 is the canonical "profile setup complete" signal (see
-        // profile.ts / auth.ts). New users start at age 0 with is_active
-        // defaulting true, so without this an incomplete profile (age 0)
-        // would surface as a blank/half-empty card.
+        // age > 0 stays as a backstop: a row marked active without an age
+        // must still not surface as a blank card.
         .gt('age', 0)
       if (!includeSeed) q = q.eq('is_seed', false)
       if (genderFilter) q = q.eq('gender', genderFilter)

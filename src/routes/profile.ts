@@ -4,11 +4,13 @@ import { icebreakerIndex } from '../icebreakers/catalog.js'
 import { maybeQualifyReferral } from '../referrals/rewards.js'
 import { isLocale } from '../i18n/index.js'
 import { scheduleUserGeo } from '../geo/resolveCity.js'
+import { scheduleMainPhotoCheck } from '../moderation/photoAiCheck.js'
+import { markActiveIfSignupComplete } from '../users/accountStatus.js'
 
 export async function getProfileWithPhotos(userId: string) {
   const { data: user, error } = await db
     .from('users')
-    .select('id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt, icebreaker_answer, is_active, paused_at, locale')
+    .select('id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt, icebreaker_answer, is_active, paused_at, locale, account_status')
     .eq('id', userId)
     .single()
   if (error || !user) return null
@@ -18,6 +20,8 @@ export async function getProfileWithPhotos(userId: string) {
     .select('id, url, position')
     .eq('user_id', userId)
     .order('position', { ascending: true })
+
+  await markActiveIfSignupComplete(userId, user, (photos ?? []).length)
 
   const setupComplete = user.age > 0
 
@@ -109,12 +113,14 @@ export async function profileRoutes(app: FastifyInstance) {
       .from('users')
       .update({ ...updates, last_active: new Date().toISOString() })
       .eq('id', req.userId)
-      .select('id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt, icebreaker_answer, is_active, locale')
+      .select('id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt, icebreaker_answer, is_active, locale, account_status')
       .single()
 
     if (error || !user) return reply.status(500).send({ error: 'update_failed' })
 
     if ('location' in updates) scheduleUserGeo(req.userId, user.location, req.log)
+    // Onboarding uploads the first photo before gender is saved.
+    if ('gender' in updates) scheduleMainPhotoCheck(req.userId, req.log)
 
     const { data: photos } = await db
       .from('user_photos')
@@ -122,6 +128,7 @@ export async function profileRoutes(app: FastifyInstance) {
       .eq('user_id', req.userId)
       .order('position', { ascending: true })
 
+    await markActiveIfSignupComplete(req.userId, user, (photos ?? []).length)
     await maybeQualifyReferral(req.userId)
 
     return {
@@ -186,6 +193,7 @@ export async function profileRoutes(app: FastifyInstance) {
       icebreaker_answer: null,
       age: 0,
       is_active: false,
+      account_status: 'preparing',
       // NULL = "never chose a language": a re-signup goes through the
       // first-open picker again instead of inheriting the old choice.
       locale: null,

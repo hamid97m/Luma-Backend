@@ -39,6 +39,7 @@ describe('POST /admin/users', () => {
     expect(inserted.telegram_id).toBeLessThan(0)
     expect(inserted.is_seed).toBe(true)
     expect(inserted.is_active).toBe(true)
+    expect(inserted.account_status).toBe('active')
     expect(inserted.name).toBe('Seed Sara')
     // Omitted language is Persian — current fake profiles are Iranian.
     expect(inserted.locale).toBe('fa')

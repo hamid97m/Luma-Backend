@@ -42,7 +42,7 @@ describe('GET /admin/users', () => {
       id: 'u1', telegramId: 42, username: 'sara', name: 'Sara', age: 24,
       gender: 'woman', isActive: true, isSeed: false, bannedAt: null,
       deletedAt: null, createdAt: '2026-08-01T00:00:00Z', lastActive: '2026-08-04T00:00:00Z',
-      geoCity: 'Tehran', geoCountry: 'IR', locale: null,
+      geoCity: 'Tehran', geoCountry: 'IR', locale: null, accountStatus: 'preparing',
     })
     expect(body.total).toBe(42)
     expect(body.page).toBe(2)

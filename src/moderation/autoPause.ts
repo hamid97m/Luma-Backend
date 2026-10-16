@@ -83,29 +83,38 @@ export async function maybeAutoPauseForReports(reportedUserId: string): Promise<
       .eq('status', 'pending')
     if ((count ?? 0) < threshold) return false
 
-    // The update only matches an active, non-banned, not-already-paused row,
-    // so concurrent reports can't double-pause or double-notify.
-    const { data } = await db
-      .from('users')
-      .update({ paused_at: new Date().toISOString() })
-      .eq('id', reportedUserId)
-      .is('paused_at', null)
-      .is('banned_at', null)
-      .select('telegram_id, allows_write_to_pm, locale')
-      .maybeSingle()
-    if (!data) return false
-
-    await deleteAllPhotosForUser(reportedUserId)
-
-    // Telegram rejects DMs from bots the user never granted write access to;
-    // a false flag means an explicit decline, so skip it (null = unknown, try).
-    if (data.telegram_id > 0 && data.allows_write_to_pm !== false) {
-      Promise.resolve(notifyPaused(data.telegram_id, data.locale ?? null)).catch((err) =>
-        console.error('[moderation] notifyPaused failed:', err?.message ?? err))
-    }
-    return true
+    return await pauseForPhotoReview(reportedUserId)
   } catch (err) {
     console.error('[moderation] maybeAutoPauseForReports failed:', (err as Error)?.message ?? err)
     return false
   }
+}
+
+/**
+ * Hide a user from discovery until they upload a fresh photo: pause, delete
+ * every photo, and DM them. Returns true only when this call transitioned the
+ * user into the paused state.
+ */
+export async function pauseForPhotoReview(userId: string): Promise<boolean> {
+  // The update only matches an active, non-banned, not-already-paused row,
+  // so concurrent callers can't double-pause or double-notify.
+  const { data } = await db
+    .from('users')
+    .update({ paused_at: new Date().toISOString() })
+    .eq('id', userId)
+    .is('paused_at', null)
+    .is('banned_at', null)
+    .select('telegram_id, allows_write_to_pm, locale')
+    .maybeSingle()
+  if (!data) return false
+
+  await deleteAllPhotosForUser(userId)
+
+  // Telegram rejects DMs from bots the user never granted write access to;
+  // a false flag means an explicit decline, so skip it (null = unknown, try).
+  if (data.telegram_id > 0 && data.allows_write_to_pm !== false) {
+    Promise.resolve(notifyPaused(data.telegram_id, data.locale ?? null)).catch((err) =>
+      console.error('[moderation] notifyPaused failed:', err?.message ?? err))
+  }
+  return true
 }

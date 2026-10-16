@@ -244,6 +244,46 @@ describe('PUT /profile/me', () => {
     expect(res.json()).toEqual({ error: 'invalid_age' })
   })
 
+  it('promotes a finished signup from preparing to active', async () => {
+    setupAuth()
+
+    const promote = vi.fn().mockReturnValue({
+      eq: () => ({ eq: () => Promise.resolve({ error: null }) }),
+    })
+    vi.mocked(db.from)
+      .mockReturnValueOnce({
+        update: () => ({
+          eq: () => ({
+            select: () => ({
+              single: () => ({
+                data: {
+                  id: USER_ID, name: 'Ali', age: 25, location: 'Tehran',
+                  gender: 'man', looking_for: 'women', bio: null, account_status: 'preparing',
+                },
+                error: null,
+              }),
+            }),
+          }),
+        }),
+      } as any)
+      .mockReturnValueOnce({
+        select: () => ({
+          eq: () => ({ order: () => ({ data: [{ id: 'p1', url: 'https://img', position: 0 }], error: null }) }),
+        }),
+      } as any)
+      .mockReturnValueOnce({ update: promote } as any)
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/profile/me',
+      headers: AUTH,
+      payload: { location: 'Tehran', age: 25 },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(promote).toHaveBeenCalledWith({ account_status: 'active' })
+  })
+
   it('pauses the account by setting is_active to false', async () => {
     setupAuth()
 
@@ -296,7 +336,7 @@ describe('DELETE /profile/me', () => {
     expect(updateMock).toHaveBeenCalledWith(expect.objectContaining({
       name: '', bio: null, interests: [], location: null,
       icebreaker_prompt: null, icebreaker_answer: null,
-      age: 0, is_active: false,
+      age: 0, is_active: false, account_status: 'preparing',
       // NULL = "never chose a language" → a re-signup gets the picker again.
       locale: null,
     }))

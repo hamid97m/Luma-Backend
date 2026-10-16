@@ -173,7 +173,7 @@ const STALE = new Date(Date.now() - 30 * 60 * 1000).toISOString()
 function mkUser(id: string, o: Partial<any> = {}) {
   return {
     id, name: `U-${id}`, is_seed: false, gender: 'man', looking_for: 'women',
-    location: null, is_active: true, banned_at: null, deleted_at: null,
+    location: null, is_active: true, account_status: 'active', banned_at: null, deleted_at: null,
     telegram_id: 1000, allows_write_to_pm: null, last_active: null,
     notified_offline_at: null, created_at: OLD, ...o,
   }

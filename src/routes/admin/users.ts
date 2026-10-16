@@ -26,6 +26,7 @@ export function toListItem(u: any) {
     bannedAt: u.banned_at,
     pausedAt: u.paused_at,
     deletedAt: u.deleted_at,
+    accountStatus: u.account_status === 'active' ? 'active' : 'preparing',
     createdAt: u.created_at,
     lastActive: u.last_active,
     geoCity: u.geo_city ?? null,
@@ -43,11 +44,12 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     let q: any = db
       .from('users')
       .select(
-        'id, telegram_id, username, name, age, gender, looking_for, is_active, is_seed, banned_at, paused_at, deleted_at, created_at, last_active, geo_city, geo_country, locale',
+        'id, telegram_id, username, name, age, gender, looking_for, is_active, is_seed, banned_at, paused_at, deleted_at, created_at, last_active, geo_city, geo_country, locale, account_status',
         { count: 'exact' }
       )
 
-    if (status === 'active') q = q.is('deleted_at', null).is('banned_at', null)
+    if (status === 'active') q = q.eq('account_status', 'active').is('deleted_at', null).is('banned_at', null)
+    else if (status === 'preparing') q = q.eq('account_status', 'preparing').is('deleted_at', null).is('banned_at', null)
     else if (status === 'banned') q = q.not('banned_at', 'is', null)
     else if (status === 'deleted') q = q.not('deleted_at', 'is', null)
     else if (status === 'seed') q = q.eq('is_seed', true)
@@ -111,6 +113,11 @@ export async function adminUsersRoutes(app: FastifyInstance) {
         locale,
         is_seed: true,
         is_active: true,
+        // A seed is discoverable only once it has a city and a photo, same bar
+        // as a finished signup. Age is already validated above.
+        account_status: (typeof body.location === 'string' && body.location.trim().length >= 2 && photos.length > 0)
+          ? 'active'
+          : 'preparing',
       })
       .select('id')
       .single()

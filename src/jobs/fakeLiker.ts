@@ -215,6 +215,7 @@ export async function runFakeLikerJob(
       .eq('is_seed', true)
       .eq('gender', 'woman')
       .eq('is_active', true)
+      .eq('account_status', 'active')
       .is('banned_at', null)
       .is('deleted_at', null)
 
@@ -367,7 +368,7 @@ export async function runFakeLikerJob(
         const realIds = [...new Set(slice.map((p) => p.realId))]
         const { data: reals, error: realsErr } = await db
           .from('users')
-          .select('id, gender, telegram_id, allows_write_to_pm, locale, is_seed, is_active, banned_at, deleted_at')
+          .select('id, gender, telegram_id, allows_write_to_pm, locale, is_seed, is_active, account_status, banned_at, deleted_at')
           .in('id', realIds)
         if (realsErr) {
           stats.errors++
@@ -378,7 +379,7 @@ export async function runFakeLikerJob(
             if (remainingBudget <= 0) break
             try {
               const real: any = realById.get(realId)
-              if (!real || real.is_seed || !real.is_active || real.banned_at || real.deleted_at) continue
+              if (!real || real.is_seed || !real.is_active || real.account_status !== 'active' || real.banned_at || real.deleted_at) continue
               const fake = fakeById.get(fakeId)
               if (!fake) continue // liked fake is no longer in the active pool → skip
               if (!fakeAllowsGender(fake.looking_for, real.gender)) continue // she isn't looking for that gender
@@ -414,6 +415,7 @@ export async function runFakeLikerJob(
         .select('id, gender, telegram_id, allows_write_to_pm, locale, location')
         .eq('is_seed', false)
         .eq('is_active', true)
+        .eq('account_status', 'active')
         .is('banned_at', null)
         .is('deleted_at', null)
         .lte('created_at', cutoff)

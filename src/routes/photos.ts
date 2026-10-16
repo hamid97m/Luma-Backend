@@ -3,6 +3,7 @@ import { db } from '../db.js'
 import { randomUUID } from 'crypto'
 import { fetchTelegramProfilePhoto } from '../bot.js'
 import { maybeQualifyReferral } from '../referrals/rewards.js'
+import { scheduleMainPhotoCheck } from '../moderation/photoAiCheck.js'
 
 const MAX_PHOTOS = 6
 
@@ -78,6 +79,8 @@ export async function photosRoutes(app: FastifyInstance) {
       await db.from('user_photos').update({ position: p.position - 1 }).eq('id', p.id)
     }
 
+    if (photo.position === 0) scheduleMainPhotoCheck(req.userId, req.log)
+
     return { ok: true }
   })
 
@@ -90,27 +93,33 @@ export async function photosRoutes(app: FastifyInstance) {
     // UNIQUE(user_id, position) means writing final positions directly can collide
     // with whatever photo currently holds that slot, so stage through negative
     // positions first to clear all slots before assigning the real ones.
-    for (let i = 0; i < order.length; i++) {
-      const { error } = await db
-        .from('user_photos')
-        .update({ position: -(i + 1) })
-        .eq('id', order[i])
-        .eq('user_id', req.userId)
+    // A failed pass can leave a photo at a negative position, which sorts first
+    // and shows as main, so the check runs on every exit.
+    try {
+      for (let i = 0; i < order.length; i++) {
+        const { error } = await db
+          .from('user_photos')
+          .update({ position: -(i + 1) })
+          .eq('id', order[i])
+          .eq('user_id', req.userId)
 
-      if (error) return reply.status(500).send({ error: 'reorder_failed' })
+        if (error) return reply.status(500).send({ error: 'reorder_failed' })
+      }
+
+      for (let i = 0; i < order.length; i++) {
+        const { error } = await db
+          .from('user_photos')
+          .update({ position: i })
+          .eq('id', order[i])
+          .eq('user_id', req.userId)
+
+        if (error) return reply.status(500).send({ error: 'reorder_failed' })
+      }
+
+      return { ok: true }
+    } finally {
+      scheduleMainPhotoCheck(req.userId, req.log)
     }
-
-    for (let i = 0; i < order.length; i++) {
-      const { error } = await db
-        .from('user_photos')
-        .update({ position: i })
-        .eq('id', order[i])
-        .eq('user_id', req.userId)
-
-      if (error) return reply.status(500).send({ error: 'reorder_failed' })
-    }
-
-    return { ok: true }
   })
 
   // Confirm a photo upload (insert DB row after client uploads to storage)
@@ -182,6 +191,7 @@ export async function photosRoutes(app: FastifyInstance) {
     }
 
     await maybeQualifyReferral(req.userId)
+    if (nextPosition === 0) scheduleMainPhotoCheck(req.userId, req.log)
 
     return { photo: { id: photoId, url: publicUrl, position: nextPosition } }
   })
@@ -242,6 +252,8 @@ export async function photosRoutes(app: FastifyInstance) {
         .eq('status', 'pending')
     }
 
+    if (oldPhoto.position === 0) scheduleMainPhotoCheck(req.userId, req.log)
+
     return { photo: { id: newPhotoId, url: publicUrl, position: oldPhoto.position } }
   })
 
@@ -295,7 +307,7 @@ export async function photosRoutes(app: FastifyInstance) {
 
     const { error: uploadErr } = await db.storage
       .from('profile-photos')
-      .upload(path, photo.buffer, { contentType: photo.mime, upsert: true })
+      .upload(path, photo.buffer, { contentType: photo.mime, upsert: true, cacheControl: '604800' })
 
     if (uploadErr) return reply.status(500).send({ error: 'upload_failed' })
 
@@ -327,6 +339,7 @@ export async function photosRoutes(app: FastifyInstance) {
     }
 
     await maybeQualifyReferral(req.userId)
+    if (nextPosition === 0) scheduleMainPhotoCheck(req.userId, req.log)
 
     return { photo: { id: photoId, url: publicUrl, position: nextPosition } }
   })

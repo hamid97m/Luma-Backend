@@ -205,6 +205,8 @@ describe('GET /discovery', () => {
       const isCall = log.find((c) => c.method === 'is' && c.args[0] === 'deleted_at')
       expect(isCall).toBeDefined()
       expect(isCall!.args[1]).toBeNull()
+      const statusCall = log.find((c) => c.method === 'eq' && c.args[0] === 'account_status')
+      expect(statusCall?.args[1]).toBe('active')
     }
   })
 

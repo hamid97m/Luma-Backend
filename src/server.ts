@@ -35,7 +35,7 @@ declare module 'fastify' {
 const LAST_ACTIVE_THROTTLE_MS = 60_000
 
 /** The only way a paused user can come back is by uploading a fresh photo.
- *  Redeploy stamp: 2026-10-16. */
+ *  Redeploy stamp: 2026-10-16T19:05. */
 export function isPausedExempt(method: string, url: string): boolean {
   if (method !== 'POST') return false
   const path = url.split('?')[0]

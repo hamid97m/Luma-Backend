@@ -34,6 +34,18 @@ declare module 'fastify' {
 
 const LAST_ACTIVE_THROTTLE_MS = 60_000
 
+/** The only way a paused user can come back is by uploading a fresh photo. */
+export function isPausedExempt(method: string, url: string): boolean {
+  if (method !== 'POST') return false
+  const path = url.split('?')[0]
+  return (
+    path === '/profile/me/photos/upload-url' ||
+    path === '/profile/me/photos/confirm' ||
+    path === '/profile/me/photos/from-telegram' ||
+    /^\/profile\/me\/photos\/[^/]+\/replace$/.test(path)
+  )
+}
+
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
     logger: process.env.NODE_ENV === 'test'
@@ -92,6 +104,9 @@ export async function buildApp(): Promise<FastifyInstance> {
     if (data.banned_at) return reply.status(401).send({ error: 'account_banned', botUsername: getBotUsername() })
     req.userId = data.id
     req.isPaused = Boolean(data.paused_at)
+    if (req.isPaused && !isPausedExempt(req.method, req.url)) {
+      return reply.status(403).send({ error: 'account_paused' })
+    }
 
     if (data.last_active && Date.now() - new Date(data.last_active).getTime() > LAST_ACTIVE_THROTTLE_MS) {
       // Clearing notified_offline_at here means the very first request after

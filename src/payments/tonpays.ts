@@ -24,6 +24,8 @@ export type TonPaysCheck = {
   paid: boolean
   remainingAmount: number | null
   refundPending: boolean
+  cardNumber: string | null
+  cardHolder: string | null
 }
 
 export class TonPaysApiError extends Error {
@@ -162,6 +164,8 @@ export async function checkInvoice(invoiceId: string): Promise<TonPaysCheck> {
     paid: data.paid,
     remainingAmount: data.remaining_amount,
     refundPending: data.refund_pending,
+    cardNumber: data.card_number ?? null,
+    cardHolder: data.card_holder ?? data.card_name ?? null,
   }
 }
 

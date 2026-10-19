@@ -220,18 +220,24 @@ async function createTonPaysCheckout(
 
     if (oldRow && oldRow.plan_id === plan.id && oldRow.price_toman === priceToman) {
       // Same purchase already has a live invoice at TonPays — this attempt never
-      // got one, so drop it and resume the existing one instead.
-      await db.from('premium_transactions').update({ status: 'canceled' }).eq('id', tx.id)
-      await checkInvoice(oldRow.tonpays_invoice_id as string)
-      return {
-        transactionId: oldRow.id as string,
-        provider: 'tonpays',
-        payment: {
-          cardNumber: '', cardHolder: '',
-          amountToman: (oldRow.tonpays_final_amount as number | null) ?? (oldRow.price_toman as number),
-          invoiceId: oldRow.tonpays_invoice_id as string,
-        },
+      // got one, so drop it and resume the existing one instead, if the check
+      // actually gives us a card to show the buyer.
+      const check = await checkInvoice(oldRow.tonpays_invoice_id as string)
+      if (check.cardNumber && check.cardHolder) {
+        await db.from('premium_transactions').update({ status: 'canceled' }).eq('id', tx.id)
+        return {
+          transactionId: oldRow.id as string,
+          provider: 'tonpays',
+          payment: {
+            cardNumber: check.cardNumber, cardHolder: check.cardHolder,
+            amountToman: (oldRow.tonpays_final_amount as number | null) ?? (oldRow.price_toman as number),
+            invoiceId: oldRow.tonpays_invoice_id as string,
+          },
+        }
       }
+      // No fresh card data available to resume with — fall through to the same
+      // cancel-and-recreate path as a mismatched plan/amount, below, so the buyer
+      // always gets a valid card + amount instead of an empty one.
     }
 
     if (oldRow) {

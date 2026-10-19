@@ -161,7 +161,7 @@ describe('checkInvoice', () => {
     fetchMock.mockReset()
   })
 
-  it('maps a success response to TonPaysCheck', async () => {
+  it('maps a success response with no card fields to null cardNumber/cardHolder', async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       invoice_id: 'inv-1',
       status: 'paid',
@@ -178,12 +178,54 @@ describe('checkInvoice', () => {
       paid: true,
       remainingAmount: null,
       refundPending: false,
+      cardNumber: null,
+      cardHolder: null,
     })
 
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe('https://tonpays.online/api/v1/invoices/check/inv-1')
     expect(init.method).toBe('GET')
     expect(init.headers['X-API-Key']).toBe('key-123')
+  })
+
+  it('maps card_number/card_holder when present', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      invoice_id: 'inv-1',
+      status: 'pending',
+      paid: false,
+      remaining_amount: null,
+      refund_pending: false,
+      card_number: '6037-xxxx-xxxx-1234',
+      card_holder: 'John Doe',
+    }), { status: 200 }))
+
+    const result = await checkInvoice('inv-1')
+
+    expect(result).toEqual({
+      invoiceId: 'inv-1',
+      status: 'pending',
+      paid: false,
+      remainingAmount: null,
+      refundPending: false,
+      cardNumber: '6037-xxxx-xxxx-1234',
+      cardHolder: 'John Doe',
+    })
+  })
+
+  it('falls back to card_name for the holder when card_holder is absent', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      invoice_id: 'inv-1',
+      status: 'pending',
+      paid: false,
+      remaining_amount: null,
+      refund_pending: false,
+      card_number: '6037-xxxx-xxxx-1234',
+      card_name: 'Jane Doe',
+    }), { status: 200 }))
+
+    const result = await checkInvoice('inv-1')
+
+    expect(result.cardHolder).toBe('Jane Doe')
   })
 })
 

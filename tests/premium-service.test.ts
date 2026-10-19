@@ -387,11 +387,14 @@ describe('createPremiumCheckout — tonpays', () => {
     expect(inserts[0]).toMatchObject({ price_stars: 100, status: 'pending_payment' })
   })
 
-  it('resumes the pending invoice for same plan and amount', async () => {
+  it('resumes the pending invoice for same plan and amount, using the fresh card from checkInvoice', async () => {
     vi.stubEnv('TONPAYS_API_KEY', 'key123')
     vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
     vi.mocked(createTelegramInvoice).mockRejectedValue(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
-    vi.mocked(checkInvoice).mockResolvedValue({ invoiceId: 'inv-old', status: 'pending', paid: false, remainingAmount: null, refundPending: false })
+    vi.mocked(checkInvoice).mockResolvedValue({
+      invoiceId: 'inv-old', status: 'pending', paid: false, remainingAmount: null, refundPending: false,
+      cardNumber: '6037-xxxx-xxxx-1234', cardHolder: 'Card Holder',
+    })
 
     const { updates } = mockTonPaysDb({
       plan, tomanPerStar: 500,
@@ -402,9 +405,41 @@ describe('createPremiumCheckout — tonpays', () => {
 
     expect(checkInvoice).toHaveBeenCalledWith('inv-old')
     expect(cancelInvoice).not.toHaveBeenCalled()
-    expect(res).toMatchObject({ transactionId: 'tx-old', provider: 'tonpays', payment: { invoiceId: 'inv-old', amountToman: 50037 } })
+    expect(res).toEqual({
+      transactionId: 'tx-old', provider: 'tonpays',
+      payment: { cardNumber: '6037-xxxx-xxxx-1234', cardHolder: 'Card Holder', invoiceId: 'inv-old', amountToman: 50037 },
+    })
     // the fresh never-invoiced attempt row is dropped, not left dangling as pending
     expect(updates.some((u) => u.status === 'canceled')).toBe(true)
+  })
+
+  it('falls back to cancel-and-recreate when the resume check has no card data', async () => {
+    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
+    vi.mocked(createTelegramInvoice)
+      .mockRejectedValueOnce(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
+      .mockResolvedValueOnce({ invoiceId: 'inv-fresh', cardNumber: '6037-zzzz-zzzz-0000', cardHolder: 'Fresh Card', finalAmount: 50037, status: 'pending' })
+    vi.mocked(checkInvoice).mockResolvedValue({
+      invoiceId: 'inv-old', status: 'pending', paid: false, remainingAmount: null, refundPending: false,
+      cardNumber: null, cardHolder: null,
+    })
+    vi.mocked(cancelInvoice).mockResolvedValue(undefined)
+
+    const { updates } = mockTonPaysDb({
+      plan, tomanPerStar: 500,
+      oldRow: { id: 'tx-old', plan_id: 'p1', price_toman: 50000, tonpays_invoice_id: 'inv-old', tonpays_final_amount: 50037 },
+    })
+
+    const res = await createPremiumCheckout('u1', 'p1')
+
+    expect(checkInvoice).toHaveBeenCalledWith('inv-old')
+    expect(cancelInvoice).toHaveBeenCalledWith('inv-old')
+    expect(updates.some((u) => u.status === 'canceled')).toBe(true)
+    expect(createTelegramInvoice).toHaveBeenCalledTimes(2)
+    expect(res).toEqual({
+      transactionId: 'tx-new', provider: 'tonpays',
+      payment: { cardNumber: '6037-zzzz-zzzz-0000', cardHolder: 'Fresh Card', amountToman: 50037, invoiceId: 'inv-fresh' },
+    })
   })
 
   it('cancels and retries for a different plan', async () => {

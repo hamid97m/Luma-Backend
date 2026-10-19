@@ -1,0 +1,244 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { createHmac } from 'node:crypto'
+
+import {
+  isTonPaysConfigured,
+  verifyTonPaysSignature,
+  generateTonPaysOrderId,
+  TonPaysApiError,
+  createTelegramInvoice,
+  checkInvoice,
+  cancelInvoice,
+  changeCard,
+  submitRefundCard,
+} from '../src/payments/tonpays.js'
+
+const SECRET = 'whsec_test_secret'
+
+function sign(body: string, t: number, secret = SECRET) {
+  const hex = createHmac('sha256', secret).update(`${t}.${body}`).digest('hex')
+  return `t=${t},v1=${hex}`
+}
+
+describe('isTonPaysConfigured', () => {
+  afterEach(() => vi.unstubAllEnvs())
+
+  it('is true iff TONPAYS_API_KEY is non-empty', () => {
+    vi.stubEnv('TONPAYS_API_KEY', '')
+    expect(isTonPaysConfigured()).toBe(false)
+    vi.stubEnv('TONPAYS_API_KEY', 'key-123')
+    expect(isTonPaysConfigured()).toBe(true)
+  })
+})
+
+describe('verifyTonPaysSignature', () => {
+  const body = JSON.stringify({ invoice_id: 'abc', status: 'paid' })
+  const nowMs = Date.parse('2026-01-01T00:00:00Z')
+  const nowSec = Math.floor(nowMs / 1000)
+
+  it('accepts a valid signature', () => {
+    const header = sign(body, nowSec)
+    expect(verifyTonPaysSignature(body, header, SECRET, nowMs)).toBe(true)
+  })
+
+  it('rejects a wrong secret', () => {
+    const header = sign(body, nowSec, 'wrong-secret')
+    expect(verifyTonPaysSignature(body, header, SECRET, nowMs)).toBe(false)
+  })
+
+  it('rejects a stale timestamp', () => {
+    const staleT = nowSec - 601
+    const header = sign(body, staleT)
+    expect(verifyTonPaysSignature(body, header, SECRET, nowMs)).toBe(false)
+  })
+
+  it('rejects malformed or missing header without throwing', () => {
+    expect(verifyTonPaysSignature(body, undefined, SECRET, nowMs)).toBe(false)
+    expect(verifyTonPaysSignature(body, '', SECRET, nowMs)).toBe(false)
+    expect(verifyTonPaysSignature(body, 'garbage', SECRET, nowMs)).toBe(false)
+    expect(verifyTonPaysSignature(body, 't=1', SECRET, nowMs)).toBe(false)
+  })
+})
+
+describe('generateTonPaysOrderId', () => {
+  it('is 20 chars of [a-z0-9] and unique across 100 calls', () => {
+    const ids = new Set<string>()
+    for (let i = 0; i < 100; i++) {
+      const id = generateTonPaysOrderId()
+      expect(id).toMatch(/^[a-z0-9]{20}$/)
+      ids.add(id)
+    }
+    expect(ids.size).toBe(100)
+  })
+})
+
+describe('createTelegramInvoice', () => {
+  const fetchMock = vi.fn()
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('TONPAYS_API_KEY', 'key-123')
+    vi.stubEnv('TONPAYS_CALLBACK_URL', 'https://api.example/tonpays/webhook')
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+    fetchMock.mockReset()
+  })
+
+  it('maps a success response to TonPaysInvoice', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      invoice_id: 'inv-1',
+      card_number: '6037-xxxx-xxxx-1234',
+      card_holder: 'John Doe',
+      final_amount: 150000,
+      status: 'pending',
+    }), { status: 200 }))
+
+    const result = await createTelegramInvoice({ amountToman: 150000, orderId: 'order-1', buyerChatId: 42 })
+
+    expect(result).toEqual({
+      invoiceId: 'inv-1',
+      cardNumber: '6037-xxxx-xxxx-1234',
+      cardHolder: 'John Doe',
+      finalAmount: 150000,
+      status: 'pending',
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('https://tonpays.online/api/custom/v1/invoices/telegram/create')
+    expect(init.method).toBe('POST')
+    expect(init.headers['X-API-Key']).toBe('key-123')
+    const body = JSON.parse(init.body)
+    expect(body).toEqual({
+      amount: 150000,
+      order_id: 'order-1',
+      buyer_chat_id: 42,
+      callback_url: 'https://api.example/tonpays/webhook',
+    })
+  })
+
+  it('throws TonPaysApiError with the detail.code', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      detail: { code: 'BUYER_HAS_PENDING_INVOICE', message: 'Buyer already has a pending invoice' },
+    }), { status: 409 }))
+
+    const call = createTelegramInvoice({ amountToman: 150000, orderId: 'order-1', buyerChatId: 42 })
+    await expect(call).rejects.toBeInstanceOf(TonPaysApiError)
+    await expect(call).rejects.toMatchObject({ code: 'BUYER_HAS_PENDING_INVOICE', httpStatus: 409 })
+  })
+})
+
+describe('checkInvoice', () => {
+  const fetchMock = vi.fn()
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('TONPAYS_API_KEY', 'key-123')
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+    fetchMock.mockReset()
+  })
+
+  it('maps a success response to TonPaysCheck', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      invoice_id: 'inv-1',
+      status: 'paid',
+      paid: true,
+      remaining_amount: null,
+      refund_pending: false,
+    }), { status: 200 }))
+
+    const result = await checkInvoice('inv-1')
+
+    expect(result).toEqual({
+      invoiceId: 'inv-1',
+      status: 'paid',
+      paid: true,
+      remainingAmount: null,
+      refundPending: false,
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('https://tonpays.online/api/v1/invoices/check/inv-1')
+    expect(init.method).toBe('GET')
+    expect(init.headers['X-API-Key']).toBe('key-123')
+  })
+})
+
+describe('cancelInvoice', () => {
+  const fetchMock = vi.fn()
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('TONPAYS_API_KEY', 'key-123')
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+    fetchMock.mockReset()
+  })
+
+  it('swallows 409 and throws on 500', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      detail: { code: 'INVOICE_NOT_PENDING', message: 'already settled' },
+    }), { status: 409 }))
+    await expect(cancelInvoice('inv-1')).resolves.toBeUndefined()
+
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      detail: { code: 'INTERNAL_ERROR', message: 'boom' },
+    }), { status: 500 }))
+    await expect(cancelInvoice('inv-1')).rejects.toBeInstanceOf(TonPaysApiError)
+  })
+})
+
+describe('changeCard', () => {
+  const fetchMock = vi.fn()
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('TONPAYS_API_KEY', 'key-123')
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+    fetchMock.mockReset()
+  })
+
+  it('maps a success response to the new card', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      card_number: '6037-xxxx-xxxx-9999',
+      card_holder: 'Jane Doe',
+    }), { status: 200 }))
+
+    const result = await changeCard('inv-1')
+
+    expect(result).toEqual({ cardNumber: '6037-xxxx-xxxx-9999', cardHolder: 'Jane Doe' })
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('https://tonpays.online/api/custom/v1/invoices/inv-1/change-card')
+    expect(init.method).toBe('POST')
+  })
+})
+
+describe('submitRefundCard', () => {
+  const fetchMock = vi.fn()
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubEnv('TONPAYS_API_KEY', 'key-123')
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+    fetchMock.mockReset()
+  })
+
+  it('posts the refund card and resolves on success', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 200 }))
+
+    await expect(submitRefundCard('inv-1', '6037-xxxx-xxxx-1111', 'John Doe')).resolves.toBeUndefined()
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('https://tonpays.online/api/v1/invoices/inv-1/refund')
+    expect(init.method).toBe('POST')
+    const body = JSON.parse(init.body)
+    expect(body).toEqual({ card_number: '6037-xxxx-xxxx-1111', card_holder: 'John Doe' })
+  })
+})

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/bot.js', () => ({
   createPremiumInvoiceLink: vi.fn().mockResolvedValue('https://t.me/invoice/prem'),
@@ -8,7 +8,7 @@ import { db } from '../src/db.js'
 import { createPremiumInvoiceLink } from '../src/bot.js'
 import {
   isPremiumActive, extendPremiumUntil, discountActive, chargedPrice,
-  getPremiumStatus, createPremiumCheckout,
+  getPremiumStatus, createPremiumCheckout, resolvePaymentProvider, getTomanPerStar,
 } from '../src/premium/service.js'
 import { chainable } from './admin-helpers.js'
 import { en } from '../src/i18n/en.js'
@@ -55,14 +55,58 @@ describe('chargedPrice', () => {
   it('floors at 1 star when rounding would hit 0', () => expect(chargedPrice(10, 95)).toBe(1))
 })
 
+describe('resolvePaymentProvider', () => {
+  afterEach(() => vi.unstubAllEnvs())
+
+  it('provider is tonpays for IR when key configured', () => {
+    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    expect(resolvePaymentProvider('IR')).toBe('tonpays')
+  })
+
+  it('provider is stars for IR when key missing', () => {
+    vi.stubEnv('TONPAYS_API_KEY', '')
+    expect(resolvePaymentProvider('IR')).toBe('stars')
+  })
+
+  it('provider is stars for null and non-IR geo_country', () => {
+    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    expect(resolvePaymentProvider(null)).toBe('stars')
+    expect(resolvePaymentProvider('DE')).toBe('stars')
+  })
+})
+
+describe('getTomanPerStar', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('reads premium_config.toman_per_star', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_config') return chainable({ data: { toman_per_star: 4200 } })
+      return chainable({ data: null })
+    })
+    expect(await getTomanPerStar()).toBe(4200)
+  })
+
+  it('falls back to 3000 on a missing row', async () => {
+    vi.mocked(db.from).mockImplementation(() => chainable({ data: null }))
+    expect(await getTomanPerStar()).toBe(3000)
+  })
+
+  it('falls back to 3000 when the column is missing/null', async () => {
+    vi.mocked(db.from).mockImplementation(() => chainable({ data: { toman_per_star: null } }))
+    expect(await getTomanPerStar()).toBe(3000)
+  })
+})
+
 describe('getPremiumStatus', () => {
   beforeEach(() => vi.clearAllMocks())
+  afterEach(() => vi.unstubAllEnvs())
+
   it('returns toggle, own expiry, and mapped plans — charged price while a discount is active, full price otherwise', async () => {
     const future = new Date(Date.now() + DAY_MS).toISOString()
     const past = new Date(Date.now() - DAY_MS).toISOString()
     vi.mocked(db.from).mockImplementation((table: string) => {
       if (table === 'premium_config') return chainable({ data: { premium_enabled: true } })
-      if (table === 'users') return chainable({ data: { premium_until: null } })
+      if (table === 'users') return chainable({ data: { premium_until: null, geo_country: null } })
       if (table === 'premium_plans') return chainable({ data: [
         { id: 'p1', title: '1 Month', description: 'Best start', price_stars: 100, discount_percent: null, discount_ends_at: null, duration_days: 30 },
         { id: 'p2', title: '3 Months', description: '', price_stars: 150, discount_percent: 50, discount_ends_at: null, duration_days: 90 },
@@ -74,12 +118,41 @@ describe('getPremiumStatus', () => {
     const res = await getPremiumStatus('u1')
     expect(res.enabled).toBe(true)
     expect(res.premiumUntil).toBe(null)
+    expect(res.paymentProvider).toBe('stars')
     expect(res.plans).toEqual([
       { id: 'p1', title: '1 Month', description: 'Best start', priceStars: 100, discountPercent: null, originalPriceStars: null, discountEndsAt: null, durationDays: 30 },
       { id: 'p2', title: '3 Months', description: '', priceStars: 75, discountPercent: 50, originalPriceStars: 150, discountEndsAt: null, durationDays: 90 },
       { id: 'p3', title: '6 Months', description: '', priceStars: 150, discountPercent: 25, originalPriceStars: 200, discountEndsAt: future, durationDays: 180 },
       { id: 'p4', title: '12 Months', description: '', priceStars: 300, discountPercent: null, originalPriceStars: null, discountEndsAt: null, durationDays: 365 },
     ])
+  })
+
+  it('provider is stars for IR when TonPays key is missing', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_config') return chainable({ data: { premium_enabled: true } })
+      if (table === 'users') return chainable({ data: { premium_until: null, geo_country: 'IR' } })
+      if (table === 'premium_plans') return chainable({ data: [] })
+      return chainable({ data: null })
+    })
+    const res = await getPremiumStatus('u1')
+    expect(res.paymentProvider).toBe('stars')
+  })
+
+  it('carries paymentProvider "tonpays" and toman pricing (priceToman = chargedStars × rate) for an Iranian user when TonPays is configured', async () => {
+    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_config') return chainable({ data: { premium_enabled: true, toman_per_star: 3000 } })
+      if (table === 'users') return chainable({ data: { premium_until: null, geo_country: 'IR' } })
+      if (table === 'premium_plans') return chainable({ data: [
+        { id: 'p1', title: '1 Month', description: 'Best start', price_stars: 100, discount_percent: 20, discount_ends_at: null, duration_days: 30 },
+      ] })
+      return chainable({ data: null })
+    })
+    const res = await getPremiumStatus('u1')
+    expect(res.paymentProvider).toBe('tonpays')
+    expect(res.plans[0]).toMatchObject({
+      priceStars: 80, originalPriceStars: 100, priceToman: 240000, originalPriceToman: 300000,
+    })
   })
 
   it('localizes plan copy from translations for the viewer\'s locale, falling back per field', async () => {

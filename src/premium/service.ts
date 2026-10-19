@@ -3,9 +3,13 @@ import { createPremiumInvoiceLink, refundPremiumPayment, notifyPaymentChannel, n
 import { formatPremiumPaidNotice } from '../payments/paymentNotify.js'
 import { schedulePurchaseCheckoutFollowup } from '../jobs/purchaseMessage.js'
 import { tFor, type Locale } from '../i18n/index.js'
+import { isTonPaysConfigured } from '../payments/tonpays.js'
 
 export const PREMIUM_PAYLOAD_PREFIX = 'premium:'
 const DAY_MS = 24 * 60 * 60 * 1000
+const DEFAULT_TOMAN_PER_STAR = 3000
+
+export type PaymentProvider = 'stars' | 'tonpays'
 
 export type PlanTranslations = Partial<Record<'en' | 'ar', { title?: string; description?: string }>>
 
@@ -56,31 +60,56 @@ export async function isPremiumEnabled(): Promise<boolean> {
   return data?.premium_enabled === true
 }
 
+/** Iranian users pay via TonPays (card-to-card) when it's configured; everyone
+ * else keeps paying with Telegram Stars. */
+export function resolvePaymentProvider(geoCountry: string | null | undefined): PaymentProvider {
+  return geoCountry === 'IR' && isTonPaysConfigured() ? 'tonpays' : 'stars'
+}
+
+/** Toman-per-Star conversion rate, admin-configurable; falls back to 3000 if
+ * the config row or column isn't there. */
+export async function getTomanPerStar(): Promise<number> {
+  const { data } = await db.from('premium_config').select('toman_per_star').eq('id', true).single()
+  return (data?.toman_per_star as number | null | undefined) ?? DEFAULT_TOMAN_PER_STAR
+}
+
 export async function getPremiumStatus(userId: string) {
   const [{ data: cfg }, { data: me }, { data: plans }] = await Promise.all([
     db.from('premium_config').select('premium_enabled').eq('id', true).single(),
-    db.from('users').select('premium_until, locale').eq('id', userId).single(),
+    db.from('users').select('premium_until, locale, geo_country').eq('id', userId).single(),
     db.from('premium_plans')
       .select('id, title, description, translations, price_stars, discount_percent, discount_ends_at, duration_days')
       .eq('is_active', true)
       .order('sort_order', { ascending: true }),
   ])
   const locale = (me?.locale as Locale | null) ?? null
+  const paymentProvider = resolvePaymentProvider(me?.geo_country ?? null)
+  const tomanPerStar = paymentProvider === 'tonpays' ? await getTomanPerStar() : null
+
   return {
     enabled: cfg?.premium_enabled === true,
     premiumUntil: me?.premium_until ?? null,
+    paymentProvider,
     plans: (plans ?? []).map((p: any) => {
       const active = discountActive(p.discount_percent, p.discount_ends_at)
       const text = planText(p, locale)
-      return {
+      const priceStars = active ? chargedPrice(p.price_stars, p.discount_percent) : p.price_stars
+      const originalPriceStars = active ? p.price_stars : null
+      const base = {
         id: p.id,
         title: text.title,
         description: text.description,
-        priceStars: active ? chargedPrice(p.price_stars, p.discount_percent) : p.price_stars,
-        originalPriceStars: active ? p.price_stars : null,
+        priceStars,
+        originalPriceStars,
         discountPercent: active ? p.discount_percent : null,
         discountEndsAt: active ? (p.discount_ends_at ?? null) : null,
         durationDays: p.duration_days,
+      }
+      if (tomanPerStar == null) return base
+      return {
+        ...base,
+        priceToman: priceStars * tomanPerStar,
+        originalPriceToman: originalPriceStars != null ? originalPriceStars * tomanPerStar : null,
       }
     }),
   }

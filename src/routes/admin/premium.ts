@@ -6,6 +6,7 @@ const PLAN_SELECT = 'id, title, description, translations, price_stars, discount
 const PAGE_SIZE = 25
 const TX_STATUSES = ['pending_payment', 'paid', 'refunded', 'canceled', 'paid_grant_failed']
 const TX_SOURCES = ['purchase', 'admin_grant', 'referral']
+const TX_PROVIDERS = ['stars', 'tonpays']
 const TRANSLATABLE_LOCALES = ['en', 'ar'] as const
 
 function isPositiveInt(n: unknown): n is number {
@@ -109,20 +110,31 @@ function parsePlanBody(body: Record<string, unknown>, partial: boolean): { error
 
 export async function adminPremiumRoutes(app: FastifyInstance) {
   app.get('/premium/config', async (_req, reply) => {
-    const { data, error } = await db.from('premium_config').select('premium_enabled').eq('id', true).single()
+    const { data, error } = await db.from('premium_config').select('premium_enabled, toman_per_star').eq('id', true).single()
     if (error || !data) return reply.status(500).send({ error: 'config_fetch_failed' })
-    return { premiumEnabled: data.premium_enabled }
+    return { premiumEnabled: data.premium_enabled, tomanPerStar: data.toman_per_star }
   })
 
   app.put('/premium/config', async (req, reply) => {
-    const { premiumEnabled } = (req.body ?? {}) as Record<string, unknown>
-    if (typeof premiumEnabled !== 'boolean') return reply.status(400).send({ error: 'invalid_premium_enabled' })
+    const { premiumEnabled, tomanPerStar } = (req.body ?? {}) as Record<string, unknown>
+    if (premiumEnabled === undefined && tomanPerStar === undefined) {
+      return reply.status(400).send({ error: 'empty_update' })
+    }
+    const update: Record<string, unknown> = { updated_at: new Date().toISOString() }
+    if (premiumEnabled !== undefined) {
+      if (typeof premiumEnabled !== 'boolean') return reply.status(400).send({ error: 'invalid_premium_enabled' })
+      update.premium_enabled = premiumEnabled
+    }
+    if (tomanPerStar !== undefined) {
+      if (!isPositiveInt(tomanPerStar)) return reply.status(400).send({ error: 'invalid_toman_per_star' })
+      update.toman_per_star = tomanPerStar
+    }
     const { data, error } = await db
       .from('premium_config')
-      .update({ premium_enabled: premiumEnabled, updated_at: new Date().toISOString() })
-      .eq('id', true).select('premium_enabled').single()
+      .update(update)
+      .eq('id', true).select('premium_enabled, toman_per_star').single()
     if (error || !data) return reply.status(500).send({ error: 'config_update_failed' })
-    return { premiumEnabled: data.premium_enabled }
+    return { premiumEnabled: data.premium_enabled, tomanPerStar: data.toman_per_star }
   })
 
   app.get('/premium/plans', async (_req, reply) => {
@@ -167,7 +179,7 @@ export async function adminPremiumRoutes(app: FastifyInstance) {
   })
 
   app.get('/premium/transactions', async (req, reply) => {
-    const { page = '1', status, source } = req.query as Record<string, string>
+    const { page = '1', status, source, provider } = req.query as Record<string, string>
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const from = (pageNum - 1) * PAGE_SIZE
 
@@ -175,11 +187,13 @@ export async function adminPremiumRoutes(app: FastifyInstance) {
       .from('premium_transactions')
       .select(
         'id, plan_title, price_stars, duration_days, status, source, created_at, paid_at, ' +
+        'provider, price_toman, tonpays_status, ' +
         'user:users!premium_transactions_user_id_fkey(name, username)',
         { count: 'exact' },
       )
     if (status && TX_STATUSES.includes(status)) q = q.eq('status', status)
     if (source && TX_SOURCES.includes(source)) q = q.eq('source', source)
+    if (provider && TX_PROVIDERS.includes(provider)) q = q.eq('provider', provider)
 
     const { data, count, error } = await q
       .order('created_at', { ascending: false })
@@ -199,6 +213,9 @@ export async function adminPremiumRoutes(app: FastifyInstance) {
         source: r.source,
         createdAt: r.created_at,
         paidAt: r.paid_at ?? null,
+        provider: r.provider,
+        priceToman: r.price_toman ?? null,
+        tonpaysStatus: r.tonpays_status ?? null,
       })),
       total, page: pageNum, pageCount: Math.max(1, Math.ceil(total / PAGE_SIZE)),
     }

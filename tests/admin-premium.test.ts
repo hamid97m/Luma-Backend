@@ -37,29 +37,74 @@ describe('admin premium', () => {
 
   it('reads the premium config', async () => {
     vi.mocked(db.from).mockImplementation((table: string) =>
-      table === 'premium_config' ? chainable({ data: { premium_enabled: true }, error: null }) : chainable({ data: null }))
+      table === 'premium_config' ? chainable({ data: { premium_enabled: true, toman_per_star: 3000 }, error: null }) : chainable({ data: null }))
     const res = await app.inject({ method: 'GET', url: '/admin/premium/config', headers })
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ premiumEnabled: true })
+    expect(res.json()).toEqual({ premiumEnabled: true, tomanPerStar: 3000 })
   })
 
   it('updates the toggle', async () => {
     const updates: any[] = []
     vi.mocked(db.from).mockImplementation((table: string) => {
       if (table === 'premium_config') {
-        return { update: (p: any) => { updates.push(p); return chainable({ data: { premium_enabled: true }, error: null }) } } as any
+        return { update: (p: any) => { updates.push(p); return chainable({ data: { premium_enabled: true, toman_per_star: 3000 }, error: null }) } } as any
       }
       return chainable({ data: null })
     })
     const res = await app.inject({ method: 'PUT', url: '/admin/premium/config', headers, payload: { premiumEnabled: true } })
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ premiumEnabled: true })
+    expect(res.json()).toEqual({ premiumEnabled: true, tomanPerStar: 3000 })
     expect(updates[0]).toMatchObject({ premium_enabled: true })
+    expect(updates[0]).not.toHaveProperty('toman_per_star')
   })
 
   it('rejects a non-boolean toggle', async () => {
     const res = await app.inject({ method: 'PUT', url: '/admin/premium/config', headers, payload: { premiumEnabled: 'yes' } })
     expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_premium_enabled' })
+  })
+
+  it('updates tomanPerStar alone, leaving premiumEnabled out of the update', async () => {
+    const updates: any[] = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_config') {
+        return { update: (p: any) => { updates.push(p); return chainable({ data: { premium_enabled: true, toman_per_star: 3500 }, error: null }) } } as any
+      }
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'PUT', url: '/admin/premium/config', headers, payload: { tomanPerStar: 3500 } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ premiumEnabled: true, tomanPerStar: 3500 })
+    expect(updates[0]).toMatchObject({ toman_per_star: 3500 })
+    expect(updates[0]).not.toHaveProperty('premium_enabled')
+  })
+
+  it('updates premiumEnabled and tomanPerStar together', async () => {
+    const updates: any[] = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_config') {
+        return { update: (p: any) => { updates.push(p); return chainable({ data: { premium_enabled: false, toman_per_star: 4000 }, error: null }) } } as any
+      }
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'PUT', url: '/admin/premium/config', headers, payload: { premiumEnabled: false, tomanPerStar: 4000 } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ premiumEnabled: false, tomanPerStar: 4000 })
+    expect(updates[0]).toMatchObject({ premium_enabled: false, toman_per_star: 4000 })
+  })
+
+  it('rejects an invalid tomanPerStar', async () => {
+    for (const tomanPerStar of [0, -100, '3000', 10.5]) {
+      const res = await app.inject({ method: 'PUT', url: '/admin/premium/config', headers, payload: { tomanPerStar } })
+      expect(res.statusCode).toBe(400)
+      expect(res.json()).toEqual({ error: 'invalid_toman_per_star' })
+    }
+  })
+
+  it('rejects a PUT with neither field set', async () => {
+    const res = await app.inject({ method: 'PUT', url: '/admin/premium/config', headers, payload: {} })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'empty_update' })
   })
 
   it('lists all plans including inactive', async () => {
@@ -352,6 +397,7 @@ describe('admin premium transactions + grant/revoke', () => {
           data: [{
             id: 't1', plan_title: '1 Month', price_stars: 100, duration_days: 30,
             status: 'paid', source: 'purchase', created_at: '2026-08-05T00:00:00Z', paid_at: '2026-08-05T00:01:00Z',
+            provider: 'stars', price_toman: null, tonpays_status: null,
             user: { name: 'Ali', username: 'ali' },
           }],
           count: 1, error: null,
@@ -366,9 +412,54 @@ describe('admin premium transactions + grant/revoke', () => {
         id: 't1', userName: 'Ali', userUsername: 'ali', planTitle: '1 Month',
         priceStars: 100, durationDays: 30, status: 'paid', source: 'purchase',
         createdAt: '2026-08-05T00:00:00Z', paidAt: '2026-08-05T00:01:00Z',
+        provider: 'stars', priceToman: null, tonpaysStatus: null,
       }],
       total: 1, page: 1, pageCount: 1,
     })
+  })
+
+  it('lists a tonpays transaction with priceToman and tonpaysStatus', async () => {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_transactions') {
+        return chainable({
+          data: [{
+            id: 't2', plan_title: '1 Month', price_stars: 0, duration_days: 30,
+            status: 'paid', source: 'purchase', created_at: '2026-10-20T00:00:00Z', paid_at: '2026-10-20T00:01:00Z',
+            provider: 'tonpays', price_toman: 150000, tonpays_status: 'verified',
+            user: { name: 'Sara', username: null },
+          }],
+          count: 1, error: null,
+        })
+      }
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'GET', url: '/admin/premium/transactions?page=1', headers })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().items[0]).toMatchObject({
+      provider: 'tonpays', priceToman: 150000, tonpaysStatus: 'verified',
+    })
+  })
+
+  it('filters transactions by provider', async () => {
+    const log: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_transactions') return chainable({ data: [], count: 0, error: null }, log)
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'GET', url: '/admin/premium/transactions?provider=tonpays', headers })
+    expect(res.statusCode).toBe(200)
+    expect(log.some((c) => c.method === 'eq' && c.args[0] === 'provider' && c.args[1] === 'tonpays')).toBe(true)
+  })
+
+  it('ignores an unknown provider filter value', async () => {
+    const log: Array<{ method: string; args: unknown[] }> = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_transactions') return chainable({ data: [], count: 0, error: null }, log)
+      return chainable({ data: null })
+    })
+    const res = await app.inject({ method: 'GET', url: '/admin/premium/transactions?provider=bogus', headers })
+    expect(res.statusCode).toBe(200)
+    expect(log.some((c) => c.method === 'eq' && c.args[0] === 'provider')).toBe(false)
   })
 
   it('grants days: extends premium_until and records an admin_grant tx', async () => {

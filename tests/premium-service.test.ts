@@ -14,6 +14,7 @@ vi.mock('../src/payments/tonpays.js', async () => {
     generateTonPaysOrderId: vi.fn(),
   }
 })
+vi.mock('../src/jobs/purchaseMessage.js', () => ({ schedulePurchaseCheckoutFollowup: vi.fn() }))
 import { db } from '../src/db.js'
 import { createPremiumInvoiceLink } from '../src/bot.js'
 import {
@@ -23,6 +24,7 @@ import {
 import {
   createTelegramInvoice, checkInvoice, cancelInvoice, generateTonPaysOrderId, TonPaysApiError,
 } from '../src/payments/tonpays.js'
+import { schedulePurchaseCheckoutFollowup } from '../src/jobs/purchaseMessage.js'
 import { chainable } from './admin-helpers.js'
 import { en } from '../src/i18n/en.js'
 
@@ -411,6 +413,35 @@ describe('createPremiumCheckout — tonpays', () => {
     })
     // the fresh never-invoiced attempt row is dropped, not left dangling as pending
     expect(updates.some((u) => u.status === 'canceled')).toBe(true)
+    // resume is a successful checkout response too — the abandoned-checkout nudge still fires
+    expect(schedulePurchaseCheckoutFollowup).toHaveBeenCalledWith('u1')
+  })
+
+  it('falls back to cancel-and-recreate when checkInvoice itself rejects', async () => {
+    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
+    vi.mocked(createTelegramInvoice)
+      .mockRejectedValueOnce(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
+      .mockResolvedValueOnce({ invoiceId: 'inv-fresh', cardNumber: '6037-zzzz-zzzz-0000', cardHolder: 'Fresh Card', finalAmount: 50037, status: 'pending' })
+    vi.mocked(checkInvoice).mockRejectedValue(new TonPaysApiError('INTERNAL_ERROR', 'boom', 500))
+    vi.mocked(cancelInvoice).mockResolvedValue(undefined)
+
+    const { updates } = mockTonPaysDb({
+      plan, tomanPerStar: 500,
+      oldRow: { id: 'tx-old', plan_id: 'p1', price_toman: 50000, tonpays_invoice_id: 'inv-old', tonpays_final_amount: 50037 },
+    })
+
+    // Must not throw — the rejected checkInvoice must be handled, not propagated.
+    const res = await createPremiumCheckout('u1', 'p1')
+
+    expect(checkInvoice).toHaveBeenCalledWith('inv-old')
+    expect(cancelInvoice).toHaveBeenCalledWith('inv-old')
+    expect(updates.some((u) => u.status === 'canceled')).toBe(true)
+    expect(createTelegramInvoice).toHaveBeenCalledTimes(2)
+    expect(res).toEqual({
+      transactionId: 'tx-new', provider: 'tonpays',
+      payment: { cardNumber: '6037-zzzz-zzzz-0000', cardHolder: 'Fresh Card', amountToman: 50037, invoiceId: 'inv-fresh' },
+    })
   })
 
   it('falls back to cancel-and-recreate when the resume check has no card data', async () => {

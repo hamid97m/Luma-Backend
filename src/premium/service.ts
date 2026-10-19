@@ -5,7 +5,7 @@ import { schedulePurchaseCheckoutFollowup } from '../jobs/purchaseMessage.js'
 import { tFor, type Locale } from '../i18n/index.js'
 import {
   isTonPaysConfigured, createTelegramInvoice, checkInvoice, cancelInvoice,
-  generateTonPaysOrderId, TonPaysApiError, type TonPaysInvoice,
+  generateTonPaysOrderId, TonPaysApiError, type TonPaysInvoice, type TonPaysCheck,
 } from '../payments/tonpays.js'
 
 export const PREMIUM_PAYLOAD_PREFIX = 'premium:'
@@ -221,10 +221,18 @@ async function createTonPaysCheckout(
     if (oldRow && oldRow.plan_id === plan.id && oldRow.price_toman === priceToman) {
       // Same purchase already has a live invoice at TonPays — this attempt never
       // got one, so drop it and resume the existing one instead, if the check
-      // actually gives us a card to show the buyer.
-      const check = await checkInvoice(oldRow.tonpays_invoice_id as string)
-      if (check.cardNumber && check.cardHolder) {
+      // actually gives us a card to show the buyer. A failed check (network
+      // error, 429, TonPays 5xx) is treated the same as "no card data": never
+      // let it propagate uncaught and leave this new row dangling.
+      let check: TonPaysCheck | null = null
+      try {
+        check = await checkInvoice(oldRow.tonpays_invoice_id as string)
+      } catch {
+        check = null
+      }
+      if (check && check.cardNumber && check.cardHolder) {
         await db.from('premium_transactions').update({ status: 'canceled' }).eq('id', tx.id)
+        schedulePurchaseCheckoutFollowup(userId)
         return {
           transactionId: oldRow.id as string,
           provider: 'tonpays',
@@ -235,9 +243,10 @@ async function createTonPaysCheckout(
           },
         }
       }
-      // No fresh card data available to resume with — fall through to the same
-      // cancel-and-recreate path as a mismatched plan/amount, below, so the buyer
-      // always gets a valid card + amount instead of an empty one.
+      // No fresh card data available to resume with (or the check itself
+      // failed) — fall through to the same cancel-and-recreate path as a
+      // mismatched plan/amount, below, so the buyer always ends up with a
+      // valid card + amount instead of an empty one or an uncaught throw.
     }
 
     if (oldRow) {

@@ -24,7 +24,8 @@ import { createPremiumInvoiceLink } from '../src/bot.js'
 import {
   isPremiumActive, extendPremiumUntil, discountActive, chargedPrice,
   getPremiumStatus, createPremiumCheckout, resolvePaymentProvider, getTomanPerStar,
-  getPremiumTransactionStatus, changeTonPaysCard, submitTonPaysRefundCard, _resetTonPaysPollThrottle,
+  getPremiumTransactionStatus, changeTonPaysCard, submitTonPaysRefundCard,
+  _resetTonPaysPollThrottle, _tonpaysPollCacheHas,
 } from '../src/premium/service.js'
 import {
   createTelegramInvoice, checkInvoice, cancelInvoice, generateTonPaysOrderId, TonPaysApiError,
@@ -567,6 +568,8 @@ describe('getPremiumTransactionStatus — tonpays poll fallback', () => {
     expect(checkInvoice).toHaveBeenCalledWith('inv1')
     // the grant actually ran (not just reported) — premium_until was extended on the user row
     expect(res).toEqual({ status: 'paid', provider: 'tonpays', tonpaysStatus: 'paid', remainingAmount: 0, refundPending: false })
+    // terminal state — the throttle/cache entry must not linger forever
+    expect(_tonpaysPollCacheHas('tx1')).toBe(false)
   })
 
   it('poll throttles upstream checks within 5s', async () => {
@@ -585,6 +588,23 @@ describe('getPremiumTransactionStatus — tonpays poll fallback', () => {
     expect(second).toEqual({ status: 'pending_payment', provider: 'tonpays', tonpaysStatus: 'pending', remainingAmount: null, refundPending: false })
   })
 
+  it('a throttled call reports the last real remainingAmount/refundPending instead of resetting to null/false', async () => {
+    mockPremiumTxDb({
+      txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
+    })
+    vi.mocked(checkInvoice).mockResolvedValue({
+      invoiceId: 'inv1', status: 'refund_pending', paid: false, remainingAmount: 12000, refundPending: true, cardNumber: null, cardHolder: null,
+    })
+
+    const first = await getPremiumTransactionStatus('tx1', 'u1')
+    const second = await getPremiumTransactionStatus('tx1', 'u1')
+
+    expect(checkInvoice).toHaveBeenCalledTimes(1)
+    expect(first).toEqual({ status: 'pending_payment', provider: 'tonpays', tonpaysStatus: 'refund_pending', remainingAmount: 12000, refundPending: true })
+    // must not flicker back to null/false during the throttle window
+    expect(second).toEqual(first)
+  })
+
   it('poll marks the row canceled on expired status', async () => {
     const { txUpdates } = mockPremiumTxDb({
       txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
@@ -597,6 +617,26 @@ describe('getPremiumTransactionStatus — tonpays poll fallback', () => {
 
     expect(res).toEqual({ status: 'canceled', provider: 'tonpays', tonpaysStatus: 'expired', remainingAmount: null, refundPending: false })
     expect(txUpdates).toContainEqual({ status: 'canceled', tonpays_status: 'expired' })
+    // terminal state — the throttle/cache entry must not linger forever
+    expect(_tonpaysPollCacheHas('tx1')).toBe(false)
+  })
+
+  it('evicts the throttle/cache entry once a tx reaches a terminal state, but keeps it while still pending', async () => {
+    mockPremiumTxDb({
+      txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
+    })
+    vi.mocked(checkInvoice).mockResolvedValueOnce({
+      invoiceId: 'inv1', status: 'pending', paid: false, remainingAmount: null, refundPending: false, cardNumber: null, cardHolder: null,
+    })
+    await getPremiumTransactionStatus('tx1', 'u1')
+    expect(_tonpaysPollCacheHas('tx1')).toBe(true) // still pending — cache kept for the throttle window
+
+    _resetTonPaysPollThrottle() // bypass the 5s throttle so the next call actually re-checks upstream
+    vi.mocked(checkInvoice).mockResolvedValueOnce({
+      invoiceId: 'inv1', status: 'paid', paid: true, remainingAmount: 0, refundPending: false, cardNumber: null, cardHolder: null,
+    })
+    await getPremiumTransactionStatus('tx1', 'u1')
+    expect(_tonpaysPollCacheHas('tx1')).toBe(false) // now terminal — evicted
   })
 
   it('a checkInvoice failure does not break the poll — returns the stored state', async () => {
@@ -638,16 +678,36 @@ describe('changeTonPaysCard', () => {
     expect(res).toEqual({ ok: true, cardNumber: '6037-1111', cardHolder: 'New Holder' })
   })
 
-  it('maps a TonPays 4xx (cooldown) error to the cooldown code', async () => {
+  it('maps a TonPays error with a COOLDOWN code, or httpStatus 429, to the cooldown code', async () => {
     mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
-    vi.mocked(changeCard).mockRejectedValue(new TonPaysApiError('COOLDOWN', 'wait 60s', 429))
 
+    vi.mocked(changeCard).mockRejectedValueOnce(new TonPaysApiError('COOLDOWN', 'wait 60s', 400))
     expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'cooldown' })
+
+    vi.mocked(changeCard).mockRejectedValueOnce(new TonPaysApiError('change_card_cooldown', 'wait', 400))
+    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'cooldown' }) // case-insensitive match
+
+    vi.mocked(changeCard).mockRejectedValueOnce(new TonPaysApiError('SOME_OTHER_CODE', 'rate limited', 429))
+    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'cooldown' }) // httpStatus 429 alone is enough
+  })
+
+  it('maps a non-cooldown 4xx to invalid_request, not cooldown', async () => {
+    mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
+    vi.mocked(changeCard).mockRejectedValue(new TonPaysApiError('INVALID_INVOICE', 'invoice not changeable', 400))
+
+    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'invalid_request' })
   })
 
   it('maps an unexpected 5xx to an upstream error, not cooldown', async () => {
     mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
     vi.mocked(changeCard).mockRejectedValue(new TonPaysApiError('INTERNAL_ERROR', 'boom', 500))
+
+    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'upstream_error' })
+  })
+
+  it('maps INVALID_RESPONSE to an upstream error even when its carried httpStatus looks like a 4xx', async () => {
+    mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
+    vi.mocked(changeCard).mockRejectedValue(new TonPaysApiError('INVALID_RESPONSE', 'tonpays_invalid_json_http_400', 400))
 
     expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'upstream_error' })
   })

@@ -94,6 +94,14 @@ describe('premium routes', () => {
     expect(res.json()).toEqual({ error: 'tonpays_unavailable' })
   })
 
+  it('change-card maps a non-cooldown 4xx (invalid_request) to 400', async () => {
+    auth()
+    vi.mocked(changeTonPaysCard).mockResolvedValue({ ok: false, code: 'invalid_request' })
+    const res = await app.inject({ method: 'POST', url: '/premium/transactions/tx1/change-card', headers: { authorization: 'x' } })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'change_card_failed' })
+  })
+
   it('refund-card validates card number and forwards to tonpays', async () => {
     auth()
     vi.mocked(submitTonPaysRefundCard).mockResolvedValue({ ok: true })

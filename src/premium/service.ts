@@ -402,12 +402,32 @@ async function markGrantFailed(txId: string, invoiceId: string, reason: string):
 }
 
 const TONPAYS_POLL_THROTTLE_MS = 5000
-const tonpaysPollLastCheckMs = new Map<string, number>()
 
-/** Test hook: clears the module-level poll throttle map between test cases. */
-export function _resetTonPaysPollThrottle(): void {
-  tonpaysPollLastCheckMs.clear()
+/** Cached result of the last real upstream check for a tx, keyed by tx id.
+ * Serves two purposes: throttling (via `lastCheckMs`) and — so a throttled
+ * call doesn't regress a just-reported `remainingAmount`/`refundPending`
+ * back to null/false — answering throttled calls with the last real values
+ * instead of defaults. Evicted once the tx reaches a terminal state, so this
+ * never grows unbounded: a tx only ever occupies an entry while pending. */
+type TonPaysPollCacheEntry = {
+  lastCheckMs: number
+  tonpaysStatus: string | null
+  remainingAmount: number | null
+  refundPending: boolean
 }
+const tonpaysPollCache = new Map<string, TonPaysPollCacheEntry>()
+
+/** Test hook: clears the module-level poll cache between test cases. */
+export function _resetTonPaysPollThrottle(): void {
+  tonpaysPollCache.clear()
+}
+
+/** Test hook: whether a tx still has a cache entry (used to assert eviction on terminal states). */
+export function _tonpaysPollCacheHas(txId: string): boolean {
+  return tonpaysPollCache.has(txId)
+}
+
+const TONPAYS_TERMINAL_STATUSES = new Set(['paid', 'paid_grant_failed', 'canceled', 'refunded'])
 
 export type PremiumTransactionStatus = {
   status: string
@@ -423,8 +443,11 @@ export type PremiumTransactionStatus = {
  * poll this endpoint and we'll check upstream ourselves. Only a still-pending
  * TonPays row triggers a check (anything already resolved just returns the
  * stored row), and checks are throttled per tx id so a tight client poll loop
- * doesn't hammer TonPays. A failed check never breaks the poll — it falls
- * back to the row's stored state.
+ * doesn't hammer TonPays — a throttled call answers from the cached values of
+ * the last real check, not stale defaults. A failed check never breaks the
+ * poll — it falls back to the cached (or stored) state. Once a tx reaches a
+ * terminal state the cache entry is evicted, so the throttle map never grows
+ * unbounded.
  */
 export async function getPremiumTransactionStatus(txId: string, userId: string): Promise<PremiumTransactionStatus | null> {
   const { data } = await db
@@ -444,14 +467,20 @@ export async function getPremiumTransactionStatus(txId: string, userId: string):
   if (status === 'pending_payment' && data.tonpays_invoice_id) {
     const invoiceId = data.tonpays_invoice_id as string
     const now = Date.now()
-    const last = tonpaysPollLastCheckMs.get(txId)
-    if (last === undefined || now - last >= TONPAYS_POLL_THROTTLE_MS) {
-      tonpaysPollLastCheckMs.set(txId, now)
+    const cached = tonpaysPollCache.get(txId)
+
+    if (cached && now - cached.lastCheckMs < TONPAYS_POLL_THROTTLE_MS) {
+      // Throttled: answer from the last real check instead of upstream.
+      tonpaysStatus = cached.tonpaysStatus
+      remainingAmount = cached.remainingAmount
+      refundPending = cached.refundPending
+    } else {
       try {
         const check = await checkInvoice(invoiceId)
         tonpaysStatus = check.status
         remainingAmount = check.remainingAmount
         refundPending = check.refundPending
+        tonpaysPollCache.set(txId, { lastCheckMs: now, tonpaysStatus, remainingAmount, refundPending })
         if (check.paid) {
           const result = await handleTonPaysPaid(invoiceId)
           status = result === 'grant_failed' ? 'paid_grant_failed' : 'paid'
@@ -461,27 +490,38 @@ export async function getPremiumTransactionStatus(txId: string, userId: string):
         }
       } catch {
         // Upstream check failed (network error, TonPays outage, etc) — fall
-        // back to the stored state rather than breaking the poll.
+        // back to the cached (or stored) state rather than breaking the poll.
+        if (cached) {
+          tonpaysStatus = cached.tonpaysStatus
+          remainingAmount = cached.remainingAmount
+          refundPending = cached.refundPending
+        }
       }
     }
   }
+
+  if (TONPAYS_TERMINAL_STATUSES.has(status)) tonpaysPollCache.delete(txId)
 
   return { status, provider, tonpaysStatus, remainingAmount, refundPending }
 }
 
 export type ChangeTonPaysCardResult =
   | { ok: true; cardNumber: string; cardHolder: string }
-  | { ok: false; code: 'not_found' | 'cooldown' | 'upstream_error' }
+  | { ok: false; code: 'not_found' | 'cooldown' | 'invalid_request' | 'upstream_error' }
 
 /**
- * Requests a new receiving card from TonPays for a pending invoice. TonPays
- * enforces a 60s cooldown between change-card calls and surfaces it as a
- * TonPaysApiError; we can't rely on a specific error code for it (gateway
- * behavior isn't guaranteed stable), so any 4xx from change-card is treated
- * as the cooldown — the only 4xx this endpoint plausibly returns for a
- * request we already validated (ownership + a real pending tonpays invoice).
- * A 5xx/network failure is a genuine upstream problem, not a cooldown, and is
- * reported separately so callers don't retry it the same way.
+ * Requests a new receiving card from TonPays for a pending invoice.
+ *
+ * Error mapping (deliberately narrow, not "any 4xx"):
+ *  - a TonPaysApiError whose `code` contains "COOLDOWN" (case-insensitive) or
+ *    whose `httpStatus` is 429 → `cooldown` (TonPays' 60s change-card cooldown).
+ *  - `INVALID_RESPONSE` (an unparseable body — proxy/gateway noise, not a
+ *    real 4xx from TonPays' API) → `upstream_error`, regardless of the HTTP
+ *    status it carried.
+ *  - any other 4xx → `invalid_request` (e.g. an invoice that's no longer
+ *    changeable) — distinct from `cooldown` so the client doesn't retry it
+ *    the same way.
+ *  - a 5xx, or anything that isn't a TonPaysApiError (network failure) → `upstream_error`.
  */
 export async function changeTonPaysCard(txId: string, userId: string): Promise<ChangeTonPaysCardResult> {
   const row = await getOwnedTonPaysTx(txId, userId)
@@ -490,7 +530,12 @@ export async function changeTonPaysCard(txId: string, userId: string): Promise<C
     const card = await changeCard(row.tonpays_invoice_id as string)
     return { ok: true, cardNumber: card.cardNumber, cardHolder: card.cardHolder }
   } catch (err) {
-    if (err instanceof TonPaysApiError && err.httpStatus < 500) return { ok: false, code: 'cooldown' }
+    if (err instanceof TonPaysApiError) {
+      if (err.httpStatus === 429 || err.code.toUpperCase().includes('COOLDOWN')) return { ok: false, code: 'cooldown' }
+      if (err.code !== 'INVALID_RESPONSE' && err.httpStatus >= 400 && err.httpStatus < 500) {
+        return { ok: false, code: 'invalid_request' }
+      }
+    }
     return { ok: false, code: 'upstream_error' }
   }
 }

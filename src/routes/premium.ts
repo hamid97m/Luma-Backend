@@ -34,6 +34,7 @@ export async function premiumRoutes(app: FastifyInstance) {
     if (result.ok) return { cardNumber: result.cardNumber, cardHolder: result.cardHolder }
     if (result.code === 'not_found') return reply.status(404).send({ error: 'not_found' })
     if (result.code === 'cooldown') return reply.status(429).send({ error: 'change_card_cooldown' })
+    if (result.code === 'invalid_request') return reply.status(400).send({ error: 'change_card_failed' })
     return reply.status(502).send({ error: 'tonpays_unavailable' })
   })
 

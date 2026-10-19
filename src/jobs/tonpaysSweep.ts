@@ -69,7 +69,16 @@ async function cancelAncientRows(ancientCutoff: string, log: FastifyBaseLogger):
   if (rows.length === 0) return
 
   const ids = rows.map((r) => r.id)
-  const { error: updErr } = await db.from(TABLE).update({ status: 'canceled' }).in('id', ids)
+  // Guard on status='pending_payment': between the SELECT above and this
+  // UPDATE, a webhook (or this same job's own checkable-window pass, if a row
+  // somehow qualified for both) could have already paid/graded the row —
+  // without the guard this would silently clobber a paid row back to
+  // canceled. Same idempotency pattern as handleTonPaysPaid.
+  const { error: updErr } = await db
+    .from(TABLE)
+    .update({ status: 'canceled' })
+    .eq('status', 'pending_payment')
+    .in('id', ids)
   if (updErr) log.warn({ err: updErr }, 'tonpays sweep: ancient-row cancel failed')
 }
 
@@ -104,14 +113,23 @@ async function checkOneRow(row: PendingRow, log: FastifyBaseLogger): Promise<voi
   if (result.paid) {
     const outcome = await handleTonPaysPaid(invoiceId)
     if (outcome === 'grant_failed') log.warn({ invoiceId, txId: row.id }, 'tonpays sweep: grant failed')
+    // 'not_found' means TonPays reports this invoice paid but we have no
+    // matching transaction row at all (not even a non-pending one) — a data
+    // drift signal worth flagging, distinct from the normal 'already' replay.
+    if (outcome === 'not_found') log.warn({ invoiceId, txId: row.id }, 'tonpays sweep: paid invoice not found in premium_transactions')
     return
   }
 
   if (result.status === 'expired' || result.status === 'canceled') {
+    // Guard on status='pending_payment' — the row could have been paid
+    // (webhook or an earlier pass) between the SELECT and this UPDATE;
+    // without the guard this would silently clobber a paid row back to
+    // canceled. Same idempotency pattern as handleTonPaysPaid.
     const { error } = await db
       .from(TABLE)
       .update({ status: 'canceled', tonpays_status: result.status })
       .eq('id', row.id)
+      .eq('status', 'pending_payment')
     if (error) log.warn({ err: error, txId: row.id }, 'tonpays sweep: cancel update failed')
   }
   // Any other status (still pending) is left alone for the next run.

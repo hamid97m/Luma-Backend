@@ -16,6 +16,8 @@ import { runTonPaysSweepJob } from '../src/jobs/tonpaysSweep.js'
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any
 
+type UpdateCall = { patch: any; matchers: Array<[string, any]> }
+
 /**
  * Mock db.from('premium_transactions') query builder.
  *
@@ -24,10 +26,12 @@ const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any
  * (>48h) cleanup scan; `.lt(...)` (+`.gt(...)`) marks the checkable (10m-48h)
  * window scan. `.limit(n)` truncates the relevant fixture array, so the cap
  * is exercised for real rather than merely asserted on the call args.
- * `.update(...)` is logged with whatever `.eq`/`.in` matcher follows it.
+ * `.update(...)` returns a chainable that records EVERY `.eq`/`.in` matcher
+ * in call order (so both the row-identity matcher and the `status =
+ * 'pending_payment'` idempotency guard show up), resolving once awaited.
  */
 function buildDb(opts: { checkable?: any[]; ancient?: any[] }) {
-  const updates: Array<{ patch: any; matcher: [string, any] }> = []
+  const updates: UpdateCall[] = []
   const fromCalls: string[] = []
 
   const from = vi.fn((table: string) => {
@@ -44,16 +48,27 @@ function buildDb(opts: { checkable?: any[]; ancient?: any[] }) {
         const source = mode === 'ancient' ? (opts.ancient ?? []) : (opts.checkable ?? [])
         return Promise.resolve({ data: source.slice(0, n), error: null })
       },
-      update: (patch: any) => ({
-        eq: (col: string, val: any) => { updates.push({ patch, matcher: [col, val] }); return Promise.resolve({ error: null }) },
-        in: (col: string, val: any) => { updates.push({ patch, matcher: [col, val] }); return Promise.resolve({ error: null }) },
-      }),
+      update: (patch: any) => {
+        const matchers: Array<[string, any]> = []
+        const uq: any = {
+          eq: (col: string, val: any) => { matchers.push([col, val]); return uq },
+          in: (col: string, val: any) => { matchers.push([col, val]); return uq },
+          then: (resolve: any, reject: any) => {
+            updates.push({ patch, matchers })
+            return Promise.resolve({ error: null }).then(resolve, reject)
+          },
+        }
+        return uq
+      },
     }
     return q
   })
 
   return { from, updates, fromCalls }
 }
+
+const hasMatcher = (u: UpdateCall, col: string, val: any) =>
+  u.matchers.some(([c, v]) => c === col && (Array.isArray(v) ? v.includes(val) : v === val))
 
 beforeEach(() => {
   vi.mocked(isTonPaysConfigured).mockReturnValue(true)
@@ -91,10 +106,10 @@ describe('runTonPaysSweepJob', () => {
     expect(handleTonPaysPaid).toHaveBeenCalledWith('inv1')
     // A paid row is finalized entirely inside handleTonPaysPaid — the sweep
     // itself issues no separate status update for it.
-    expect(mockDb.updates.find((u) => u.matcher[1] === 'tx1')).toBeUndefined()
+    expect(mockDb.updates.find((u) => hasMatcher(u, 'id', 'tx1'))).toBeUndefined()
   })
 
-  it('cancels expired rows and ancient rows without checking the ancient ones', async () => {
+  it('cancels expired rows and ancient rows without checking the ancient ones, guarding both updates on pending_payment', async () => {
     const mockDb = buildDb({
       checkable: [{ id: 'tx-expired', tonpays_invoice_id: 'inv-expired' }],
       ancient: [{ id: 'tx-ancient', tonpays_invoice_id: 'inv-ancient' }],
@@ -111,12 +126,17 @@ describe('runTonPaysSweepJob', () => {
     expect(checkInvoice).toHaveBeenCalledTimes(1)
     expect(checkInvoice).toHaveBeenCalledWith('inv-expired')
 
-    const expiredUpdate = mockDb.updates.find((u) => u.matcher[1] === 'tx-expired')
+    const expiredUpdate = mockDb.updates.find((u) => hasMatcher(u, 'id', 'tx-expired'))
     expect(expiredUpdate?.patch).toEqual({ status: 'canceled', tonpays_status: 'expired' })
+    // Guard: the per-row expired/canceled update must not clobber a row that
+    // paid between the SELECT and this UPDATE.
+    expect(hasMatcher(expiredUpdate!, 'status', 'pending_payment')).toBe(true)
 
-    const ancientUpdate = mockDb.updates.find((u) =>
-      u.matcher[1] === 'tx-ancient' || (Array.isArray(u.matcher[1]) && u.matcher[1].includes('tx-ancient')))
+    const ancientUpdate = mockDb.updates.find((u) => hasMatcher(u, 'id', 'tx-ancient'))
     expect(ancientUpdate?.patch).toEqual({ status: 'canceled' })
+    // Guard: the ancient batch cancel must not clobber a row that paid
+    // between the SELECT and this UPDATE either.
+    expect(hasMatcher(ancientUpdate!, 'status', 'pending_payment')).toBe(true)
   })
 
   it('caps at 30 checks per run', async () => {

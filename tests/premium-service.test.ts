@@ -4,12 +4,25 @@ vi.mock('../src/bot.js', () => ({
   createPremiumInvoiceLink: vi.fn().mockResolvedValue('https://t.me/invoice/prem'),
   refundPremiumPayment: vi.fn().mockResolvedValue(undefined),
 }))
+vi.mock('../src/payments/tonpays.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/payments/tonpays.js')>('../src/payments/tonpays.js')
+  return {
+    ...actual,
+    createTelegramInvoice: vi.fn(),
+    checkInvoice: vi.fn(),
+    cancelInvoice: vi.fn(),
+    generateTonPaysOrderId: vi.fn(),
+  }
+})
 import { db } from '../src/db.js'
 import { createPremiumInvoiceLink } from '../src/bot.js'
 import {
   isPremiumActive, extendPremiumUntil, discountActive, chargedPrice,
   getPremiumStatus, createPremiumCheckout, resolvePaymentProvider, getTomanPerStar,
 } from '../src/premium/service.js'
+import {
+  createTelegramInvoice, checkInvoice, cancelInvoice, generateTonPaysOrderId, TonPaysApiError,
+} from '../src/payments/tonpays.js'
 import { chainable } from './admin-helpers.js'
 import { en } from '../src/i18n/en.js'
 
@@ -234,7 +247,7 @@ describe('createPremiumCheckout', () => {
       },
     })
     const res = await createPremiumCheckout('u1', 'p1')
-    expect(res).toEqual({ transactionId: 'tx1', invoiceLink: 'https://t.me/invoice/prem' })
+    expect(res).toEqual({ transactionId: 'tx1', provider: 'stars', invoiceLink: 'https://t.me/invoice/prem' })
     expect(inserts[0]).toMatchObject({
       user_id: 'u1', plan_id: 'p1', plan_title: '1 Month',
       price_stars: 100, duration_days: 30, status: 'pending_payment', source: 'purchase',
@@ -252,7 +265,7 @@ describe('createPremiumCheckout', () => {
       },
     })
     const res = await createPremiumCheckout('u1', 'p1')
-    expect(res).toEqual({ transactionId: 'tx1', invoiceLink: 'https://t.me/invoice/prem' })
+    expect(res).toEqual({ transactionId: 'tx1', provider: 'stars', invoiceLink: 'https://t.me/invoice/prem' })
     expect(inserts[0]).toMatchObject({ price_stars: 75 })
     expect(createPremiumInvoiceLink).toHaveBeenCalledWith('tx1', '1 Month', 'Best start', 75)
   })
@@ -297,5 +310,137 @@ describe('createPremiumCheckout', () => {
     })
     await createPremiumCheckout('u1', 'p1')
     expect(createPremiumInvoiceLink).toHaveBeenCalledWith('tx1', '1 Month', en.premium.invoiceDescriptionFallback(30), 100)
+  })
+})
+
+describe('createPremiumCheckout — tonpays', () => {
+  const plan = {
+    id: 'p1', title: '1 Month', description: 'Best start', price_stars: 100,
+    discount_percent: null, discount_ends_at: null, duration_days: 30,
+  }
+
+  beforeEach(() => vi.clearAllMocks())
+  afterEach(() => vi.unstubAllEnvs())
+
+  // Routes all premium_transactions calls to the right fake: insert() for the
+  // new attempt row, select() for the "find our existing pending row" lookup
+  // (BUYER_HAS_PENDING_INVOICE path), update() for status/invoice writes.
+  function mockTonPaysDb(opts: { plan: any; buyer?: any; tomanPerStar?: number; insertData?: any; oldRow?: any | null }) {
+    const inserts: any[] = []
+    const updates: any[] = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_config') return chainable({ data: { premium_enabled: true, toman_per_star: opts.tomanPerStar ?? 500 } })
+      if (table === 'premium_plans') return chainable({ data: opts.plan })
+      if (table === 'users') return chainable({ data: opts.buyer ?? { locale: null, geo_country: 'IR', telegram_id: 777 } })
+      if (table === 'premium_transactions') {
+        return {
+          insert: (payload: any) => { inserts.push(payload); return chainable({ data: opts.insertData ?? { id: 'tx-new' }, error: null }) },
+          select: () => chainable({ data: opts.oldRow ?? null }),
+          update: (payload: any) => { updates.push(payload); return chainable({ data: null, error: null }) },
+        } as any
+      }
+      return chainable({ data: null })
+    })
+    return { inserts, updates }
+  }
+
+  it('tonpays checkout inserts snapshot row and returns card payment', async () => {
+    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-abc')
+    vi.mocked(createTelegramInvoice).mockResolvedValue({
+      invoiceId: 'inv-1', cardNumber: '6037-xxxx-xxxx-1234', cardHolder: 'Card Holder', finalAmount: 50037, status: 'pending',
+    })
+    const { inserts, updates } = mockTonPaysDb({ plan, tomanPerStar: 500 }) // 100 stars × 500 = 50000
+
+    const res = await createPremiumCheckout('u1', 'p1')
+
+    expect(res).toEqual({
+      transactionId: 'tx-new', provider: 'tonpays',
+      payment: { cardNumber: '6037-xxxx-xxxx-1234', cardHolder: 'Card Holder', amountToman: 50037, invoiceId: 'inv-1' },
+    })
+    expect(inserts[0]).toMatchObject({
+      user_id: 'u1', plan_id: 'p1', provider: 'tonpays',
+      price_stars: 100, price_toman: 50000, tonpays_order_id: 'order-abc',
+      status: 'pending_payment', source: 'purchase',
+    })
+    expect(createTelegramInvoice).toHaveBeenCalledWith({ amountToman: 50000, orderId: 'order-abc', buyerChatId: 777 })
+    expect(updates[0]).toMatchObject({ tonpays_invoice_id: 'inv-1', tonpays_final_amount: 50037, tonpays_status: 'pending' })
+  })
+
+  it('stars checkout unchanged for non-IR user', async () => {
+    vi.stubEnv('TONPAYS_API_KEY', 'key123') // configured, but geo isn't IR
+    const inserts: any[] = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_config') return chainable({ data: { premium_enabled: true } })
+      if (table === 'premium_plans') return chainable({ data: plan })
+      if (table === 'users') return chainable({ data: { locale: null, geo_country: 'DE', telegram_id: 777 } })
+      if (table === 'premium_transactions') {
+        return { insert: (payload: any) => { inserts.push(payload); return chainable({ data: { id: 'tx1' }, error: null }) } } as any
+      }
+      return chainable({ data: null })
+    })
+
+    const res = await createPremiumCheckout('u1', 'p1')
+
+    expect(res).toEqual({ transactionId: 'tx1', provider: 'stars', invoiceLink: 'https://t.me/invoice/prem' })
+    expect(createTelegramInvoice).not.toHaveBeenCalled()
+    expect(inserts[0]).toMatchObject({ price_stars: 100, status: 'pending_payment' })
+  })
+
+  it('resumes the pending invoice for same plan and amount', async () => {
+    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
+    vi.mocked(createTelegramInvoice).mockRejectedValue(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
+    vi.mocked(checkInvoice).mockResolvedValue({ invoiceId: 'inv-old', status: 'pending', paid: false, remainingAmount: null, refundPending: false })
+
+    const { updates } = mockTonPaysDb({
+      plan, tomanPerStar: 500,
+      oldRow: { id: 'tx-old', plan_id: 'p1', price_toman: 50000, tonpays_invoice_id: 'inv-old', tonpays_final_amount: 50037 },
+    })
+
+    const res = await createPremiumCheckout('u1', 'p1')
+
+    expect(checkInvoice).toHaveBeenCalledWith('inv-old')
+    expect(cancelInvoice).not.toHaveBeenCalled()
+    expect(res).toMatchObject({ transactionId: 'tx-old', provider: 'tonpays', payment: { invoiceId: 'inv-old', amountToman: 50037 } })
+    // the fresh never-invoiced attempt row is dropped, not left dangling as pending
+    expect(updates.some((u) => u.status === 'canceled')).toBe(true)
+  })
+
+  it('cancels and retries for a different plan', async () => {
+    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
+    vi.mocked(createTelegramInvoice)
+      .mockRejectedValueOnce(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
+      .mockResolvedValueOnce({ invoiceId: 'inv-new', cardNumber: '6037-yyyy-yyyy-9999', cardHolder: 'New Card', finalAmount: 60012, status: 'pending' })
+    vi.mocked(cancelInvoice).mockResolvedValue(undefined)
+
+    const { updates } = mockTonPaysDb({
+      plan, tomanPerStar: 500,
+      oldRow: { id: 'tx-old', plan_id: 'p2', price_toman: 999, tonpays_invoice_id: 'inv-old', tonpays_final_amount: 1000 },
+    })
+
+    const res = await createPremiumCheckout('u1', 'p1')
+
+    expect(cancelInvoice).toHaveBeenCalledWith('inv-old')
+    expect(updates.some((u) => u.status === 'canceled')).toBe(true)
+    expect(createTelegramInvoice).toHaveBeenCalledTimes(2)
+    expect(res).toEqual({
+      transactionId: 'tx-new', provider: 'tonpays',
+      payment: { cardNumber: '6037-yyyy-yyyy-9999', cardHolder: 'New Card', amountToman: 60012, invoiceId: 'inv-new' },
+    })
+  })
+
+  it('marks the row canceled when create fails outright', async () => {
+    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
+    vi.mocked(createTelegramInvoice).mockRejectedValue(new TonPaysApiError('INTERNAL_ERROR', 'boom', 500))
+
+    const { updates } = mockTonPaysDb({ plan, tomanPerStar: 500 })
+
+    const res = await createPremiumCheckout('u1', 'p1')
+
+    expect(res).toEqual({ error: 'checkout_failed' })
+    expect(updates[0]).toMatchObject({ status: 'canceled' })
   })
 })

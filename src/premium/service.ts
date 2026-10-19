@@ -3,7 +3,10 @@ import { createPremiumInvoiceLink, refundPremiumPayment, notifyPaymentChannel, n
 import { formatPremiumPaidNotice } from '../payments/paymentNotify.js'
 import { schedulePurchaseCheckoutFollowup } from '../jobs/purchaseMessage.js'
 import { tFor, type Locale } from '../i18n/index.js'
-import { isTonPaysConfigured } from '../payments/tonpays.js'
+import {
+  isTonPaysConfigured, createTelegramInvoice, checkInvoice, cancelInvoice,
+  generateTonPaysOrderId, TonPaysApiError, type TonPaysInvoice,
+} from '../payments/tonpays.js'
 
 export const PREMIUM_PAYLOAD_PREFIX = 'premium:'
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -115,7 +118,12 @@ export async function getPremiumStatus(userId: string) {
   }
 }
 
-export async function createPremiumCheckout(userId: string, planId: string) {
+export type PremiumCheckoutResult =
+  | { error: string }
+  | { transactionId: string; provider: 'stars'; invoiceLink: string }
+  | { transactionId: string; provider: 'tonpays'; payment: { cardNumber: string; cardHolder: string; amountToman: number; invoiceId: string } }
+
+export async function createPremiumCheckout(userId: string, planId: string): Promise<PremiumCheckoutResult> {
   if (!(await isPremiumEnabled())) return { error: 'premium_disabled' }
 
   const { data: plan } = await db
@@ -125,9 +133,9 @@ export async function createPremiumCheckout(userId: string, planId: string) {
     .maybeSingle()
   if (!plan) return { error: 'plan_unavailable' }
 
-  // Invoice copy follows the buyer's language; the stored plan_title is the
-  // same localized text so the receipt/admin view matches what they saw.
-  const { data: buyer } = await db.from('users').select('locale').eq('id', userId).maybeSingle()
+  // Invoice copy follows the buyer's language; geo_country decides the payment
+  // provider and, for TonPays, telegram_id is who the invoice is addressed to.
+  const { data: buyer } = await db.from('users').select('locale, geo_country, telegram_id').eq('id', userId).maybeSingle()
   const locale = (buyer?.locale as Locale | null) ?? null
   const text = planText(plan, locale)
   const t = tFor(locale)
@@ -137,6 +145,10 @@ export async function createPremiumCheckout(userId: string, planId: string) {
   const chargeStars = discountActive(plan.discount_percent, plan.discount_ends_at)
     ? chargedPrice(plan.price_stars, plan.discount_percent)
     : plan.price_stars
+
+  if (resolvePaymentProvider(buyer?.geo_country ?? null) === 'tonpays') {
+    return createTonPaysCheckout(userId, plan, text.title, chargeStars, (buyer?.telegram_id as number | null) ?? 0)
+  }
 
   const { data: tx, error } = await db.from('premium_transactions').insert({
     user_id: userId, plan_id: plan.id, plan_title: text.title,
@@ -154,7 +166,103 @@ export async function createPremiumCheckout(userId: string, planId: string) {
   // fire-and-forget; the periodic backstop sweep covers checks lost to a restart.
   schedulePurchaseCheckoutFollowup(userId)
 
-  return { transactionId: tx.id, invoiceLink }
+  return { transactionId: tx.id, provider: 'stars', invoiceLink }
+}
+
+/**
+ * TonPays branch of checkout: snapshot `price_toman` at the live rate, insert a
+ * pending row, then ask TonPays for a card-to-card invoice.
+ *
+ * `BUYER_HAS_PENDING_INVOICE` means this buyer already has a live invoice at
+ * TonPays (one per buyer, not per order): if it's for the same plan and the
+ * same charged amount, resume it (the new, never-invoiced row we just inserted
+ * is dropped instead of left dangling); otherwise cancel the stale one and
+ * retry creation exactly once. Any other failure cancels the new row and
+ * reports `checkout_failed`.
+ */
+async function createTonPaysCheckout(
+  userId: string,
+  plan: { id: string; duration_days: number },
+  planTitle: string,
+  chargeStars: number,
+  buyerChatId: number,
+): Promise<PremiumCheckoutResult> {
+  const priceToman = chargeStars * (await getTomanPerStar())
+  const orderId = generateTonPaysOrderId()
+
+  const { data: tx, error } = await db.from('premium_transactions').insert({
+    user_id: userId, plan_id: plan.id, plan_title: planTitle,
+    price_stars: chargeStars, price_toman: priceToman, duration_days: plan.duration_days,
+    provider: 'tonpays', tonpays_order_id: orderId,
+    status: 'pending_payment', source: 'purchase',
+  }).select('id').single()
+  if (error || !tx) return { error: 'checkout_failed' }
+
+  const create = () => createTelegramInvoice({ amountToman: priceToman, orderId, buyerChatId })
+
+  let invoice: TonPaysInvoice
+  try {
+    invoice = await create()
+  } catch (err) {
+    if (!(err instanceof TonPaysApiError) || err.code !== 'BUYER_HAS_PENDING_INVOICE') {
+      await db.from('premium_transactions').update({ status: 'canceled' }).eq('id', tx.id)
+      return { error: 'checkout_failed' }
+    }
+
+    const { data: oldRow } = await db
+      .from('premium_transactions')
+      .select('id, plan_id, price_toman, tonpays_invoice_id, tonpays_final_amount')
+      .eq('user_id', userId).eq('provider', 'tonpays').eq('status', 'pending_payment')
+      .neq('id', tx.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    if (oldRow && oldRow.plan_id === plan.id && oldRow.price_toman === priceToman) {
+      // Same purchase already has a live invoice at TonPays — this attempt never
+      // got one, so drop it and resume the existing one instead.
+      await db.from('premium_transactions').update({ status: 'canceled' }).eq('id', tx.id)
+      await checkInvoice(oldRow.tonpays_invoice_id as string)
+      return {
+        transactionId: oldRow.id as string,
+        provider: 'tonpays',
+        payment: {
+          cardNumber: '', cardHolder: '',
+          amountToman: (oldRow.tonpays_final_amount as number | null) ?? (oldRow.price_toman as number),
+          invoiceId: oldRow.tonpays_invoice_id as string,
+        },
+      }
+    }
+
+    if (oldRow) {
+      await cancelInvoice(oldRow.tonpays_invoice_id as string)
+      await db.from('premium_transactions').update({ status: 'canceled' }).eq('id', oldRow.id)
+    }
+
+    try {
+      invoice = await create()
+    } catch {
+      await db.from('premium_transactions').update({ status: 'canceled' }).eq('id', tx.id)
+      return { error: 'checkout_failed' }
+    }
+  }
+
+  await db.from('premium_transactions').update({
+    tonpays_invoice_id: invoice.invoiceId,
+    tonpays_final_amount: invoice.finalAmount,
+    tonpays_status: invoice.status,
+  }).eq('id', tx.id)
+
+  schedulePurchaseCheckoutFollowup(userId)
+
+  return {
+    transactionId: tx.id,
+    provider: 'tonpays',
+    payment: {
+      cardNumber: invoice.cardNumber, cardHolder: invoice.cardHolder,
+      amountToman: invoice.finalAmount, invoiceId: invoice.invoiceId,
+    },
+  }
 }
 
 export async function validatePremiumPreCheckout(transactionId: string, totalAmount: number, currency: string) {

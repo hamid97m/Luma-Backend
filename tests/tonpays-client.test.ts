@@ -58,6 +58,16 @@ describe('verifyTonPaysSignature', () => {
     expect(verifyTonPaysSignature(body, 'garbage', SECRET, nowMs)).toBe(false)
     expect(verifyTonPaysSignature(body, 't=1', SECRET, nowMs)).toBe(false)
   })
+
+  it('verifies correctly when t has a leading zero, signing over the raw header string', () => {
+    // nowSec happens to not start with 0, so pick a stale-looking but still-fresh
+    // raw t string with a leading zero to prove the HMAC is computed over the raw
+    // string "0<digits>", not over Number("0<digits>") re-serialized without the zero.
+    const rawT = `0${nowSec}`
+    const hex = createHmac('sha256', SECRET).update(`${rawT}.${body}`).digest('hex')
+    const header = `t=${rawT},v1=${hex}`
+    expect(verifyTonPaysSignature(body, header, SECRET, nowMs)).toBe(true)
+  })
 })
 
 describe('generateTonPaysOrderId', () => {
@@ -126,6 +136,17 @@ describe('createTelegramInvoice', () => {
     await expect(call).rejects.toBeInstanceOf(TonPaysApiError)
     await expect(call).rejects.toMatchObject({ code: 'BUYER_HAS_PENDING_INVOICE', httpStatus: 409 })
   })
+
+  it('maps an unparsable (e.g. HTML gateway-error) body on a non-2xx response to TonPaysApiError', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('<html><body>502 Bad Gateway</body></html>', {
+      status: 502,
+      headers: { 'Content-Type': 'text/html' },
+    }))
+
+    const call = createTelegramInvoice({ amountToman: 150000, orderId: 'order-1', buyerChatId: 42 })
+    await expect(call).rejects.toBeInstanceOf(TonPaysApiError)
+    await expect(call).rejects.toMatchObject({ httpStatus: 502 })
+  })
 })
 
 describe('checkInvoice', () => {
@@ -188,6 +209,11 @@ describe('cancelInvoice', () => {
       detail: { code: 'INTERNAL_ERROR', message: 'boom' },
     }), { status: 500 }))
     await expect(cancelInvoice('inv-1')).rejects.toBeInstanceOf(TonPaysApiError)
+  })
+
+  it('still swallows a 409 whose body is unparsable garbage', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('not json', { status: 409 }))
+    await expect(cancelInvoice('inv-1')).resolves.toBeUndefined()
   })
 })
 

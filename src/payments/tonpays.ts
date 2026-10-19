@@ -73,7 +73,9 @@ export function verifyTonPaysSignature(
   if (Math.abs(nowMs / 1000 - tSeconds) > SIGNATURE_TOLERANCE_SECONDS) return false
 
   const body = typeof rawBody === 'string' ? rawBody : rawBody.toString('utf8')
-  const expectedHex = createHmac('sha256', secret).update(`${tSeconds}.${body}`).digest('hex')
+  // Sign over the raw `t` string from the header, not the re-serialized number — a
+  // non-canonical t (leading zero, '+') would otherwise silently fail to verify.
+  const expectedHex = createHmac('sha256', secret).update(`${t}.${body}`).digest('hex')
 
   const expected = Buffer.from(expectedHex, 'hex')
   const actual = Buffer.from(v1, 'hex')
@@ -107,7 +109,17 @@ async function tonpaysFetch<T>(path: string, init: { method: string; body?: unkn
   })
 
   const text = await res.text()
-  const data = text ? JSON.parse(text) : null
+  let data: any = null
+  if (text) {
+    try {
+      data = JSON.parse(text)
+    } catch {
+      // Hosted payment gateways can return an HTML/plaintext body on a gateway
+      // error (502/503 from a proxy, etc). Map that to TonPaysApiError too, so
+      // callers (and cancelInvoice's 409-swallow) never see a raw SyntaxError.
+      throw new TonPaysApiError('INVALID_RESPONSE', `tonpays_invalid_json_http_${res.status}`, res.status)
+    }
+  }
 
   if (!res.ok) {
     const detail = data?.detail

@@ -491,11 +491,15 @@ export async function getPremiumTransactionStatus(txId: string, userId: string):
       } catch {
         // Upstream check failed (network error, TonPays outage, etc) — fall
         // back to the cached (or stored) state rather than breaking the poll.
+        // Still advance lastCheckMs: during an outage every poll would
+        // otherwise skip the throttle and re-hit the failing upstream on
+        // every single call, which is the worst time to hammer it.
         if (cached) {
           tonpaysStatus = cached.tonpaysStatus
           remainingAmount = cached.remainingAmount
           refundPending = cached.refundPending
         }
+        tonpaysPollCache.set(txId, { lastCheckMs: now, tonpaysStatus, remainingAmount, refundPending })
       }
     }
   }

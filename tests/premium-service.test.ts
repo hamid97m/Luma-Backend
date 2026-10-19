@@ -650,6 +650,20 @@ describe('getPremiumTransactionStatus — tonpays poll fallback', () => {
     expect(res).toEqual({ status: 'pending_payment', provider: 'tonpays', tonpaysStatus: 'pending', remainingAmount: null, refundPending: false })
   })
 
+  it('a failed check still advances the throttle, so an outage does not get hammered on every poll', async () => {
+    mockPremiumTxDb({
+      txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
+    })
+    vi.mocked(checkInvoice).mockRejectedValue(new TonPaysApiError('INTERNAL_ERROR', 'boom', 500))
+
+    const first = await getPremiumTransactionStatus('tx1', 'u1')
+    const second = await getPremiumTransactionStatus('tx1', 'u1')
+
+    expect(checkInvoice).toHaveBeenCalledTimes(1) // the second poll must be throttled, not re-hit the failing upstream
+    expect(second).toEqual(first)
+    expect(second).toEqual({ status: 'pending_payment', provider: 'tonpays', tonpaysStatus: 'pending', remainingAmount: null, refundPending: false })
+  })
+
   it('returns null for another user or an unknown tx', async () => {
     mockPremiumTxDb({ txRow: { status: 'pending_payment', user_id: 'other', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' } })
     expect(await getPremiumTransactionStatus('tx1', 'u1')).toBeNull()

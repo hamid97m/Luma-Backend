@@ -4,7 +4,7 @@ import { extendPremiumUntil, type PlanTranslations } from '../../premium/service
 
 const PLAN_SELECT = 'id, title, description, translations, price_stars, discount_percent, discount_ends_at, duration_days, is_active, sort_order, created_at'
 const PAGE_SIZE = 25
-const TX_STATUSES = ['pending_payment', 'paid', 'refunded']
+const TX_STATUSES = ['pending_payment', 'paid', 'refunded', 'canceled', 'paid_grant_failed']
 const TX_SOURCES = ['purchase', 'admin_grant', 'referral']
 const TRANSLATABLE_LOCALES = ['en', 'ar'] as const
 

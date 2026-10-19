@@ -3,6 +3,8 @@ vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/bot.js', () => ({
   createPremiumInvoiceLink: vi.fn().mockResolvedValue('https://t.me/invoice/prem'),
   refundPremiumPayment: vi.fn().mockResolvedValue(undefined),
+  notifyPaymentChannel: vi.fn().mockResolvedValue(undefined),
+  notifyPremiumPurchased: vi.fn().mockResolvedValue(undefined),
 }))
 vi.mock('../src/payments/tonpays.js', async () => {
   const actual = await vi.importActual<typeof import('../src/payments/tonpays.js')>('../src/payments/tonpays.js')
@@ -12,6 +14,8 @@ vi.mock('../src/payments/tonpays.js', async () => {
     checkInvoice: vi.fn(),
     cancelInvoice: vi.fn(),
     generateTonPaysOrderId: vi.fn(),
+    changeCard: vi.fn(),
+    submitRefundCard: vi.fn(),
   }
 })
 vi.mock('../src/jobs/purchaseMessage.js', () => ({ schedulePurchaseCheckoutFollowup: vi.fn() }))
@@ -20,9 +24,11 @@ import { createPremiumInvoiceLink } from '../src/bot.js'
 import {
   isPremiumActive, extendPremiumUntil, discountActive, chargedPrice,
   getPremiumStatus, createPremiumCheckout, resolvePaymentProvider, getTomanPerStar,
+  getPremiumTransactionStatus, changeTonPaysCard, submitTonPaysRefundCard, _resetTonPaysPollThrottle,
 } from '../src/premium/service.js'
 import {
   createTelegramInvoice, checkInvoice, cancelInvoice, generateTonPaysOrderId, TonPaysApiError,
+  changeCard, submitRefundCard,
 } from '../src/payments/tonpays.js'
 import { schedulePurchaseCheckoutFollowup } from '../src/jobs/purchaseMessage.js'
 import { chainable } from './admin-helpers.js'
@@ -508,5 +514,189 @@ describe('createPremiumCheckout — tonpays', () => {
 
     expect(res).toEqual({ error: 'checkout_failed' })
     expect(updates[0]).toMatchObject({ status: 'canceled' })
+  })
+})
+
+describe('getPremiumTransactionStatus — tonpays poll fallback', () => {
+  beforeEach(() => { vi.clearAllMocks(); _resetTonPaysPollThrottle() })
+
+  // premium_transactions.select() answers the poll's own row fetch; its
+  // update() answers either handleTonPaysPaid's claim-and-grant update or the
+  // markGrantFailed/markCanceled update, depending on the scenario under test
+  // (each test only exercises one of those paths).
+  function mockPremiumTxDb(opts: { txRow: any; txUpdateResult?: any; usersRow?: any }) {
+    const txUpdates: any[] = []
+    const userUpdates: any[] = []
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_transactions') {
+        return {
+          select: () => chainable({ data: opts.txRow }),
+          update: (payload: any) => { txUpdates.push(payload); return chainable({ data: opts.txUpdateResult ?? null }) },
+        } as any
+      }
+      if (table === 'users') {
+        return {
+          select: () => chainable({ data: opts.usersRow }),
+          update: (payload: any) => { userUpdates.push(payload); return chainable({ data: null, error: null }) },
+        } as any
+      }
+      return chainable({ data: null })
+    })
+    return { txUpdates, userUpdates }
+  }
+
+  it('returns stored state unchanged for a non-pending or stars row, without calling checkInvoice', async () => {
+    mockPremiumTxDb({ txRow: { status: 'paid', user_id: 'u1', provider: 'stars', tonpays_invoice_id: null, tonpays_status: null } })
+    const res = await getPremiumTransactionStatus('tx1', 'u1')
+    expect(res).toEqual({ status: 'paid', provider: 'stars' })
+    expect(checkInvoice).not.toHaveBeenCalled()
+  })
+
+  it('poll on pending tonpays tx checks upstream and grants when paid', async () => {
+    mockPremiumTxDb({
+      txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
+      txUpdateResult: { id: 'tx1', user_id: 'u1', duration_days: 30, price_toman: 50000, tonpays_final_amount: 50037 },
+      usersRow: { premium_until: null, name: 'Ali', locale: null, telegram_id: 777 },
+    })
+    vi.mocked(checkInvoice).mockResolvedValue({
+      invoiceId: 'inv1', status: 'paid', paid: true, remainingAmount: 0, refundPending: false, cardNumber: null, cardHolder: null,
+    })
+
+    const res = await getPremiumTransactionStatus('tx1', 'u1')
+
+    expect(checkInvoice).toHaveBeenCalledWith('inv1')
+    // the grant actually ran (not just reported) — premium_until was extended on the user row
+    expect(res).toEqual({ status: 'paid', provider: 'tonpays', tonpaysStatus: 'paid', remainingAmount: 0, refundPending: false })
+  })
+
+  it('poll throttles upstream checks within 5s', async () => {
+    mockPremiumTxDb({
+      txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
+    })
+    vi.mocked(checkInvoice).mockResolvedValue({
+      invoiceId: 'inv1', status: 'pending', paid: false, remainingAmount: null, refundPending: false, cardNumber: null, cardHolder: null,
+    })
+
+    await getPremiumTransactionStatus('tx1', 'u1')
+    const second = await getPremiumTransactionStatus('tx1', 'u1')
+
+    expect(checkInvoice).toHaveBeenCalledTimes(1)
+    // throttled call still answers from the row's stored state, not an error
+    expect(second).toEqual({ status: 'pending_payment', provider: 'tonpays', tonpaysStatus: 'pending', remainingAmount: null, refundPending: false })
+  })
+
+  it('poll marks the row canceled on expired status', async () => {
+    const { txUpdates } = mockPremiumTxDb({
+      txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
+    })
+    vi.mocked(checkInvoice).mockResolvedValue({
+      invoiceId: 'inv1', status: 'expired', paid: false, remainingAmount: null, refundPending: false, cardNumber: null, cardHolder: null,
+    })
+
+    const res = await getPremiumTransactionStatus('tx1', 'u1')
+
+    expect(res).toEqual({ status: 'canceled', provider: 'tonpays', tonpaysStatus: 'expired', remainingAmount: null, refundPending: false })
+    expect(txUpdates).toContainEqual({ status: 'canceled', tonpays_status: 'expired' })
+  })
+
+  it('a checkInvoice failure does not break the poll — returns the stored state', async () => {
+    mockPremiumTxDb({
+      txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
+    })
+    vi.mocked(checkInvoice).mockRejectedValue(new TonPaysApiError('INTERNAL_ERROR', 'boom', 500))
+
+    const res = await getPremiumTransactionStatus('tx1', 'u1')
+
+    expect(res).toEqual({ status: 'pending_payment', provider: 'tonpays', tonpaysStatus: 'pending', remainingAmount: null, refundPending: false })
+  })
+
+  it('returns null for another user or an unknown tx', async () => {
+    mockPremiumTxDb({ txRow: { status: 'pending_payment', user_id: 'other', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' } })
+    expect(await getPremiumTransactionStatus('tx1', 'u1')).toBeNull()
+    mockPremiumTxDb({ txRow: null })
+    expect(await getPremiumTransactionStatus('tx9', 'u1')).toBeNull()
+  })
+})
+
+describe('changeTonPaysCard', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  function mockTxLookup(row: any) {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_transactions') return chainable({ data: row })
+      return chainable({ data: null })
+    })
+  }
+
+  it('returns the new card on success', async () => {
+    mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
+    vi.mocked(changeCard).mockResolvedValue({ cardNumber: '6037-1111', cardHolder: 'New Holder' })
+
+    const res = await changeTonPaysCard('tx1', 'u1')
+
+    expect(changeCard).toHaveBeenCalledWith('inv1')
+    expect(res).toEqual({ ok: true, cardNumber: '6037-1111', cardHolder: 'New Holder' })
+  })
+
+  it('maps a TonPays 4xx (cooldown) error to the cooldown code', async () => {
+    mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
+    vi.mocked(changeCard).mockRejectedValue(new TonPaysApiError('COOLDOWN', 'wait 60s', 429))
+
+    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'cooldown' })
+  })
+
+  it('maps an unexpected 5xx to an upstream error, not cooldown', async () => {
+    mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
+    vi.mocked(changeCard).mockRejectedValue(new TonPaysApiError('INTERNAL_ERROR', 'boom', 500))
+
+    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'upstream_error' })
+  })
+
+  it('reports not_found for a foreign tx or a stars row', async () => {
+    mockTxLookup({ user_id: 'other', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
+    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'not_found' })
+
+    mockTxLookup({ user_id: 'u1', provider: 'stars', tonpays_invoice_id: null })
+    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'not_found' })
+  })
+})
+
+describe('submitTonPaysRefundCard', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  function mockTxLookup(row: any) {
+    vi.mocked(db.from).mockImplementation((table: string) => {
+      if (table === 'premium_transactions') return chainable({ data: row })
+      return chainable({ data: null })
+    })
+  }
+
+  it('validates card number (16 digits after stripping spaces) and non-empty holder, and forwards to tonpays', async () => {
+    mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
+
+    expect(await submitTonPaysRefundCard('tx1', 'u1', '1234', 'Ali')).toEqual({ ok: false, code: 'invalid_card' })
+    expect(await submitTonPaysRefundCard('tx1', 'u1', '6037 9911 2233 4455', '')).toEqual({ ok: false, code: 'invalid_card' })
+    expect(await submitTonPaysRefundCard('tx1', 'u1', '6037 9911 2233 4455', '   ')).toEqual({ ok: false, code: 'invalid_card' })
+    expect(submitRefundCard).not.toHaveBeenCalled()
+
+    vi.mocked(submitRefundCard).mockResolvedValue(undefined)
+    const res = await submitTonPaysRefundCard('tx1', 'u1', '6037 9911 2233 4455', 'Ali Rezaei')
+    expect(res).toEqual({ ok: true })
+    expect(submitRefundCard).toHaveBeenCalledWith('inv1', '6037991122334455', 'Ali Rezaei')
+  })
+
+  it('reports not_found for a foreign tx or a stars row', async () => {
+    mockTxLookup({ user_id: 'other', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
+    expect(await submitTonPaysRefundCard('tx1', 'u1', '6037991122334455', 'Ali')).toEqual({ ok: false, code: 'not_found' })
+
+    mockTxLookup({ user_id: 'u1', provider: 'stars', tonpays_invoice_id: null })
+    expect(await submitTonPaysRefundCard('tx1', 'u1', '6037991122334455', 'Ali')).toEqual({ ok: false, code: 'not_found' })
+  })
+
+  it('reports an upstream_error when tonpays rejects the refund submission', async () => {
+    mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
+    vi.mocked(submitRefundCard).mockRejectedValue(new TonPaysApiError('INTERNAL_ERROR', 'boom', 500))
+
+    expect(await submitTonPaysRefundCard('tx1', 'u1', '6037991122334455', 'Ali')).toEqual({ ok: false, code: 'upstream_error' })
   })
 })

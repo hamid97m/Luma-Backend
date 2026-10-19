@@ -5,7 +5,8 @@ import { schedulePurchaseCheckoutFollowup } from '../jobs/purchaseMessage.js'
 import { tFor, type Locale } from '../i18n/index.js'
 import {
   isTonPaysConfigured, createTelegramInvoice, checkInvoice, cancelInvoice,
-  generateTonPaysOrderId, TonPaysApiError, type TonPaysInvoice, type TonPaysCheck,
+  generateTonPaysOrderId, TonPaysApiError, changeCard, submitRefundCard,
+  type TonPaysInvoice, type TonPaysCheck,
 } from '../payments/tonpays.js'
 
 export const PREMIUM_PAYLOAD_PREFIX = 'premium:'
@@ -400,9 +401,128 @@ async function markGrantFailed(txId: string, invoiceId: string, reason: string):
   return 'grant_failed'
 }
 
-export async function getPremiumTransactionStatus(txId: string, userId: string) {
+const TONPAYS_POLL_THROTTLE_MS = 5000
+const tonpaysPollLastCheckMs = new Map<string, number>()
+
+/** Test hook: clears the module-level poll throttle map between test cases. */
+export function _resetTonPaysPollThrottle(): void {
+  tonpaysPollLastCheckMs.clear()
+}
+
+export type PremiumTransactionStatus = {
+  status: string
+  provider: PaymentProvider
+  tonpaysStatus?: string | null
+  remainingAmount?: number | null
+  refundPending?: boolean
+}
+
+/**
+ * Status for a single transaction, with a poll-driven fallback for TonPays:
+ * webhooks are the primary path, but if one is lost/delayed the client can
+ * poll this endpoint and we'll check upstream ourselves. Only a still-pending
+ * TonPays row triggers a check (anything already resolved just returns the
+ * stored row), and checks are throttled per tx id so a tight client poll loop
+ * doesn't hammer TonPays. A failed check never breaks the poll — it falls
+ * back to the row's stored state.
+ */
+export async function getPremiumTransactionStatus(txId: string, userId: string): Promise<PremiumTransactionStatus | null> {
   const { data } = await db
-    .from('premium_transactions').select('status, user_id').eq('id', txId).maybeSingle()
+    .from('premium_transactions')
+    .select('status, user_id, provider, tonpays_invoice_id, tonpays_status')
+    .eq('id', txId).maybeSingle()
   if (!data || data.user_id !== userId) return null
-  return { status: data.status }
+
+  const provider = ((data.provider as PaymentProvider | null) ?? 'stars')
+  if (provider !== 'tonpays') return { status: data.status as string, provider }
+
+  let status = data.status as string
+  let tonpaysStatus = (data.tonpays_status as string | null) ?? null
+  let remainingAmount: number | null = null
+  let refundPending = false
+
+  if (status === 'pending_payment' && data.tonpays_invoice_id) {
+    const invoiceId = data.tonpays_invoice_id as string
+    const now = Date.now()
+    const last = tonpaysPollLastCheckMs.get(txId)
+    if (last === undefined || now - last >= TONPAYS_POLL_THROTTLE_MS) {
+      tonpaysPollLastCheckMs.set(txId, now)
+      try {
+        const check = await checkInvoice(invoiceId)
+        tonpaysStatus = check.status
+        remainingAmount = check.remainingAmount
+        refundPending = check.refundPending
+        if (check.paid) {
+          const result = await handleTonPaysPaid(invoiceId)
+          status = result === 'grant_failed' ? 'paid_grant_failed' : 'paid'
+        } else if (check.status === 'expired' || check.status === 'canceled') {
+          await db.from('premium_transactions').update({ status: 'canceled', tonpays_status: check.status }).eq('id', txId)
+          status = 'canceled'
+        }
+      } catch {
+        // Upstream check failed (network error, TonPays outage, etc) — fall
+        // back to the stored state rather than breaking the poll.
+      }
+    }
+  }
+
+  return { status, provider, tonpaysStatus, remainingAmount, refundPending }
+}
+
+export type ChangeTonPaysCardResult =
+  | { ok: true; cardNumber: string; cardHolder: string }
+  | { ok: false; code: 'not_found' | 'cooldown' | 'upstream_error' }
+
+/**
+ * Requests a new receiving card from TonPays for a pending invoice. TonPays
+ * enforces a 60s cooldown between change-card calls and surfaces it as a
+ * TonPaysApiError; we can't rely on a specific error code for it (gateway
+ * behavior isn't guaranteed stable), so any 4xx from change-card is treated
+ * as the cooldown — the only 4xx this endpoint plausibly returns for a
+ * request we already validated (ownership + a real pending tonpays invoice).
+ * A 5xx/network failure is a genuine upstream problem, not a cooldown, and is
+ * reported separately so callers don't retry it the same way.
+ */
+export async function changeTonPaysCard(txId: string, userId: string): Promise<ChangeTonPaysCardResult> {
+  const row = await getOwnedTonPaysTx(txId, userId)
+  if (!row) return { ok: false, code: 'not_found' }
+  try {
+    const card = await changeCard(row.tonpays_invoice_id as string)
+    return { ok: true, cardNumber: card.cardNumber, cardHolder: card.cardHolder }
+  } catch (err) {
+    if (err instanceof TonPaysApiError && err.httpStatus < 500) return { ok: false, code: 'cooldown' }
+    return { ok: false, code: 'upstream_error' }
+  }
+}
+
+export type RefundCardResult =
+  | { ok: true }
+  | { ok: false; code: 'not_found' | 'invalid_card' | 'upstream_error' }
+
+/** Buyer-submitted card to receive a refund on, for a pending/refund-pending TonPays invoice. */
+export async function submitTonPaysRefundCard(
+  txId: string, userId: string, cardNumber: string, cardHolder: string,
+): Promise<RefundCardResult> {
+  const digits = cardNumber.replace(/\s+/g, '')
+  if (!/^\d{16}$/.test(digits) || !cardHolder.trim()) return { ok: false, code: 'invalid_card' }
+
+  const row = await getOwnedTonPaysTx(txId, userId)
+  if (!row) return { ok: false, code: 'not_found' }
+
+  try {
+    await submitRefundCard(row.tonpays_invoice_id as string, digits, cardHolder.trim())
+    return { ok: true }
+  } catch {
+    return { ok: false, code: 'upstream_error' }
+  }
+}
+
+/** Shared ownership/kind guard for the change-card and refund-card endpoints:
+ * both 404 unless the tx belongs to `userId` and is a tonpays row — never
+ * leaking whether a foreign/stars tx id exists. */
+async function getOwnedTonPaysTx(txId: string, userId: string) {
+  const { data } = await db
+    .from('premium_transactions').select('user_id, provider, tonpays_invoice_id').eq('id', txId).maybeSingle()
+  if (!data || data.user_id !== userId || data.provider !== 'tonpays') return null
+  return data
 }

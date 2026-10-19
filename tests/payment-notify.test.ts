@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { formatPremiumPaidNotice, formatGiftPaidNotice } from '../src/payments/paymentNotify.js'
+import { formatPremiumPaidNotice, formatGiftPaidNotice, formatTonPaysPaidNotice } from '../src/payments/paymentNotify.js'
 
 describe('formatPremiumPaidNotice', () => {
   it('includes buyer, duration, amount, charge and time', () => {
@@ -19,6 +19,22 @@ describe('formatPremiumPaidNotice', () => {
       buyerName: null, durationDays: 7, amountStars: 50, chargeId: 'ch_2', at: 'now',
     })
     expect(text).toContain('Buyer: unknown')
+  })
+})
+
+describe('formatTonPaysPaidNotice', () => {
+  it('produces the exact Toman-flavored notice', () => {
+    const text = formatTonPaysPaidNotice({
+      buyerName: 'Ali', durationDays: 30, amountToman: 300037, invoiceId: 'inv_1', at: '2026-09-05T10:00:00.000Z',
+    })
+    expect(text).toBe([
+      '💎 Premium purchased (TonPays)',
+      'Buyer: Ali',
+      'Duration: 30 days',
+      'Amount: 300037 Toman',
+      'Invoice: inv_1',
+      'Time: 2026-09-05T10:00:00.000Z',
+    ].join('\n'))
   })
 })
 

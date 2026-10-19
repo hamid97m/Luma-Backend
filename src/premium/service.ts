@@ -1,6 +1,6 @@
 import { db } from '../db.js'
 import { createPremiumInvoiceLink, refundPremiumPayment, notifyPaymentChannel, notifyPremiumPurchased } from '../bot.js'
-import { formatPremiumPaidNotice } from '../payments/paymentNotify.js'
+import { formatPremiumPaidNotice, formatTonPaysPaidNotice } from '../payments/paymentNotify.js'
 import { schedulePurchaseCheckoutFollowup } from '../jobs/purchaseMessage.js'
 import { tFor, type Locale } from '../i18n/index.js'
 import {
@@ -333,6 +333,71 @@ async function failAndRefund(txId: string, buyerTelegramId: number, chargeId: st
   } catch (e) {
     console.error('[premium] refund failed:', (e as Error)?.message)
   }
+}
+
+/**
+ * TonPays twin of `handlePremiumPaid`, driven by the webhook's
+ * `invoice.completed` event instead of a Telegram successful_payment update.
+ * Looked up by `tonpays_invoice_id` (unique) rather than a transaction id —
+ * the webhook only carries the invoice id.
+ *
+ * KEY DIFFERENCE from the Stars path: a card-to-card transfer can't be
+ * auto-refunded. If the user row is missing or the premium_until update
+ * fails, there is no `failAndRefund` — the transaction is left in
+ * `paid_grant_failed` for manual admin follow-up and the failure is logged
+ * loudly, since the buyer's money is otherwise in limbo.
+ */
+export async function handleTonPaysPaid(
+  invoiceId: string,
+): Promise<'granted' | 'already' | 'not_found' | 'grant_failed'> {
+  // Idempotency: only a still-pending row proceeds (guards duplicate webhook deliveries).
+  const { data: tx } = await db
+    .from('premium_transactions')
+    .update({ status: 'paid', paid_at: new Date().toISOString() })
+    .eq('tonpays_invoice_id', invoiceId).eq('status', 'pending_payment')
+    .select('id, user_id, duration_days, price_toman, tonpays_final_amount').maybeSingle()
+
+  if (!tx) {
+    // Either this invoice was already processed (a replay) or we've never
+    // heard of it — distinguish the two so callers can treat them differently.
+    const { data: existing } = await db
+      .from('premium_transactions').select('id').eq('tonpays_invoice_id', invoiceId).maybeSingle()
+    return existing ? 'already' : 'not_found'
+  }
+
+  const { data: user } = await db.from('users').select('premium_until, name, locale, telegram_id').eq('id', tx.user_id).single()
+  if (!user) return markGrantFailed(tx.id, invoiceId, 'user row not found')
+
+  const { error: updErr } = await db
+    .from('users')
+    .update({ premium_until: extendPremiumUntil(user.premium_until ?? null, tx.duration_days) })
+    .eq('id', tx.user_id)
+  if (updErr) return markGrantFailed(tx.id, invoiceId, updErr.message)
+
+  // Confirmed grant — post an ops notice (best-effort; never blocks the payment).
+  // Amount shown is the exact transfer TonPays confirmed (final_amount, which
+  // includes their dedup offset), falling back to the nominal snapshot price.
+  notifyPaymentChannel(formatTonPaysPaidNotice({
+    buyerName: user.name ?? null,
+    durationDays: tx.duration_days,
+    amountToman: (tx.tonpays_final_amount as number | null) ?? tx.price_toman,
+    invoiceId,
+    at: new Date().toISOString(),
+  })).catch(() => {})
+
+  notifyPremiumPurchased(user.telegram_id as number, tx.duration_days, (user.locale as Locale | null) ?? null)
+    .catch((err) => console.error('[tonpays] buyer DM failed:', err?.message ?? err))
+
+  return 'granted'
+}
+
+/** Buyer paid (confirmed by TonPays) but we couldn't grant the time — no
+ * refund path exists for a bank transfer, so mark the row for manual admin
+ * follow-up and log loudly instead of silently failing. */
+async function markGrantFailed(txId: string, invoiceId: string, reason: string): Promise<'grant_failed'> {
+  console.error(`[tonpays] grant failed for invoice ${invoiceId} (tx ${txId}): ${reason}`)
+  await db.from('premium_transactions').update({ status: 'paid_grant_failed' }).eq('id', txId)
+  return 'grant_failed'
 }
 
 export async function getPremiumTransactionStatus(txId: string, userId: string) {

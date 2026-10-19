@@ -11,6 +11,14 @@ export interface PremiumPaidNotice {
   at: string // ISO timestamp
 }
 
+export interface TonPaysPaidNotice {
+  buyerName: string | null
+  durationDays: number
+  amountToman: number
+  invoiceId: string
+  at: string // ISO timestamp
+}
+
 export interface GiftPaidNotice {
   buyerName: string | null
   recipientName: string | null
@@ -29,6 +37,17 @@ export function formatPremiumPaidNotice(n: PremiumPaidNotice): string {
     `Duration: ${n.durationDays} days`,
     `Amount: ${n.amountStars} ⭐`,
     `Charge: ${n.chargeId}`,
+    `Time: ${n.at}`,
+  ].join('\n')
+}
+
+export function formatTonPaysPaidNotice(n: TonPaysPaidNotice): string {
+  return [
+    '💎 Premium purchased (TonPays)',
+    `Buyer: ${n.buyerName ?? UNKNOWN}`,
+    `Duration: ${n.durationDays} days`,
+    `Amount: ${n.amountToman} Toman`,
+    `Invoice: ${n.invoiceId}`,
     `Time: ${n.at}`,
   ].join('\n')
 }

@@ -4,6 +4,7 @@ import { mountWebhook, initWebhook } from './bot.js'
 import { runFakeLikerJob, setNextScheduledRunAt } from './jobs/fakeLiker.js'
 import { getLastFakeLikerRunAt } from './jobs/fakeLikerConfig.js'
 import { runPurchaseMessageJob } from './jobs/purchaseMessage.js'
+import { runTonPaysSweepJob } from './jobs/tonpaysSweep.js'
 import { runLikeRevealJob } from './jobs/likeReveal.js'
 import { msUntilNextTehranHour } from './likes/revealPick.js'
 import { cleanupInterruptedBroadcasts } from './messaging/broadcast.js'
@@ -16,6 +17,8 @@ const PURCHASE_MSG_FIRST_RUN_DELAY_MS = 90_000
 // checkout (see jobs/purchaseMessage.schedulePurchaseCheckoutFollowup). This
 // sweep just mops up checks lost to a sleep/restart during the 5-min window.
 const PURCHASE_MSG_INTERVAL_MS = 15 * 60 * 1000
+const TONPAYS_SWEEP_FIRST_RUN_DELAY_MS = 120_000
+const TONPAYS_SWEEP_INTERVAL_MS = 10 * 60 * 1000
 
 // The bot's own public base URL — where Telegram POSTs webhook updates.
 // PUBLIC_URL wins; otherwise fall back to the host platform's injected value.
@@ -83,6 +86,22 @@ if (process.env.NODE_ENV === 'production') {
     }, delayMs)
   }
   schedulePurchaseMessageRun(PURCHASE_MSG_FIRST_RUN_DELAY_MS)
+
+  // TonPays pending-invoice sweep: catches payment confirmations lost to a
+  // missed/failed webhook delivery, and cleans up long-abandoned invoices.
+  // No-ops internally when TonPays isn't configured, so this is safe to
+  // always schedule.
+  const scheduleTonPaysSweepRun = (delayMs: number) => {
+    setTimeout(async () => {
+      try {
+        await runTonPaysSweepJob({ log: app.log })
+      } catch (err) {
+        app.log.warn({ err }, 'tonpays sweep: scheduled run failed')
+      }
+      scheduleTonPaysSweepRun(TONPAYS_SWEEP_INTERVAL_MS)
+    }, delayMs)
+  }
+  scheduleTonPaysSweepRun(TONPAYS_SWEEP_FIRST_RUN_DELAY_MS)
 
   // Re-anchor to 18:00 Tehran after every run (a flat 24h from completion would
   // drift later each day by however long the job took).

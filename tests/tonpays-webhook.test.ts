@@ -69,6 +69,36 @@ describe('POST /payments/tonpays/webhook', () => {
     expect(db.from).not.toHaveBeenCalled()
   })
 
+  it('401s without touching the db when no webhook secret is configured', async () => {
+    // The attack this closes: with an empty secret the HMAC key is one the
+    // attacker also knows, so a self-signed {"invoice_id": "<own invoice>"}
+    // body would otherwise verify and grant premium for free.
+    vi.stubEnv('TONPAYS_WEBHOOK_SECRET', '')
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const payload = JSON.stringify({ invoice_id: 'inv1' })
+      const tSeconds = Math.floor(Date.now() / 1000)
+      const hex = createHmac('sha256', '').update(`${tSeconds}.${payload}`).digest('hex')
+      const res = await app.inject({
+        method: 'POST',
+        url: URL,
+        headers: {
+          'content-type': 'application/json',
+          'x-tonpays-event': 'invoice.completed',
+          'x-tonpays-signature': `t=${tSeconds},v1=${hex}`,
+        },
+        payload,
+      })
+
+      expect(res.statusCode).toBe(401)
+      expect(db.from).not.toHaveBeenCalled()
+      expect(errSpy).toHaveBeenCalled() // misconfiguration is logged loudly
+    } finally {
+      errSpy.mockRestore()
+      vi.unstubAllEnvs()
+    }
+  })
+
   it('grants premium once on invoice.completed', async () => {
     const userUpdates: any[] = []
     scriptDb([
@@ -115,17 +145,22 @@ describe('POST /payments/tonpays/webhook', () => {
     expect(notifyPremiumPurchased).toHaveBeenCalledTimes(1)
   })
 
-  it('200s and touches nothing for an unknown invoice', async () => {
+  it('200s, touches nothing and logs a warning for an unknown invoice', async () => {
     scriptDb([
       claimStep(null),                    // no pending row for this invoice
       lookupStep(null),                   // and no row at all — truly unknown
     ])
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
     const res = await inject(app, 'invoice.completed', { invoice_id: 'ghost', status: 'completed' })
     expect(res.statusCode).toBe(200)
 
     expect(notifyPaymentChannel).not.toHaveBeenCalled()
     expect(notifyPremiumPurchased).not.toHaveBeenCalled()
+    // The route is logLevel:'silent', so a completed event that granted
+    // nothing must still leave a trace somewhere.
+    expect(warnSpy.mock.calls.flat().join(' ')).toContain('not_found')
+    warnSpy.mockRestore()
   })
 
   it('updates tonpays_status on non-completed events', async () => {

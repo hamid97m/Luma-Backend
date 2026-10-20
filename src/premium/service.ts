@@ -1,6 +1,6 @@
 import { db } from '../db.js'
 import { createPremiumInvoiceLink, refundPremiumPayment, notifyPaymentChannel, notifyPremiumPurchased } from '../bot.js'
-import { formatPremiumPaidNotice, formatTonPaysPaidNotice } from '../payments/paymentNotify.js'
+import { formatPremiumPaidNotice, formatTonPaysPaidNotice, formatTonPaysGrantFailedNotice } from '../payments/paymentNotify.js'
 import { schedulePurchaseCheckoutFollowup } from '../jobs/purchaseMessage.js'
 import { tFor, type Locale } from '../i18n/index.js'
 import {
@@ -12,6 +12,10 @@ import {
 export const PREMIUM_PAYLOAD_PREFIX = 'premium:'
 const DAY_MS = 24 * 60 * 60 * 1000
 const DEFAULT_TOMAN_PER_STAR = 3000
+// How far back to look for one of our own rows that still carries a TonPays
+// invoice id when TonPays reports a pending invoice we no longer track. Matches
+// the sweep's ancient cutoff — nothing older than that can still be pending.
+const TONPAYS_PENDING_RECOVERY_WINDOW_MS = 48 * 60 * 60 * 1000
 
 export type PaymentProvider = 'stars' | 'tonpays'
 
@@ -180,6 +184,13 @@ export async function createPremiumCheckout(userId: string, planId: string): Pro
  * is dropped instead of left dangling); otherwise cancel the stale one and
  * retry creation exactly once. Any other failure cancels the new row and
  * reports `checkout_failed`.
+ *
+ * The resume path acts on what the upstream check actually says: an invoice
+ * that is already paid, or that has a transfer in flight against it
+ * (`action_required_*`/a remaining amount), is NEVER cancelled — cancelling
+ * one would orphan money the buyer has already sent. Only a plainly-pending
+ * invoice with no card data to show (or a check that failed outright) falls
+ * through to cancel-and-recreate.
  */
 async function createTonPaysCheckout(
   userId: string,
@@ -201,12 +212,17 @@ async function createTonPaysCheckout(
 
   const create = () => createTelegramInvoice({ amountToman: priceToman, orderId, buyerChatId })
 
+  // The new attempt row never got an invoice, so dropping it is unconditional
+  // (no paid-race to guard against) — unlike the old row's cancel below.
+  const dropNewRow = () =>
+    db.from('premium_transactions').update({ status: 'canceled' }).eq('id', tx.id)
+
   let invoice: TonPaysInvoice
   try {
     invoice = await create()
   } catch (err) {
     if (!(err instanceof TonPaysApiError) || err.code !== 'BUYER_HAS_PENDING_INVOICE') {
-      await db.from('premium_transactions').update({ status: 'canceled' }).eq('id', tx.id)
+      await dropNewRow()
       return { error: 'checkout_failed' }
     }
 
@@ -221,44 +237,80 @@ async function createTonPaysCheckout(
 
     if (oldRow && oldRow.plan_id === plan.id && oldRow.price_toman === priceToman) {
       // Same purchase already has a live invoice at TonPays — this attempt never
-      // got one, so drop it and resume the existing one instead, if the check
-      // actually gives us a card to show the buyer. A failed check (network
-      // error, 429, TonPays 5xx) is treated the same as "no card data": never
-      // let it propagate uncaught and leave this new row dangling.
+      // got one, so drop it and resume the existing one instead. A failed check
+      // (network error, 429, TonPays 5xx) is treated the same as "no card
+      // data": never let it propagate uncaught and leave this new row dangling.
+      const oldInvoiceId = oldRow.tonpays_invoice_id as string
       let check: TonPaysCheck | null = null
       try {
-        check = await checkInvoice(oldRow.tonpays_invoice_id as string)
+        check = await checkInvoice(oldInvoiceId)
       } catch {
         check = null
       }
-      if (check && check.cardNumber && check.cardHolder) {
-        await db.from('premium_transactions').update({ status: 'canceled' }).eq('id', tx.id)
-        schedulePurchaseCheckoutFollowup(userId)
-        return {
-          transactionId: oldRow.id as string,
-          provider: 'tonpays',
-          payment: {
-            cardNumber: check.cardNumber, cardHolder: check.cardHolder,
-            amountToman: (oldRow.tonpays_final_amount as number | null) ?? (oldRow.price_toman as number),
-            invoiceId: oldRow.tonpays_invoice_id as string,
-          },
-        }
+
+      const resumed = (cardNumber: string, cardHolder: string): PremiumCheckoutResult => ({
+        transactionId: oldRow.id as string,
+        provider: 'tonpays',
+        payment: {
+          cardNumber, cardHolder,
+          amountToman: (oldRow.tonpays_final_amount as number | null) ?? (oldRow.price_toman as number),
+          invoiceId: oldInvoiceId,
+        },
+      })
+
+      // Already paid upstream: never cancel this invoice. Grant now (the claim
+      // inside handleTonPaysPaid is idempotent) and hand the old transaction
+      // back — the client's very first poll then sees `paid` and finishes.
+      if (check?.paid) {
+        const outcome = await handleTonPaysPaid(oldInvoiceId)
+        console.warn(`[tonpays] resume: invoice ${oldInvoiceId} is already paid (outcome ${outcome}); resuming tx ${oldRow.id} instead of recreating`)
+        await dropNewRow()
+        return resumed(check.cardNumber ?? '', check.cardHolder ?? '')
       }
-      // No fresh card data available to resume with (or the check itself
-      // failed) — fall through to the same cancel-and-recreate path as a
-      // mismatched plan/amount, below, so the buyer always ends up with a
-      // valid card + amount instead of an empty one or an uncaught throw.
+
+      // The check gave us a card to show — the plain resume case.
+      if (check && check.cardNumber && check.cardHolder) {
+        await dropNewRow()
+        schedulePurchaseCheckoutFollowup(userId)
+        return resumed(check.cardNumber, check.cardHolder)
+      }
+
+      // A transfer is already in flight against this invoice (underpaid /
+      // overpaid), but the check carries no card to show. Cancelling it would
+      // orphan money the buyer has already sent, so keep the invoice alive and
+      // tell the client to come back to it rather than starting a new one.
+      if (check && (check.status?.startsWith('action_required') || check.remainingAmount != null)) {
+        console.warn(`[tonpays] resume: invoice ${oldInvoiceId} awaits buyer action (status ${check.status}); not cancelling, and no card data to resume with`)
+        await dropNewRow()
+        return { error: 'checkout_pending_action' }
+      }
+
+      // Plainly pending with no card data, or the check itself failed — fall
+      // through to the same cancel-and-recreate path as a mismatched
+      // plan/amount, below, so the buyer always ends up with a valid card +
+      // amount instead of an empty one or an uncaught throw.
     }
 
     if (oldRow) {
       await cancelInvoice(oldRow.tonpays_invoice_id as string)
-      await db.from('premium_transactions').update({ status: 'canceled' }).eq('id', oldRow.id)
+      // Guard on status='pending_payment': a webhook grant can land between
+      // the SELECT above and this UPDATE, and clobbering `paid` back to
+      // `canceled` would make handleTonPaysPaid's claim unmatchable forever —
+      // money in, premium never granted. Same pattern as the sweep.
+      await db.from('premium_transactions').update({ status: 'canceled' })
+        .eq('id', oldRow.id).eq('status', 'pending_payment')
+    } else {
+      // No pending row of ours carries an invoice, yet TonPays insists this
+      // buyer already has one (it allows exactly one per buyer). Without
+      // recovery every future checkout for this user loops
+      // BUYER_HAS_PENDING_INVOICE → checkout_failed, silently and forever.
+      await recoverUntrackedPendingInvoice(userId, tx.id, err.message)
     }
 
     try {
       invoice = await create()
     } catch {
-      await db.from('premium_transactions').update({ status: 'canceled' }).eq('id', tx.id)
+      await dropNewRow()
       return { error: 'checkout_failed' }
     }
   }
@@ -278,6 +330,49 @@ async function createTonPaysCheckout(
       cardNumber: invoice.cardNumber, cardHolder: invoice.cardHolder,
       amountToman: invoice.finalAmount, invoiceId: invoice.invoiceId,
     },
+  }
+}
+
+/**
+ * Last-resort recovery when TonPays reports a pending invoice for a buyer that
+ * no `pending_payment` row of ours accounts for — which happens when the sweep
+ * cancelled our row locally, or a `create` response was lost after TonPays had
+ * already made the invoice. Looks for the newest tonpays row of this buyer's
+ * that still carries an invoice id *regardless of status* within the recovery
+ * window and cancels that invoice upstream (best-effort) so the caller's one
+ * retry of `create` can succeed. Always logs: either what it recovered, or
+ * that the buyer is stuck until the invoice is cancelled in the TonPays panel.
+ */
+async function recoverUntrackedPendingInvoice(userId: string, newTxId: string, upstreamMessage: string): Promise<void> {
+  const since = new Date(Date.now() - TONPAYS_PENDING_RECOVERY_WINDOW_MS).toISOString()
+  const { data: stray } = await db
+    .from('premium_transactions')
+    .select('id, tonpays_invoice_id')
+    .eq('user_id', userId).eq('provider', 'tonpays')
+    .not('tonpays_invoice_id', 'is', null)
+    .gte('created_at', since)
+    .neq('id', newTxId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  const strayInvoiceId = (stray?.tonpays_invoice_id as string | null | undefined) ?? null
+  if (!strayInvoiceId) {
+    console.error(
+      `[tonpays] BUYER_HAS_PENDING_INVOICE for user ${userId} with no local invoice to reconcile — ` +
+      `this buyer cannot check out until that invoice is cancelled in the TonPays panel. upstream: ${upstreamMessage}`,
+    )
+    return
+  }
+
+  console.warn(
+    `[tonpays] recovering untracked pending invoice ${strayInvoiceId} (tx ${stray?.id}) for user ${userId} — ` +
+    'cancelling it upstream before retrying create',
+  )
+  try {
+    await cancelInvoice(strayInvoiceId)
+  } catch (e) {
+    console.error(`[tonpays] upstream cancel of untracked invoice ${strayInvoiceId} failed: ${(e as Error)?.message}`)
   }
 }
 
@@ -366,14 +461,16 @@ export async function handleTonPaysPaid(
     return existing ? 'already' : 'not_found'
   }
 
+  const amountToman = (tx.tonpays_final_amount as number | null) ?? (tx.price_toman as number)
+
   const { data: user } = await db.from('users').select('premium_until, name, locale, telegram_id').eq('id', tx.user_id).single()
-  if (!user) return markGrantFailed(tx.id, invoiceId, 'user row not found')
+  if (!user) return markGrantFailed(tx.id, invoiceId, 'user row not found', { buyerName: null, amountToman })
 
   const { error: updErr } = await db
     .from('users')
     .update({ premium_until: extendPremiumUntil(user.premium_until ?? null, tx.duration_days) })
     .eq('id', tx.user_id)
-  if (updErr) return markGrantFailed(tx.id, invoiceId, updErr.message)
+  if (updErr) return markGrantFailed(tx.id, invoiceId, updErr.message, { buyerName: user.name ?? null, amountToman })
 
   // Confirmed grant — post an ops notice (best-effort; never blocks the payment).
   // Amount shown is the exact transfer TonPays confirmed (final_amount, which
@@ -381,7 +478,7 @@ export async function handleTonPaysPaid(
   notifyPaymentChannel(formatTonPaysPaidNotice({
     buyerName: user.name ?? null,
     durationDays: tx.duration_days,
-    amountToman: (tx.tonpays_final_amount as number | null) ?? tx.price_toman,
+    amountToman,
     invoiceId,
     at: new Date().toISOString(),
   })).catch(() => {})
@@ -394,10 +491,25 @@ export async function handleTonPaysPaid(
 
 /** Buyer paid (confirmed by TonPays) but we couldn't grant the time — no
  * refund path exists for a bank transfer, so mark the row for manual admin
- * follow-up and log loudly instead of silently failing. */
-async function markGrantFailed(txId: string, invoiceId: string, reason: string): Promise<'grant_failed'> {
+ * follow-up, log loudly, and alert the payment channel instead of silently
+ * failing. The ops channel reports every successful purchase; money-arrived-
+ * no-grant is the one case that actually needs a human, so it cannot be the
+ * only payment event that goes unreported there. */
+async function markGrantFailed(
+  txId: string,
+  invoiceId: string,
+  reason: string,
+  notice: { buyerName: string | null; amountToman: number },
+): Promise<'grant_failed'> {
   console.error(`[tonpays] grant failed for invoice ${invoiceId} (tx ${txId}): ${reason}`)
   await db.from('premium_transactions').update({ status: 'paid_grant_failed' }).eq('id', txId)
+  notifyPaymentChannel(formatTonPaysGrantFailedNotice({
+    buyerName: notice.buyerName,
+    amountToman: notice.amountToman,
+    invoiceId,
+    reason,
+    at: new Date().toISOString(),
+  })).catch(() => {})
   return 'grant_failed'
 }
 
@@ -485,7 +597,12 @@ export async function getPremiumTransactionStatus(txId: string, userId: string):
           const result = await handleTonPaysPaid(invoiceId)
           status = result === 'grant_failed' ? 'paid_grant_failed' : 'paid'
         } else if (check.status === 'expired' || check.status === 'canceled') {
-          await db.from('premium_transactions').update({ status: 'canceled', tonpays_status: check.status }).eq('id', txId)
+          // Guard on status='pending_payment': a webhook grant can land between
+          // the row read above and this UPDATE, and clobbering `paid` back to
+          // `canceled` would make handleTonPaysPaid's claim unmatchable forever.
+          await db.from('premium_transactions')
+            .update({ status: 'canceled', tonpays_status: check.status })
+            .eq('id', txId).eq('status', 'pending_payment')
           status = 'canceled'
         }
       } catch {

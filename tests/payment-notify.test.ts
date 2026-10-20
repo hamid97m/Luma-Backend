@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { formatPremiumPaidNotice, formatGiftPaidNotice, formatTonPaysPaidNotice } from '../src/payments/paymentNotify.js'
+import {
+  formatPremiumPaidNotice, formatGiftPaidNotice, formatTonPaysPaidNotice,
+  formatTonPaysGrantFailedNotice,
+} from '../src/payments/paymentNotify.js'
 
 describe('formatPremiumPaidNotice', () => {
   it('includes buyer, duration, amount, charge and time', () => {
@@ -35,6 +38,31 @@ describe('formatTonPaysPaidNotice', () => {
       'Invoice: inv_1',
       'Time: 2026-09-05T10:00:00.000Z',
     ].join('\n'))
+  })
+})
+
+describe('formatTonPaysGrantFailedNotice', () => {
+  it('produces the exact alarming money-arrived-no-grant notice', () => {
+    const text = formatTonPaysGrantFailedNotice({
+      buyerName: 'Ali', amountToman: 300037, invoiceId: 'inv_1',
+      reason: 'user row not found', at: '2026-09-05T10:00:00.000Z',
+    })
+    expect(text).toBe([
+      '🚨 TonPays payment received but grant FAILED',
+      'Buyer: Ali',
+      'Amount: 300037 Toman',
+      'Invoice: inv_1',
+      'Reason: user row not found',
+      'Time: 2026-09-05T10:00:00.000Z',
+      'Action: grant premium manually (admin panel → Premium → grant)',
+    ].join('\n'))
+  })
+
+  it('falls back to "unknown" when the buyer name is missing', () => {
+    const text = formatTonPaysGrantFailedNotice({
+      buyerName: null, amountToman: 1, invoiceId: 'inv_2', reason: 'boom', at: 'now',
+    })
+    expect(text).toContain('Buyer: unknown')
   })
 })
 

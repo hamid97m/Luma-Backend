@@ -71,6 +71,25 @@ describe('premium routes', () => {
     expect(res.statusCode).toBe(404)
   })
 
+  it('polling the transaction endpoint has its own rate-limit bucket and does not exhaust the global 300/hour budget', async () => {
+    // The TonPays payment step polls this route every 5s for up to 10 minutes
+    // (120 requests per attempt). Under the global limiter that would eat 40%
+    // of the user's hourly budget and 429 the rest of the app mid-payment.
+    vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
+    vi.mocked(db.from).mockReturnValue({ select: () => ({ eq: () => ({ single: () => ({ data: { id: 'u1' } }) }) }) } as any)
+    vi.mocked(getPremiumTransactionStatus).mockResolvedValue({ status: 'pending_payment', provider: 'tonpays' })
+
+    const headers = { authorization: 'same-user-token' }
+    for (let i = 0; i < 305; i++) {
+      const res = await app.inject({ method: 'GET', url: '/premium/transactions/tx1', headers })
+      expect(res.statusCode).toBe(200) // never 429, even past the global max of 300
+    }
+
+    // ...and the rest of the app is still usable for that same user.
+    const status = await app.inject({ method: 'GET', url: '/premium/status', headers })
+    expect(status.statusCode).not.toBe(429)
+  })
+
   it('change-card returns the new card and maps the cooldown error to 429', async () => {
     auth()
     vi.mocked(changeTonPaysCard).mockResolvedValue({ ok: true, cardNumber: '6037-2222', cardHolder: 'New Holder' })

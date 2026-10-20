@@ -59,6 +59,14 @@ describe('verifyTonPaysSignature', () => {
     expect(verifyTonPaysSignature(body, 't=1', SECRET, nowMs)).toBe(false)
   })
 
+  it('fails closed on an empty secret, even for a signature that is valid under the empty key', () => {
+    // createHmac('sha256', '') is legal in Node, so without the guard an
+    // unset/mistyped TONPAYS_WEBHOOK_SECRET would verify anything an attacker
+    // signs with the empty key they also know.
+    const header = sign(body, nowSec, '')
+    expect(verifyTonPaysSignature(body, header, '', nowMs)).toBe(false)
+  })
+
   it('verifies correctly when t has a leading zero, signing over the raw header string', () => {
     // nowSec happens to not start with 0, so pick a stale-looking but still-fresh
     // raw t string with a leading zero to prove the HMAC is computed over the raw
@@ -153,6 +161,34 @@ describe('createTelegramInvoice', () => {
     const call = createTelegramInvoice({ amountToman: 150000, orderId: 'order-1', buyerChatId: 42 })
     await expect(call).rejects.toBeInstanceOf(TonPaysApiError)
     await expect(call).rejects.toMatchObject({ code: 'BUYER_HAS_PENDING_INVOICE', httpStatus: 409 })
+  })
+
+  it('sends an AbortSignal and maps a request timeout to TonPaysApiError(TIMEOUT)', async () => {
+    // Node's AbortSignal.timeout rejects fetch with a DOMException named
+    // 'TimeoutError'; an abort mid-response surfaces as 'AbortError'. Both must
+    // become a TonPaysApiError so callers' existing handling applies.
+    const timeoutErr = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' })
+    fetchMock.mockRejectedValueOnce(timeoutErr)
+
+    const call = createTelegramInvoice({ amountToman: 150000, orderId: 'order-1', buyerChatId: 42 })
+    await expect(call).rejects.toBeInstanceOf(TonPaysApiError)
+    await expect(call).rejects.toMatchObject({ code: 'TIMEOUT', httpStatus: 0 })
+
+    expect(fetchMock.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('maps an abort mid-response to TonPaysApiError(TIMEOUT) too', async () => {
+    const abortErr = Object.assign(new Error('aborted'), { name: 'AbortError' })
+    fetchMock.mockRejectedValueOnce(abortErr)
+
+    await expect(createTelegramInvoice({ amountToman: 1, orderId: 'o', buyerChatId: 1 }))
+      .rejects.toMatchObject({ name: 'TonPaysApiError', code: 'TIMEOUT' })
+  })
+
+  it('still propagates a plain network failure unchanged', async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'))
+    await expect(createTelegramInvoice({ amountToman: 1, orderId: 'o', buyerChatId: 1 }))
+      .rejects.toBeInstanceOf(TypeError)
   })
 
   it('maps an unparsable (e.g. HTML gateway-error) body on a non-2xx response to TonPaysApiError', async () => {

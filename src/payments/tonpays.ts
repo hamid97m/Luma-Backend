@@ -7,6 +7,10 @@
 import { createHmac, timingSafeEqual, randomBytes } from 'node:crypto'
 
 const SIGNATURE_TOLERANCE_SECONDS = 600
+// Hard cap on every upstream call. A hung gateway would otherwise stall a
+// buyer's checkout (undici's default is ~300s), stall the poll endpoint, and
+// stretch one sequential sweep run far past its own cadence.
+const REQUEST_TIMEOUT_MS = 15_000
 const ORDER_ID_LENGTH = 20
 const ORDER_ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789'
 
@@ -51,6 +55,11 @@ export function isTonPaysConfigured(): boolean {
  * `"{t}." + raw_body` using `secret`. Rejects (returns false, never throws)
  * on a missing/malformed header, a signature mismatch, or a timestamp more
  * than SIGNATURE_TOLERANCE_SECONDS away from `nowMs` (default: Date.now()).
+ *
+ * Fails closed on an empty `secret`: `createHmac('sha256', '')` is perfectly
+ * legal in Node, so without this guard a missing/mistyped
+ * TONPAYS_WEBHOOK_SECRET would verify any body an attacker signs with the
+ * empty key they also know — i.e. a forgeable "grant me premium" endpoint.
  */
 export function verifyTonPaysSignature(
   rawBody: string | Buffer,
@@ -58,6 +67,7 @@ export function verifyTonPaysSignature(
   secret: string,
   nowMs: number = Date.now(),
 ): boolean {
+  if (!secret) return false
   if (!header) return false
 
   const parts = Object.fromEntries(
@@ -101,16 +111,30 @@ function baseUrl(): string {
 
 /** Shared fetch helper: applies base URL + X-API-Key, parses JSON, and maps error responses to TonPaysApiError. */
 async function tonpaysFetch<T>(path: string, init: { method: string; body?: unknown }): Promise<T> {
-  const res = await fetch(`${baseUrl()}${path}`, {
-    method: init.method,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Key': process.env.TONPAYS_API_KEY ?? '',
-    },
-    body: init.body === undefined ? undefined : JSON.stringify(init.body),
-  })
+  let res: Response
+  let text: string
+  try {
+    res = await fetch(`${baseUrl()}${path}`, {
+      method: init.method,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': process.env.TONPAYS_API_KEY ?? '',
+      },
+      body: init.body === undefined ? undefined : JSON.stringify(init.body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+    text = await res.text()
+  } catch (err) {
+    // A timeout (or any abort mid-response) is surfaced as a TonPaysApiError
+    // with httpStatus 0 so every caller's existing error handling applies —
+    // instead of a bare AbortError/TimeoutError escaping as an unknown throw.
+    const name = (err as Error | null)?.name
+    if (name === 'TimeoutError' || name === 'AbortError') {
+      throw new TonPaysApiError('TIMEOUT', `tonpays_request_timeout_${REQUEST_TIMEOUT_MS}ms`, 0)
+    }
+    throw err
+  }
 
-  const text = await res.text()
   let data: any = null
   if (text) {
     try {

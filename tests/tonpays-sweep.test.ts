@@ -4,13 +4,14 @@ vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/payments/tonpays.js', () => ({
   isTonPaysConfigured: vi.fn(() => true),
   checkInvoice: vi.fn(),
+  cancelInvoice: vi.fn(),
 }))
 vi.mock('../src/premium/service.js', () => ({
   handleTonPaysPaid: vi.fn(),
 }))
 
 import { db } from '../src/db.js'
-import { isTonPaysConfigured, checkInvoice } from '../src/payments/tonpays.js'
+import { isTonPaysConfigured, checkInvoice, cancelInvoice } from '../src/payments/tonpays.js'
 import { handleTonPaysPaid } from '../src/premium/service.js'
 import { runTonPaysSweepJob } from '../src/jobs/tonpaysSweep.js'
 
@@ -73,6 +74,8 @@ const hasMatcher = (u: UpdateCall, col: string, val: any) =>
 beforeEach(() => {
   vi.mocked(isTonPaysConfigured).mockReturnValue(true)
   vi.mocked(checkInvoice).mockReset()
+  vi.mocked(cancelInvoice).mockReset()
+  vi.mocked(cancelInvoice).mockResolvedValue(undefined)
   vi.mocked(handleTonPaysPaid).mockReset()
   vi.mocked(db.from).mockReset()
   log.info.mockReset(); log.warn.mockReset(); log.error.mockReset()
@@ -137,6 +140,35 @@ describe('runTonPaysSweepJob', () => {
     // Guard: the ancient batch cancel must not clobber a row that paid
     // between the SELECT and this UPDATE either.
     expect(hasMatcher(ancientUpdate!, 'status', 'pending_payment')).toBe(true)
+
+    // An ancient row's invoice must also be cancelled UPSTREAM: TonPays allows
+    // one pending invoice per buyer, so leaving it live would block that buyer
+    // from ever checking out again.
+    expect(cancelInvoice).toHaveBeenCalledWith('inv-ancient')
+  })
+
+  it('cancels an ancient row locally even when the upstream cancel fails, and keeps going across rows', async () => {
+    const mockDb = buildDb({
+      ancient: [
+        { id: 'tx-a', tonpays_invoice_id: 'inv-a' },
+        { id: 'tx-b', tonpays_invoice_id: null }, // never got an invoice — nothing upstream
+        { id: 'tx-c', tonpays_invoice_id: 'inv-c' },
+      ],
+    })
+    vi.mocked(db.from).mockImplementation(mockDb.from as any)
+    vi.mocked(cancelInvoice).mockRejectedValueOnce(new Error('tonpays down'))
+
+    await runTonPaysSweepJob({ log })
+
+    // The first row's failure must not stop the second invoice's cancel...
+    expect(cancelInvoice).toHaveBeenCalledTimes(2)
+    expect(cancelInvoice).toHaveBeenCalledWith('inv-a')
+    expect(cancelInvoice).toHaveBeenCalledWith('inv-c')
+    expect(log.warn).toHaveBeenCalled()
+    // ...and the local cancel still has to happen, or these rows get re-swept forever.
+    const batch = mockDb.updates.find((u) => hasMatcher(u, 'id', 'tx-a'))
+    expect(batch?.patch).toEqual({ status: 'canceled' })
+    expect(hasMatcher(batch!, 'id', 'tx-c')).toBe(true)
   })
 
   it('caps at 30 checks per run', async () => {

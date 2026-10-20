@@ -24,6 +24,14 @@ export async function tonpaysWebhookRoutes(app: FastifyInstance) {
       const raw = req.body as Buffer
       const signature = req.headers['x-tonpays-signature'] as string | undefined
       const secret = process.env.TONPAYS_WEBHOOK_SECRET ?? ''
+      // Fail closed BEFORE any HMAC work: an empty secret would make the HMAC
+      // computable by anyone (createHmac accepts a '' key), turning this into a
+      // forgeable "grant me premium" endpoint. A missing secret is a
+      // misconfiguration, so it is logged as an error rather than swallowed.
+      if (!secret) {
+        console.error('[tonpays] webhook rejected: TONPAYS_WEBHOOK_SECRET is not configured')
+        return reply.status(401).send({ error: 'invalid_signature' })
+      }
       if (!verifyTonPaysSignature(raw, signature, secret)) {
         return reply.status(401).send({ error: 'invalid_signature' })
       }
@@ -42,7 +50,14 @@ export async function tonpaysWebhookRoutes(app: FastifyInstance) {
 
       const event = req.headers['x-tonpays-event'] as string | undefined
       if (event === 'invoice.completed') {
-        await handleTonPaysPaid(invoiceId)
+        const outcome = await handleTonPaysPaid(invoiceId)
+        // Money arrived but nothing was granted — the two outcomes that need a
+        // human. This route is registered logLevel:'silent' (no per-request
+        // access logs on a public endpoint), so these go to console to stay
+        // visible; 'granted'/'already' are the normal cases and stay quiet.
+        if (outcome === 'not_found' || outcome === 'grant_failed') {
+          console.warn(`[tonpays] webhook invoice.completed for ${invoiceId} resolved as ${outcome}`)
+        }
         return reply.status(200).send({ ok: true })
       }
 

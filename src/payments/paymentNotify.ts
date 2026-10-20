@@ -19,6 +19,14 @@ export interface TonPaysPaidNotice {
   at: string // ISO timestamp
 }
 
+export interface TonPaysGrantFailedNotice {
+  buyerName: string | null
+  amountToman: number
+  invoiceId: string
+  reason: string
+  at: string // ISO timestamp
+}
+
 export interface GiftPaidNotice {
   buyerName: string | null
   recipientName: string | null
@@ -49,6 +57,22 @@ export function formatTonPaysPaidNotice(n: TonPaysPaidNotice): string {
     `Amount: ${n.amountToman} Toman`,
     `Invoice: ${n.invoiceId}`,
     `Time: ${n.at}`,
+  ].join('\n')
+}
+
+/** The one payment case that always needs a human: TonPays confirmed the
+ * transfer but we couldn't grant the premium, and a card-to-card payment has
+ * no auto-refund path. Deliberately alarming, and posted to the same channel
+ * that reports successes so ops can't miss it. */
+export function formatTonPaysGrantFailedNotice(n: TonPaysGrantFailedNotice): string {
+  return [
+    '🚨 TonPays payment received but grant FAILED',
+    `Buyer: ${n.buyerName ?? UNKNOWN}`,
+    `Amount: ${n.amountToman} Toman`,
+    `Invoice: ${n.invoiceId}`,
+    `Reason: ${n.reason}`,
+    `Time: ${n.at}`,
+    'Action: grant premium manually (admin panel → Premium → grant)',
   ].join('\n')
 }
 

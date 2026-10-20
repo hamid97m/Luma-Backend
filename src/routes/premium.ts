@@ -19,13 +19,21 @@ export async function premiumRoutes(app: FastifyInstance) {
     return result
   })
 
-  app.get('/premium/transactions/:id', async (req, reply) => {
-    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
-    const { id } = req.params as { id: string }
-    const status = await getPremiumTransactionStatus(id, req.userId)
-    if (!status) return reply.status(404).send({ error: 'not_found' })
-    return status
-  })
+  // Own, much higher rate-limit bucket: the TonPays payment step polls this
+  // every 5s for up to 10 minutes (120 requests), which would otherwise eat
+  // 40% of the global 300/hour budget per checkout attempt and 429 the rest of
+  // the app (discovery, chats) for a user who is mid-payment.
+  app.get(
+    '/premium/transactions/:id',
+    { config: { rateLimit: { max: 1000, timeWindow: '1 hour' } } },
+    async (req, reply) => {
+      if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+      const { id } = req.params as { id: string }
+      const status = await getPremiumTransactionStatus(id, req.userId)
+      if (!status) return reply.status(404).send({ error: 'not_found' })
+      return status
+    },
+  )
 
   app.post('/premium/transactions/:id/change-card', async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })

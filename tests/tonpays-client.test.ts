@@ -95,13 +95,18 @@ describe('createTelegramInvoice', () => {
     fetchMock.mockReset()
   })
 
-  it('maps a success response to TonPaysInvoice', async () => {
+  it('maps a success response to TonPaysInvoice, preferring card_name for the holder', async () => {
+    // Real shape confirmed live in Task 10: the create endpoint returns
+    // `card_name`, not `card_holder`, for the holder name.
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       invoice_id: 'inv-1',
+      order_id: 'order-1',
+      request_amount: 150000,
       card_number: '6037-xxxx-xxxx-1234',
-      card_holder: 'John Doe',
+      card_name: 'John Doe',
       final_amount: 150000,
       status: 'pending',
+      show_change_card: true,
     }), { status: 200 }))
 
     const result = await createTelegramInvoice({ amountToman: 150000, orderId: 'order-1', buyerChatId: 42 })
@@ -125,6 +130,19 @@ describe('createTelegramInvoice', () => {
       buyer_chat_id: 42,
       callback_url: 'https://api.example/tonpays/webhook',
     })
+  })
+
+  it('falls back to card_holder for the holder when card_name is absent', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      invoice_id: 'inv-1',
+      card_number: '6037-xxxx-xxxx-1234',
+      card_holder: 'Jane Doe',
+      final_amount: 150000,
+      status: 'pending',
+    }), { status: 200 }))
+
+    const result = await createTelegramInvoice({ amountToman: 150000, orderId: 'order-1', buyerChatId: 42 })
+    expect(result.cardHolder).toBe('Jane Doe')
   })
 
   it('throws TonPaysApiError with the detail.code', async () => {
@@ -161,12 +179,30 @@ describe('checkInvoice', () => {
     fetchMock.mockReset()
   })
 
-  it('maps a success response with no card fields to null cardNumber/cardHolder', async () => {
+  it('hits /api/custom/v1/invoices/check/{id} (confirmed live in Task 10 — the ' +
+     'generic /api/v1/ path 403s WRONG_API_KEY_KIND for a custom_tg-kind key) and maps ' +
+     'a real pending-invoice payload (no card fields) to null cardNumber/cardHolder', async () => {
+    // Exact shape observed live against a real, never-changed pending invoice.
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       invoice_id: 'inv-1',
-      status: 'paid',
-      paid: true,
+      order_id: 'order-1',
+      request_amount: 50000,
+      final_amount: 50234,
+      status: 'pending',
+      paid: false,
+      buyer_username: null,
+      show_change_card: true,
+      change_card_cooldown_seconds: 0,
+      change_card_exhausted: false,
+      status_label: 'Awaiting payment',
+      need_action_kind: null,
       remaining_amount: null,
+      remaining_invoice_id: null,
+      remaining_card_number: null,
+      remaining_card_holder: null,
+      remaining_receipt_received: false,
+      refund_amount: null,
+      reject_reasons: [],
       refund_pending: false,
     }), { status: 200 }))
 
@@ -174,8 +210,8 @@ describe('checkInvoice', () => {
 
     expect(result).toEqual({
       invoiceId: 'inv-1',
-      status: 'paid',
-      paid: true,
+      status: 'pending',
+      paid: false,
       remainingAmount: null,
       refundPending: false,
       cardNumber: null,
@@ -183,12 +219,27 @@ describe('checkInvoice', () => {
     })
 
     const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('https://tonpays.online/api/v1/invoices/check/inv-1')
+    expect(url).toBe('https://tonpays.online/api/custom/v1/invoices/check/inv-1')
     expect(init.method).toBe('GET')
     expect(init.headers['X-API-Key']).toBe('key-123')
   })
 
-  it('maps card_number/card_holder when present', async () => {
+  it('maps a canceled invoice (confirmed live shape in Task 10)', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      invoice_id: 'inv-1',
+      status: 'canceled',
+      paid: false,
+      status_label: 'Canceled',
+      remaining_amount: null,
+      refund_pending: false,
+    }), { status: 200 }))
+
+    const result = await checkInvoice('inv-1')
+    expect(result.status).toBe('canceled')
+    expect(result.paid).toBe(false)
+  })
+
+  it('prefers card_name over card_holder when both are present (tolerant fallback kept)', async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       invoice_id: 'inv-1',
       status: 'pending',
@@ -196,7 +247,8 @@ describe('checkInvoice', () => {
       remaining_amount: null,
       refund_pending: false,
       card_number: '6037-xxxx-xxxx-1234',
-      card_holder: 'John Doe',
+      card_name: 'John Doe',
+      card_holder: 'Should Not Win',
     }), { status: 200 }))
 
     const result = await checkInvoice('inv-1')
@@ -212,7 +264,7 @@ describe('checkInvoice', () => {
     })
   })
 
-  it('falls back to card_name for the holder when card_holder is absent', async () => {
+  it('falls back to card_holder for the holder when card_name is absent', async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       invoice_id: 'inv-1',
       status: 'pending',
@@ -220,7 +272,7 @@ describe('checkInvoice', () => {
       remaining_amount: null,
       refund_pending: false,
       card_number: '6037-xxxx-xxxx-1234',
-      card_name: 'Jane Doe',
+      card_holder: 'Jane Doe',
     }), { status: 200 }))
 
     const result = await checkInvoice('inv-1')
@@ -241,11 +293,17 @@ describe('cancelInvoice', () => {
     fetchMock.mockReset()
   })
 
-  it('swallows 409 and throws on 500', async () => {
+  it('hits /api/custom/v1/invoices/{id}/cancel (confirmed live in Task 10 — the ' +
+     'generic /api/v1/ path 403s WRONG_API_KEY_KIND for a custom_tg-kind key) and ' +
+     'swallows 409, throws on 500', async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       detail: { code: 'INVOICE_NOT_PENDING', message: 'already settled' },
     }), { status: 409 }))
     await expect(cancelInvoice('inv-1')).resolves.toBeUndefined()
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('https://tonpays.online/api/custom/v1/invoices/inv-1/cancel')
+    expect(init.method).toBe('POST')
 
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       detail: { code: 'INTERNAL_ERROR', message: 'boom' },
@@ -255,6 +313,19 @@ describe('cancelInvoice', () => {
 
   it('still swallows a 409 whose body is unparsable garbage', async () => {
     fetchMock.mockResolvedValueOnce(new Response('not json', { status: 409 }))
+    await expect(cancelInvoice('inv-1')).resolves.toBeUndefined()
+  })
+
+  it('maps a real canceled-invoice response shape after a live cancel (Task 10)', async () => {
+    // Confirms cancelInvoice doesn't choke on the real response body (it
+    // discards the body either way, but this is the exact shape TonPays
+    // returned on a successful cancel in the live round-trip).
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      invoice_id: 'inv-1',
+      status: 'canceled',
+      paid: false,
+      status_label: 'Canceled',
+    }), { status: 200 }))
     await expect(cancelInvoice('inv-1')).resolves.toBeUndefined()
   })
 })
@@ -271,10 +342,10 @@ describe('changeCard', () => {
     fetchMock.mockReset()
   })
 
-  it('maps a success response to the new card', async () => {
+  it('maps a success response to the new card, preferring card_name for the holder', async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       card_number: '6037-xxxx-xxxx-9999',
-      card_holder: 'Jane Doe',
+      card_name: 'Jane Doe',
     }), { status: 200 }))
 
     const result = await changeCard('inv-1')
@@ -283,6 +354,16 @@ describe('changeCard', () => {
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe('https://tonpays.online/api/custom/v1/invoices/inv-1/change-card')
     expect(init.method).toBe('POST')
+  })
+
+  it('falls back to card_holder for the holder when card_name is absent', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      card_number: '6037-xxxx-xxxx-9999',
+      card_holder: 'Jane Doe',
+    }), { status: 200 }))
+
+    const result = await changeCard('inv-1')
+    expect(result.cardHolder).toBe('Jane Doe')
   })
 })
 
@@ -298,13 +379,14 @@ describe('submitRefundCard', () => {
     fetchMock.mockReset()
   })
 
-  it('posts the refund card and resolves on success', async () => {
+  it('posts the refund card to /api/custom/v1/ (by analogy with checkInvoice/cancelInvoice ' +
+     '— NOT itself live-tested, see code comment) and resolves on success', async () => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 200 }))
 
     await expect(submitRefundCard('inv-1', '6037-xxxx-xxxx-1111', 'John Doe')).resolves.toBeUndefined()
 
     const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('https://tonpays.online/api/v1/invoices/inv-1/refund')
+    expect(url).toBe('https://tonpays.online/api/custom/v1/invoices/inv-1/refund')
     expect(init.method).toBe('POST')
     const body = JSON.parse(init.body)
     expect(body).toEqual({ card_number: '6037-xxxx-xxxx-1111', card_holder: 'John Doe' })

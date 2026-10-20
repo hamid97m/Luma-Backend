@@ -149,14 +149,21 @@ export async function createTelegramInvoice(p: {
   return {
     invoiceId: data.invoice_id,
     cardNumber: data.card_number,
-    cardHolder: data.card_holder,
+    // Confirmed live (Task 10): the real create response carries the holder
+    // name under `card_name`, not `card_holder` — `card_holder` never showed
+    // up in a live payload but is kept as a fallback in case TonPays ever
+    // sends it.
+    cardHolder: data.card_name ?? data.card_holder,
     finalAmount: data.final_amount,
     status: data.status,
   }
 }
 
 export async function checkInvoice(invoiceId: string): Promise<TonPaysCheck> {
-  const data = await tonpaysFetch<any>(`/api/v1/invoices/check/${invoiceId}`, { method: 'GET' })
+  // Confirmed live (Task 10): the generic /api/v1/invoices/check/{id} 403s
+  // WRONG_API_KEY_KIND against a custom_tg-kind key (the owner's real key
+  // kind). The working path for this key kind is under /api/custom/v1/.
+  const data = await tonpaysFetch<any>(`/api/custom/v1/invoices/check/${invoiceId}`, { method: 'GET' })
 
   return {
     invoiceId: data.invoice_id,
@@ -164,15 +171,29 @@ export async function checkInvoice(invoiceId: string): Promise<TonPaysCheck> {
     paid: data.paid,
     remainingAmount: data.remaining_amount,
     refundPending: data.refund_pending,
+    // Confirmed live (Task 10): a still-pending, never-changed invoice's real
+    // check response carries neither card_number/card_holder/card_name NOR
+    // any other identifier for the original payment card — only
+    // remaining_card_number/remaining_card_holder (both null in that sample),
+    // which read like the *remaining-balance* payment card after a partial
+    // payment, a different concept from "the card to pay the full invoice
+    // to". Deliberately NOT folding remaining_card_* into cardNumber/
+    // cardHolder here — that semantic hasn't been confirmed live (would need
+    // a real change-card or overpayment case) and could show a buyer the
+    // wrong card if the guess is wrong. card_number/card_name/card_holder are
+    // kept as tolerant fallbacks in case TonPays does send them in a status
+    // this test never reached.
     cardNumber: data.card_number ?? null,
-    cardHolder: data.card_holder ?? data.card_name ?? null,
+    cardHolder: data.card_name ?? data.card_holder ?? null,
   }
 }
 
 /** Cancels a pending invoice. Swallows a 409 (already non-pending); throws any other error. */
 export async function cancelInvoice(invoiceId: string): Promise<void> {
   try {
-    await tonpaysFetch<unknown>(`/api/v1/invoices/${invoiceId}/cancel`, { method: 'POST' })
+    // Confirmed live (Task 10): same WRONG_API_KEY_KIND 403 as checkInvoice
+    // under /api/v1/ with a custom_tg-kind key; /api/custom/v1/ works.
+    await tonpaysFetch<unknown>(`/api/custom/v1/invoices/${invoiceId}/cancel`, { method: 'POST' })
   } catch (err) {
     if (err instanceof TonPaysApiError && err.httpStatus === 409) return
     throw err
@@ -181,11 +202,22 @@ export async function cancelInvoice(invoiceId: string): Promise<void> {
 
 export async function changeCard(invoiceId: string): Promise<{ cardNumber: string; cardHolder: string }> {
   const data = await tonpaysFetch<any>(`/api/custom/v1/invoices/${invoiceId}/change-card`, { method: 'POST' })
-  return { cardNumber: data.card_number, cardHolder: data.card_holder }
+  return { cardNumber: data.card_number, cardHolder: data.card_name ?? data.card_holder }
 }
 
+/**
+ * Submits the buyer's refund destination card.
+ *
+ * Moved to /api/custom/v1/ by analogy with checkInvoice/cancelInvoice (both
+ * confirmed live to 403 WRONG_API_KEY_KIND under /api/v1/ with a custom_tg
+ * key) — but this specific endpoint has NOT itself been exercised live: doing
+ * so needs a real overpaid invoice to reach the refund-pending state, which
+ * wasn't available in the Task 10 round-trip (a single small invoice,
+ * created then cancelled, never over/under-paid). Re-verify against a live
+ * overpayment before fully trusting this path.
+ */
 export async function submitRefundCard(invoiceId: string, cardNumber: string, cardHolder: string): Promise<void> {
-  await tonpaysFetch<unknown>(`/api/v1/invoices/${invoiceId}/refund`, {
+  await tonpaysFetch<unknown>(`/api/custom/v1/invoices/${invoiceId}/refund`, {
     method: 'POST',
     body: { card_number: cardNumber, card_holder: cardHolder },
   })

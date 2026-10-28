@@ -68,10 +68,17 @@ export async function isPremiumEnabled(): Promise<boolean> {
   return data?.premium_enabled === true
 }
 
-/** Iranian users pay via TonPays (card-to-card) when it's configured; everyone
+/** New TonPays checkouts are paused by default (everyone pays with Stars);
+ * set TONPAYS_CHECKOUT_ENABLED=true to turn them back on. The webhook, poll
+ * and sweep keep running regardless so in-flight invoices still get granted. */
+export function isTonPaysCheckoutEnabled(): boolean {
+  return process.env.TONPAYS_CHECKOUT_ENABLED === 'true' && isTonPaysConfigured()
+}
+
+/** Iranian users pay via TonPays (card-to-card) when it's enabled; everyone
  * else keeps paying with Telegram Stars. */
 export function resolvePaymentProvider(geoCountry: string | null | undefined): PaymentProvider {
-  return geoCountry === 'IR' && isTonPaysConfigured() ? 'tonpays' : 'stars'
+  return geoCountry === 'IR' && isTonPaysCheckoutEnabled() ? 'tonpays' : 'stars'
 }
 
 /** Toman-per-Star conversion rate, admin-configurable; falls back to 3000 if

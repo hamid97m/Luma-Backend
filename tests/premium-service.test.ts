@@ -81,8 +81,13 @@ describe('resolvePaymentProvider', () => {
   afterEach(() => vi.unstubAllEnvs())
 
   it('provider is tonpays for IR when key configured', () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     expect(resolvePaymentProvider('IR')).toBe('tonpays')
+  })
+
+  it('provider is stars for IR when TonPays checkout is not enabled (default)', () => {
+    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    expect(resolvePaymentProvider('IR')).toBe('stars')
   })
 
   it('provider is stars for IR when key missing', () => {
@@ -91,7 +96,7 @@ describe('resolvePaymentProvider', () => {
   })
 
   it('provider is stars for null and non-IR geo_country', () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     expect(resolvePaymentProvider(null)).toBe('stars')
     expect(resolvePaymentProvider('DE')).toBe('stars')
   })
@@ -161,7 +166,7 @@ describe('getPremiumStatus', () => {
   })
 
   it('carries paymentProvider "tonpays" and toman pricing (priceToman = chargedStars × rate) for an Iranian user when TonPays is configured', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     vi.mocked(db.from).mockImplementation((table: string) => {
       if (table === 'premium_config') return chainable({ data: { premium_enabled: true, toman_per_star: 3000 } })
       if (table === 'users') return chainable({ data: { premium_until: null, geo_country: 'IR' } })
@@ -382,7 +387,7 @@ describe('createPremiumCheckout — tonpays', () => {
   }
 
   it('tonpays checkout inserts snapshot row and returns card payment', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     vi.mocked(generateTonPaysOrderId).mockReturnValue('order-abc')
     vi.mocked(createTelegramInvoice).mockResolvedValue({
       invoiceId: 'inv-1', cardNumber: '6037-xxxx-xxxx-1234', cardHolder: 'Card Holder', finalAmount: 50037, status: 'pending',
@@ -405,7 +410,7 @@ describe('createPremiumCheckout — tonpays', () => {
   })
 
   it('stars checkout unchanged for non-IR user', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123') // configured, but geo isn't IR
+    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true') // configured, but geo isn't IR
     const inserts: any[] = []
     vi.mocked(db.from).mockImplementation((table: string) => {
       if (table === 'premium_config') return chainable({ data: { premium_enabled: true } })
@@ -425,7 +430,7 @@ describe('createPremiumCheckout — tonpays', () => {
   })
 
   it('resumes the pending invoice for same plan and amount, using the fresh card from checkInvoice', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
     vi.mocked(createTelegramInvoice).mockRejectedValue(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
     vi.mocked(checkInvoice).mockResolvedValue({
@@ -453,7 +458,7 @@ describe('createPremiumCheckout — tonpays', () => {
   })
 
   it('falls back to cancel-and-recreate when checkInvoice itself rejects', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
     vi.mocked(createTelegramInvoice)
       .mockRejectedValueOnce(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
@@ -480,7 +485,7 @@ describe('createPremiumCheckout — tonpays', () => {
   })
 
   it('falls back to cancel-and-recreate when the resume check has no card data', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
     vi.mocked(createTelegramInvoice)
       .mockRejectedValueOnce(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
@@ -509,7 +514,7 @@ describe('createPremiumCheckout — tonpays', () => {
   })
 
   it('cancels and retries for a different plan', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
     vi.mocked(createTelegramInvoice)
       .mockRejectedValueOnce(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
@@ -540,7 +545,7 @@ describe('createPremiumCheckout — tonpays', () => {
   })
 
   it('resume: an already-paid invoice is granted and never cancelled', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
     vi.mocked(createTelegramInvoice).mockRejectedValue(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
@@ -577,7 +582,7 @@ describe('createPremiumCheckout — tonpays', () => {
   })
 
   it('resume: an invoice awaiting buyer action is not cancelled — reports checkout_pending_action', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
     vi.mocked(createTelegramInvoice).mockRejectedValue(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
@@ -604,7 +609,7 @@ describe('createPremiumCheckout — tonpays', () => {
   })
 
   it('recovers from an untracked upstream pending invoice: cancels it and retries create once', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
     vi.mocked(createTelegramInvoice)
@@ -634,7 +639,7 @@ describe('createPremiumCheckout — tonpays', () => {
   })
 
   it('still retries once and logs loudly when no local invoice can be reconciled', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
     vi.mocked(createTelegramInvoice).mockRejectedValue(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'buyer has a pending invoice', 409))
@@ -654,7 +659,7 @@ describe('createPremiumCheckout — tonpays', () => {
   })
 
   it('marks the row canceled when create fails outright', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123')
+    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
     vi.mocked(createTelegramInvoice).mockRejectedValue(new TonPaysApiError('INTERNAL_ERROR', 'boom', 500))
 

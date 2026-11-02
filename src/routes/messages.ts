@@ -3,6 +3,7 @@ import { sql, isUuid } from '../db.js'
 import { deliverMessageNotification } from '../messaging/deliver.js'
 import { chatSendBlocked } from '../premium/chatLimit.js'
 import { messageColumns, messageJson } from '../messaging/messageJson.js'
+import { publishTyping, typingTargets } from '../realtime/typing.js'
 
 const MAX_MESSAGE_LENGTH = 2000
 
@@ -150,6 +151,32 @@ export async function messagesRoutes(app: FastifyInstance) {
     } catch (err) {
       req.log.error({ err }, 'mark messages read failed')
       return reply.status(500).send({ error: 'mark_read_failed' })
+    }
+    return { ok: true }
+  })
+
+  // "Typing…" ping (no body). The open chat sends it every few seconds while the
+  // user types; the counterpart gets an SSE `typing` event. Its own rate-limit
+  // bucket so pings never eat into the global 300/hour.
+  app.post('/matches/:matchId/typing', {
+    config: { rateLimit: { max: 40, timeWindow: '1 minute' } },
+  }, async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+
+    const { matchId } = req.params as { matchId: string }
+    let to = typingTargets.get(matchId, req.userId)
+    if (!to) {
+      const match = await getUsableMatch(matchId, req.userId)
+      if (!match) return reply.status(404).send({ error: 'match_not_found' })
+      to = match.user1_id === req.userId ? match.user2_id : match.user1_id
+      typingTargets.set(matchId, req.userId, to)
+    }
+
+    // Best effort — a lost typing ping is harmless.
+    try {
+      await publishTyping({ matchId, from: req.userId, to })
+    } catch (err) {
+      req.log.warn({ err }, 'typing notify failed')
     }
     return { ok: true }
   })

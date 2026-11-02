@@ -2,6 +2,13 @@ import jwt from 'jsonwebtoken'
 
 // Session tokens for the website (outside Telegram, there is no initData).
 const TOKEN_TTL = '30d'
+const MIN_SECRET_LENGTH = 32
+
+/** Website sign-in needs a real signing secret; without one it is switched
+ *  off (the Mini App's initData auth doesn't use it and keeps working). */
+export function isSessionSecretConfigured(): boolean {
+  return (process.env.USER_JWT_SECRET ?? '').length >= MIN_SECRET_LENGTH
+}
 
 export function signSessionToken(userId: string): string {
   return jwt.sign({ userId }, process.env.USER_JWT_SECRET!, { expiresIn: TOKEN_TTL })

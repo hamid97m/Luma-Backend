@@ -84,6 +84,19 @@ describe('POST /auth/telegram-web', () => {
     expect(res.json().user).toEqual({ id: row.id, name: 'Reza', setupComplete: false, locale: null })
   })
 
+  it.each([
+    ['missing', ''],
+    ['shorter than 32 chars', 'too-short-secret'],
+  ])('USER_JWT_SECRET %s → 503 web_login_unavailable, no user created', async (_label, secret) => {
+    vi.stubEnv('USER_JWT_SECRET', secret)
+
+    const res = await login(signWidget({ id: 777, first_name: 'Reza', auth_date: now() }))
+
+    expect(res.statusCode).toBe(503)
+    expect(res.json()).toEqual({ error: 'web_login_unavailable' })
+    expect(await sql`select id from users`).toHaveLength(0)
+  })
+
   it('tampered field → 401 invalid_telegram_login', async () => {
     const payload = signWidget({ id: 4242, first_name: 'Sara', auth_date: now() })
 

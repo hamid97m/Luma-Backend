@@ -52,6 +52,20 @@ describe('POST /auth/google', () => {
     expect(await sql`select id from users`).toHaveLength(0)
   })
 
+  it('USER_JWT_SECRET missing → 503 web_login_unavailable, no user created', async () => {
+    vi.stubEnv('USER_JWT_SECRET', '')
+    vi.mocked(verifyGoogleIdToken).mockResolvedValue({ sub: 'g-1', email: 'ali@gmail.com', givenName: 'Ali' })
+    try {
+      const res = await login({ credential: 'id-token' })
+
+      expect(res.statusCode).toBe(503)
+      expect(res.json()).toEqual({ error: 'web_login_unavailable' })
+      expect(await sql`select id from users`).toHaveLength(0)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   it('missing credential → 400', async () => {
     for (const payload of [undefined, {}, { credential: '' }, { credential: 42 }]) {
       const res = await login(payload)

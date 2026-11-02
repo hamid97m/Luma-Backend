@@ -11,6 +11,7 @@ import { trackJob, startMetricsServer } from './metrics.js'
 import { msUntilNextTehranHour } from './likes/revealPick.js'
 import { cleanupInterruptedBroadcasts } from './messaging/broadcast.js'
 import { startChatListener } from './realtime/listener.js'
+import { isSessionSecretConfigured } from './session.js'
 
 const FAKE_LIKER_FIRST_RUN_DELAY_MS = 60_000
 const FAKE_LIKER_INTERVAL_MS = 6 * 60 * 60 * 1000
@@ -33,6 +34,10 @@ function resolvePublicUrl(): string {
 }
 
 const app = await buildApp()
+// Website sign-in answers 503 without it; never fatal — the Mini App doesn't need it.
+if (process.env.NODE_ENV === 'production' && !isSessionSecretConfigured()) {
+  app.log.warn('USER_JWT_SECRET missing or shorter than 32 chars — website login is disabled')
+}
 // Real-time chat (GET /events) in every mode — standby still serves the API.
 startChatListener(app.log)
 // Any broadcast still 'running' was orphaned by a prior restart — mark it interrupted.

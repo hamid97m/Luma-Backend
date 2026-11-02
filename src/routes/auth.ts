@@ -1,12 +1,14 @@
 import { FastifyInstance, FastifyReply } from 'fastify'
 import { verifyInitData, verifyTelegramWidget } from '../auth.js'
 import { signIn, loadAuthUser, type Identity } from '../accounts.js'
-import { signSessionToken } from '../session.js'
+import { isSessionSecretConfigured, signSessionToken } from '../session.js'
 import { verifyGoogleIdToken } from '../googleAuth.js'
 
 /** Website sign-in: the same account lookup as the Mini App, answered with a
  *  session token since the browser has no initData to resend. */
 async function webSignIn(identity: Identity, reply: FastifyReply) {
+  // Checked before signIn so a misconfigured server creates no accounts.
+  if (!isSessionSecretConfigured()) return reply.status(503).send({ error: 'web_login_unavailable' })
   const result = await signIn(identity)
   if (!result.ok) return reply.status(result.status).send(result.body)
   return { token: signSessionToken(result.userId), user: result.user }

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createChatHub, formatSse, parseChatNotify, MAX_STREAMS_PER_USER, type HubStream } from '../src/realtime/hub.js'
 import type { MessageJson } from '../src/messaging/messageJson.js'
 
@@ -211,5 +211,182 @@ describe('chat hub ordering', () => {
     release()
     await tick(10)
     expect(events(a.chunks).map((e) => e.event)).toEqual(['message', 'message_updated'])
+  })
+})
+
+describe('chat hub presence', () => {
+  const GRACE = 1000
+
+  function presenceHub(counterparts: Record<string, string[]> = { [A]: [B], [B]: [A] }) {
+    const loadCounterparts = vi.fn(async (u: string) => counterparts[u] ?? [])
+    const { hub } = makeHub({ loadCounterparts, presenceGraceMs: GRACE })
+    return { hub, loadCounterparts }
+  }
+
+  const presence = (s: { chunks: string[] }) => events(s.chunks).filter((e) => e.event === 'presence')
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('is online from the first stream and through the grace period, offline after it', async () => {
+    vi.useFakeTimers()
+    const { hub } = presenceHub()
+    expect(hub.isOnline(A)).toBe(false)
+    const off1 = hub.addStream(A, fakeStream())
+    const off2 = hub.addStream(A, fakeStream())
+    expect(hub.isOnline(A)).toBe(true)
+    off1()
+    expect(hub.isOnline(A)).toBe(true)
+    off2()
+    expect(hub.isConnected(A)).toBe(false)
+    expect(hub.isOnline(A)).toBe(true) // grace
+    await vi.advanceTimersByTimeAsync(GRACE - 1)
+    expect(hub.isOnline(A)).toBe(true)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(hub.isOnline(A)).toBe(false)
+  })
+
+  it('pushes online on the first stream only, not on later ones', async () => {
+    vi.useFakeTimers()
+    const { hub } = presenceHub()
+    const b = fakeStream()
+    hub.addStream(B, b)
+    const offA = hub.addStream(A, fakeStream())
+    hub.addStream(A, fakeStream()) // second stream: no new transition
+    await vi.advanceTimersByTimeAsync(0)
+    expect(presence(b)).toEqual([{ event: 'presence', data: { userId: A, online: true } }])
+
+    offA() // one stream still open → stays online
+    await vi.advanceTimersByTimeAsync(GRACE * 2)
+    expect(hub.isOnline(A)).toBe(true)
+    expect(presence(b)).toHaveLength(1)
+  })
+
+  it('announces offline only after the grace, and a reopen within it cancels it', async () => {
+    vi.useFakeTimers()
+    const { hub, loadCounterparts } = presenceHub()
+    const b = fakeStream()
+    hub.addStream(B, b)
+    let offA = hub.addStream(A, fakeStream())
+    await vi.advanceTimersByTimeAsync(0)
+    loadCounterparts.mockClear()
+
+    offA()
+    await vi.advanceTimersByTimeAsync(GRACE / 2)
+    offA = hub.addStream(A, fakeStream()) // reconnect inside the grace
+    await vi.advanceTimersByTimeAsync(GRACE * 2)
+    expect(presence(b)).toEqual([{ event: 'presence', data: { userId: A, online: true } }])
+    expect(loadCounterparts).not.toHaveBeenCalled()
+
+    offA()
+    await vi.advanceTimersByTimeAsync(GRACE - 1)
+    expect(presence(b)).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(presence(b)).toEqual([
+      { event: 'presence', data: { userId: A, online: true } },
+      { event: 'presence', data: { userId: A, online: false } },
+    ])
+  })
+
+  it('reaches only connected counterparts, never the user themselves or strangers', async () => {
+    const { hub } = presenceHub({ [A]: [B, 'user-c', A] })
+    const b = fakeStream()
+    const stranger = fakeStream()
+    hub.addStream(B, b)
+    hub.addStream('user-d', stranger) // connected but not a counterpart
+    const a = fakeStream()
+    hub.addStream(A, a)
+    await tick()
+    expect(presence(b)).toEqual([{ event: 'presence', data: { userId: A, online: true } }])
+    expect(presence(a)).toEqual([])
+    expect(stranger.chunks).toEqual([])
+  })
+
+  it('skips the counterpart query when no one else is connected', async () => {
+    vi.useFakeTimers()
+    const { hub, loadCounterparts } = presenceHub()
+    const off = hub.addStream(A, fakeStream())
+    off()
+    await vi.advanceTimersByTimeAsync(GRACE)
+    expect(hub.isOnline(A)).toBe(false)
+    expect(loadCounterparts).not.toHaveBeenCalled()
+  })
+
+  it('logs and skips when loading counterparts fails', async () => {
+    const log = { warn: vi.fn() }
+    const { hub } = makeHub({ loadCounterparts: vi.fn(async () => { throw new Error('db down') }), log })
+    const b = fakeStream()
+    hub.addStream(B, b)
+    hub.addStream(A, fakeStream())
+    await tick()
+    expect(b.chunks).toEqual([])
+    expect(log.warn).toHaveBeenCalled()
+  })
+
+  it('snapshot: a new stream gets one online event per online counterpart (grace included)', async () => {
+    vi.useFakeTimers()
+    const { hub, loadCounterparts } = presenceHub({ [A]: [B, 'user-c', 'user-e', A] })
+    hub.addStream(B, fakeStream())
+    hub.addStream('user-c', fakeStream())() // closed → in grace, still online
+    // user-e is a counterpart but offline.
+    const a = fakeStream()
+    hub.addStream(A, a)
+    await vi.advanceTimersByTimeAsync(0) // let the transition announcements run
+    loadCounterparts.mockClear()
+    hub.sendPresenceSnapshot(A, a)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(loadCounterparts).toHaveBeenCalledTimes(1)
+    expect(presence(a)).toEqual([
+      { event: 'presence', data: { userId: B, online: true } },
+      { event: 'presence', data: { userId: 'user-c', online: true } },
+    ])
+  })
+
+  it('snapshot: only the new stream gets it, and no query when nobody else is online', async () => {
+    const { hub, loadCounterparts } = presenceHub()
+    const old = fakeStream()
+    hub.addStream(A, old)
+    const a = fakeStream()
+    hub.addStream(A, a)
+    hub.sendPresenceSnapshot(A, a)
+    await tick()
+    expect(loadCounterparts).not.toHaveBeenCalled()
+
+    hub.addStream(B, fakeStream())
+    await tick() // B's online transition reaches A's two open streams
+    const online = [{ event: 'presence', data: { userId: B, online: true } }]
+    expect(presence(a)).toEqual(online)
+    const a2 = fakeStream()
+    hub.addStream(A, a2)
+    hub.sendPresenceSnapshot(A, a2)
+    await tick()
+    expect(presence(a2)).toEqual(online)
+    expect(presence(a)).toEqual(online) // no second copy on the older streams
+    expect(presence(old)).toEqual(online)
+  })
+
+  it('snapshot: a failed load is logged and skipped', async () => {
+    const log = { warn: vi.fn() }
+    const { hub } = makeHub({ loadCounterparts: vi.fn(async () => { throw new Error('db down') }), log })
+    hub.addStream(B, fakeStream())
+    const a = fakeStream()
+    hub.addStream(A, a)
+    hub.sendPresenceSnapshot(A, a)
+    await tick()
+    expect(a.chunks).toEqual([])
+    expect(log.warn).toHaveBeenCalled()
+  })
+
+  it('a stream evicted by the per-user cap does not make the user offline', async () => {
+    vi.useFakeTimers()
+    const { hub } = presenceHub()
+    const b = fakeStream()
+    hub.addStream(B, b)
+    const offs = Array.from({ length: MAX_STREAMS_PER_USER + 1 }, () => hub.addStream(A, fakeStream()))
+    offs[0]() // the evicted stream's own cleanup
+    await vi.advanceTimersByTimeAsync(GRACE * 2)
+    expect(hub.isConnected(A)).toBe(true)
+    expect(presence(b)).toEqual([{ event: 'presence', data: { userId: A, online: true } }])
   })
 })

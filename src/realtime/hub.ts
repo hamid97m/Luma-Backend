@@ -1,5 +1,6 @@
 import { sql } from '../db.js'
 import { loadMessagesByIds, type MessageJson } from '../messaging/messageJson.js'
+import { parseTypingNotify } from './typing.js'
 
 /**
  * Real-time chat hub: userId → that user's open SSE streams.
@@ -10,10 +11,18 @@ import { loadMessagesByIds, type MessageJson } from '../messaging/messageJson.js
  *
  * Changes are buffered per match for a few ms (a mark-read UPDATE touches many
  * rows → many notifies) and loaded in one query per flush.
+ *
+ * Presence: a user is online while they have ≥1 open stream here. Going offline
+ * waits PRESENCE_GRACE_MS after the last stream closes (cancelled when one
+ * reopens), so an app switch or reconnect doesn't flicker. Each transition is
+ * pushed as `presence` to the user's connected, visible counterparts.
+ * Presence is per-process memory: correct for the single fork-mode process we
+ * run; cluster mode would need shared presence (e.g. Redis or a NOTIFY channel).
  */
 
 export const MAX_STREAMS_PER_USER = 3
 const COALESCE_MS = 50
+export const PRESENCE_GRACE_MS = 30_000
 
 export interface HubStream {
   /** Write one serialized chunk (already SSE-formatted). */
@@ -36,7 +45,12 @@ export interface HubDeps {
   loadMessages: (matchId: string, ids: string[]) => Promise<MessageJson[]>
   /** False when the pair is hidden from each other: either side deleted, or a block either way. */
   pairVisible: (u1: string, u2: string) => Promise<boolean>
+  /** The other user of every match of `userId` that is visible to both (same rule as GET /matches).
+   *  Omitted → presence changes aren't pushed to anyone. */
+  loadCounterparts?: (userId: string) => Promise<string[]>
   coalesceMs?: number
+  /** Delay before a user with no open streams counts as offline. */
+  presenceGraceMs?: number
   log?: { warn: (...a: any[]) => void }
 }
 
@@ -73,16 +87,56 @@ export function createChatHub(deps: HubDeps) {
    *  so its events never overtake each other. */
   const chains = new Map<string, Promise<void>>()
   const coalesceMs = deps.coalesceMs ?? COALESCE_MS
+  let presenceGraceMs = deps.presenceGraceMs ?? PRESENCE_GRACE_MS
+  /** Users with no open stream who still count as online until their timer fires. */
+  const offlineTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  /** Last presence announcement per user — announcements of one user run in order. */
+  const presenceChains = new Map<string, Promise<void>>()
 
   function isConnected(userId: string): boolean {
     return (streams.get(userId)?.size ?? 0) > 0
   }
 
+  /** Connected now, or disconnected less than the grace period ago. */
+  function isOnline(userId: string): boolean {
+    return isConnected(userId) || offlineTimers.has(userId)
+  }
+
   function remove(userId: string, stream: HubStream): void {
     const set = streams.get(userId)
-    if (!set) return
-    set.delete(stream)
-    if (set.size === 0) streams.delete(userId)
+    if (!set || !set.delete(stream)) return
+    if (set.size > 0) return
+    streams.delete(userId)
+    const timer = setTimeout(() => {
+      offlineTimers.delete(userId)
+      if (!isConnected(userId)) announcePresence(userId, false)
+    }, presenceGraceMs)
+    timer.unref?.()
+    offlineTimers.set(userId, timer)
+  }
+
+  /** Push `presence` to the user's connected, visible counterparts. One query,
+   *  skipped when nobody else is connected at all. A failed load is logged and dropped. */
+  function announcePresence(userId: string, online: boolean): void {
+    if (!deps.loadCounterparts) return
+    const othersConnected = streams.size > (isConnected(userId) ? 1 : 0)
+    if (!othersConnected) return
+    const load = deps.loadCounterparts
+    const next = (presenceChains.get(userId) ?? Promise.resolve()).then(async () => {
+      let ids: string[]
+      try {
+        ids = await load(userId)
+      } catch (err) {
+        deps.log?.warn({ err }, 'realtime: loading presence counterparts failed')
+        return
+      }
+      const chunk = formatSse('presence', { userId, online })
+      for (const id of new Set(ids)) if (id !== userId && isConnected(id)) sendTo(id, chunk)
+    })
+    presenceChains.set(userId, next)
+    void next.finally(() => {
+      if (presenceChains.get(userId) === next) presenceChains.delete(userId)
+    })
   }
 
   function sendTo(userId: string, chunk: string): void {
@@ -95,12 +149,49 @@ export function createChatHub(deps: HubDeps) {
     }
   }
 
+  /** A just-opened stream: one `presence` online event per visible counterpart
+   *  who is online now, so a (re)connecting client starts from the right state.
+   *  Skips the query when no other user is online at all. Online-ness is read
+   *  after the load, so a transition during it can't leave a stale "online". */
+  function sendPresenceSnapshot(userId: string, stream: HubStream): void {
+    if (!deps.loadCounterparts) return
+    const anyoneElse =
+      [...streams.keys()].some((u) => u !== userId) || [...offlineTimers.keys()].some((u) => u !== userId)
+    if (!anyoneElse) return
+    deps.loadCounterparts(userId).then(
+      (ids) => {
+        const chunk = [...new Set(ids)]
+          .filter((id) => id !== userId && isOnline(id))
+          .map((id) => formatSse('presence', { userId: id, online: true }))
+          .join('')
+        if (!chunk) return
+        try {
+          stream.write(chunk)
+        } catch (err) {
+          deps.log?.warn({ err }, 'realtime: stream write failed')
+        }
+      },
+      (err) => deps.log?.warn({ err }, 'realtime: loading presence counterparts failed'),
+    )
+  }
+
   /** Register a stream; returns its unregister fn. Opening one past the
    *  per-user cap closes that user's oldest stream. */
   function addStream(userId: string, stream: HubStream): () => void {
     let set = streams.get(userId)
+    const first = !set
     if (!set) streams.set(userId, (set = new Set()))
     set.add(stream)
+    if (first) {
+      // First stream: back within the grace period → still online, no event.
+      const timer = offlineTimers.get(userId)
+      if (timer) {
+        clearTimeout(timer)
+        offlineTimers.delete(userId)
+      } else {
+        announcePresence(userId, true)
+      }
+    }
     while (set.size > MAX_STREAMS_PER_USER) {
       const oldest = set.values().next().value as HubStream
       set.delete(oldest)
@@ -173,6 +264,14 @@ export function createChatHub(deps: HubDeps) {
     for (const u of recipients) sendTo(u, chunk)
   }
 
+  /** A `luma_typing` payload → `typing` to the counterpart's streams only.
+   *  Sent immediately, no DB work; dropped when they aren't connected here. */
+  function handleTyping(payload: string): void {
+    const n = parseTypingNotify(payload)
+    if (!n || n.to === n.from || !isConnected(n.to)) return
+    sendTo(n.to, formatSse('typing', { matchId: n.matchId, userId: n.from }))
+  }
+
   /** Every stream: "you may have missed events — refetch". */
   function resyncAll(): void {
     const chunk = formatSse('resync', {})
@@ -182,8 +281,15 @@ export function createChatHub(deps: HubDeps) {
   return {
     addStream,
     handleNotify,
+    handleTyping,
     resyncAll,
     isConnected,
+    isOnline,
+    sendPresenceSnapshot,
+    /** Change the offline grace period (tests). Applies to streams closed afterwards. */
+    setPresenceGraceMs: (ms: number) => {
+      presenceGraceMs = ms
+    },
     /** Open streams for a user (tests/diagnostics). */
     streamCount: (userId: string) => streams.get(userId)?.size ?? 0,
   }
@@ -205,5 +311,23 @@ async function pairVisible(u1: string, u2: string): Promise<boolean> {
   return Boolean(row?.visible)
 }
 
+/** The other user of each of `userId`'s matches, minus pairs hidden from each
+ *  other (same rule as GET /matches): either side deleted, or a block either way. */
+export async function loadCounterparts(userId: string): Promise<string[]> {
+  const rows = await sql<{ id: string }[]>`
+    select o.id
+    from matches m
+    join users o on o.id = case when m.user1_id = ${userId} then m.user2_id else m.user1_id end
+    where (m.user1_id = ${userId} or m.user2_id = ${userId})
+      and o.deleted_at is null
+      and not exists (select 1 from users me where me.id = ${userId} and me.deleted_at is not null)
+      and not exists (
+        select 1 from blocks b
+        where (b.blocker_id = ${userId} and b.blocked_id = o.id)
+           or (b.blocker_id = o.id and b.blocked_id = ${userId})
+      )`
+  return rows.map((r) => r.id)
+}
+
 /** The process-wide hub used by GET /events and the LISTEN connection. */
-export const chatHub = createChatHub({ loadMessages: loadMessagesByIds, pairVisible })
+export const chatHub = createChatHub({ loadMessages: loadMessagesByIds, pairVisible, loadCounterparts })

@@ -4,6 +4,7 @@ vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
 vi.mock('../src/bot.js', () => ({ notifyMatch: vi.fn() }))
 
 import { buildApp } from '../src/server.js'
+import { chatHub } from '../src/realtime/hub.js'
 import { AUTH, authAs } from './helpers/auth.js'
 import { resetDb, createUser, createMatch, createPhoto, insertRow, sql } from './helpers/db.js'
 
@@ -47,7 +48,7 @@ describe('GET /matches', () => {
     await createPhoto(sara.id, 0, { url: 'https://img/0' })
     await message(m.id, sara.id, { body: 'first', created_at: '2026-01-01T12:00:00Z' })
     await message(m.id, me.id, { body: 'mine', created_at: '2026-01-01T13:00:00Z', read_at: null })
-    await message(m.id, sara.id, { body: 'hey there', created_at: '2026-01-02T00:00:00Z' })
+    const last = await message(m.id, sara.id, { body: 'hey there', created_at: '2026-01-02T00:00:00Z' })
     await message(m.id, sara.id, { body: 'already read', created_at: '2026-01-01T11:00:00Z', read_at: '2026-01-01T11:30:00Z' })
 
     const res = await get()
@@ -61,10 +62,10 @@ describe('GET /matches', () => {
     expect(row.user).toEqual({
       id: sara.id, name: 'Sara', telegramId: sara.telegram_id, username: null, age: 24, bio: 'Coffee person',
       icebreakerPrompt: 'My perfect Sunday', icebreakerAnswer: 'Hiking then pancakes',
-      photos: ['https://img/0', 'https://img/1'], premium: false,
+      photos: ['https://img/0', 'https://img/1'], premium: false, online: false,
     })
     expect(row.lastMessage).toEqual({
-      body: 'hey there', createdAt: '2026-01-02T00:00:00.000Z', senderId: sara.id, type: 'text',
+      id: last.id, body: 'hey there', createdAt: '2026-01-02T00:00:00.000Z', senderId: sara.id, type: 'text', readAt: null,
     })
     // Two unread from Sara; her read one and my own don't count.
     expect(row.unreadCount).toBe(2)
@@ -94,6 +95,20 @@ describe('GET /matches', () => {
     const res = await get()
     const byName = Object.fromEntries(res.json().matches.map((m: any) => [m.user.name, m.user.premium]))
     expect(byName).toEqual({ P: true, X: false })
+  })
+
+  it('flags the other user online while they have an open stream in the hub', async () => {
+    const away = await createUser({ name: 'Away' })
+    await createMatch(me.id, sara.id, { created_at: '2026-01-02T00:00:00Z' })
+    await createMatch(me.id, away.id, { created_at: '2026-01-01T00:00:00Z' })
+    const off = chatHub.addStream(sara.id, { write: () => {}, close: () => {} })
+    try {
+      const res = await get()
+      const byName = Object.fromEntries(res.json().matches.map((m: any) => [m.user.name, m.user.online]))
+      expect(byName).toEqual({ Sara: true, Away: false })
+    } finally {
+      off()
+    }
   })
 
   it('returns null lastMessage, 0 unreadCount and no photos when there are no messages yet', async () => {

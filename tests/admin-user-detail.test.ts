@@ -56,6 +56,18 @@ describe('GET /admin/users/:id', () => {
     ])
   })
 
+  it('shows email and signInMethods for a Google user without telegram', async () => {
+    const web = await createUser({ telegram_id: null, email: 'web@example.com', google_sub: 'g-123' })
+    const body = (await get(web.id)).json()
+    expect(body.user).toMatchObject({ telegramId: null, email: 'web@example.com', signInMethods: ['google', 'email'] })
+  })
+
+  it('lists telegram only for real telegram users and none for seeds', async () => {
+    const seed = await createUser({ telegram_id: -5, is_seed: true })
+    expect((await get(sara.id)).json().user).toMatchObject({ email: null, signInMethods: ['telegram'] })
+    expect((await get(seed.id)).json().user.signInMethods).toEqual([])
+  })
+
   it('excludes icebreaker rows from messages sent', async () => {
     const m = await createMatch(sara.id, ali.id)
     await insertRow('messages', { match_id: m.id, sender_id: sara.id, body: 'q?', type: 'icebreaker' })

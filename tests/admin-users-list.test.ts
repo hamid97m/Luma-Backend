@@ -22,6 +22,14 @@ describe('GET /admin/users', () => {
   }
   const names = (body: any) => body.items.map((i: any) => i.name).sort()
 
+  it('search matches email', async () => {
+    await createUser({ name: 'Web', telegram_id: null, email: 'zed@example.com', google_sub: 'g-1' })
+    await createUser({ name: 'Other' })
+    const body = await list('?query=zed@exam')
+    expect(names(body)).toEqual(['Web'])
+    expect(body.items[0]).toMatchObject({ telegramId: null, email: 'zed@example.com', signInMethods: ['google', 'email'] })
+  })
+
   it('requires a token', async () => {
     const res = await app.inject({ method: 'GET', url: '/admin/users' })
     expect(res.statusCode).toBe(401)
@@ -47,7 +55,7 @@ describe('GET /admin/users', () => {
     expect(body.pageCount).toBe(3)
     expect(body.items).toHaveLength(2)
     expect(body.items[1]).toEqual({
-      id: sara.id, telegramId: 42, username: 'sara', name: 'Sara', age: 24,
+      id: sara.id, telegramId: 42, email: null, signInMethods: ['telegram'], username: 'sara', name: 'Sara', age: 24,
       gender: 'woman', lookingFor: 'men', isActive: true, isSeed: false, bannedAt: null, pausedAt: null,
       deletedAt: null, createdAt: '2026-07-01T00:00:00.000Z', lastActive: '2026-08-04T00:00:00.000Z',
       geoCity: 'Tehran', geoCountry: 'IR', locale: null, accountStatus: 'preparing',

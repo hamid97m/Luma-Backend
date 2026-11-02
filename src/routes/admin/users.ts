@@ -12,10 +12,21 @@ export const PAGE_SIZE = 20
 const GENDERS = ['man', 'woman', 'nonbinary']
 const LOOKING = ['men', 'women', 'both', 'everyone']
 
+// Seeds have negative telegram_ids and website users have none: neither signed in with Telegram.
+function signInMethods(u: any): ('telegram' | 'google' | 'email')[] {
+  const methods: ('telegram' | 'google' | 'email')[] = []
+  if (u.telegram_id > 0) methods.push('telegram')
+  if (u.google_sub) methods.push('google')
+  if (u.email) methods.push('email')
+  return methods
+}
+
 export function toListItem(u: any) {
   return {
     id: u.id,
-    telegramId: u.telegram_id,
+    telegramId: (u.telegram_id ?? null) as number | null,
+    email: (u.email ?? null) as string | null,
+    signInMethods: signInMethods(u),
     username: u.username,
     name: u.name,
     age: u.age,
@@ -58,8 +69,8 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     if (search) {
       const pattern = `%${search.replace(/\*/g, '%')}%`
       searchFilter = /^-?\d+$/.test(search)
-        ? sql`and (name ilike ${pattern} or username ilike ${pattern} or telegram_id = ${search}::bigint)`
-        : sql`and (name ilike ${pattern} or username ilike ${pattern})`
+        ? sql`and (name ilike ${pattern} or username ilike ${pattern} or email ilike ${pattern} or telegram_id = ${search}::bigint)`
+        : sql`and (name ilike ${pattern} or username ilike ${pattern} or email ilike ${pattern})`
     }
 
     // Admins see every user, deleted ones included (unless a status filter says otherwise).
@@ -68,7 +79,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     try {
       ;[data, [{ count }]] = await Promise.all([
         sql`
-          select id, telegram_id, username, name, age, gender, looking_for, is_active, is_seed,
+          select id, telegram_id, email, google_sub, username, name, age, gender, looking_for, is_active, is_seed,
                  banned_at, paused_at, deleted_at, created_at, last_active, geo_city, geo_country,
                  locale, account_status
           from users
@@ -378,7 +389,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
   })
 
   const setPaused = async (id: string, pausedAt: string | null, reply: any) => {
-    type Paused = { telegram_id: number; allows_write_to_pm: boolean | null; locale: Locale | null }
+    type Paused = { telegram_id: number | null; allows_write_to_pm: boolean | null; locale: Locale | null }
     let data: Paused | undefined
     try {
       ;[data] = isUuid(id)
@@ -395,7 +406,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
 
     // Warn the user only when pausing (not on resume), and only if bot DMs are
     // not explicitly declined.
-    if (pausedAt && data.telegram_id > 0 && data.allows_write_to_pm !== false) {
+    if (pausedAt && data.telegram_id != null && data.telegram_id > 0 && data.allows_write_to_pm !== false) {
       notifyPaused(data.telegram_id, data.locale ?? null).catch((err) =>
         console.error('[admin] notifyPaused failed:', err?.message ?? err))
     }
@@ -436,10 +447,10 @@ export async function adminUsersRoutes(app: FastifyInstance) {
       deliver = (telegramId) => sendBroadcastMessage(telegramId, trimmed, btn.button)
     }
 
-    let user: { telegram_id: number; is_seed: boolean } | undefined
+    let user: { telegram_id: number | null; is_seed: boolean } | undefined
     try {
       ;[user] = isUuid(id)
-        ? await sql<{ telegram_id: number; is_seed: boolean }[]>`select telegram_id, is_seed from users where id = ${id}`
+        ? await sql<{ telegram_id: number | null; is_seed: boolean }[]>`select telegram_id, is_seed from users where id = ${id}`
         : []
     } catch (err) {
       req.log.error({ err }, 'user lookup failed')
@@ -447,12 +458,13 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     }
     if (!user) return reply.status(404).send({ error: 'user_not_found' })
     // Fakes (negative) and website-only users (null telegram_id) can't get bot DMs.
-    if ((user as any).is_seed || !((user as any).telegram_id > 0)) {
+    const telegramId = user.telegram_id
+    if (user.is_seed || telegramId === null || telegramId <= 0) {
       return reply.status(400).send({ error: 'not_messageable' })
     }
 
     try {
-      await deliver((user as any).telegram_id)
+      await deliver(telegramId)
       return { ok: true }
     } catch (err: any) {
       // 403 = the user has blocked the bot. Surface it; leave allows_write_to_pm as-is.

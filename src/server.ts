@@ -39,6 +39,7 @@ declare module 'fastify' {
 }
 
 const LAST_ACTIVE_THROTTLE_MS = 60_000
+const WEB_SIGN_IN_PATHS = new Set(['/auth/telegram-web', '/auth/google', '/auth/dev'])
 
 /** The only way a paused user can come back is by uploading a fresh photo.
  *  Redeploy stamp: 2026-10-16T19:05. */
@@ -88,6 +89,9 @@ export async function buildApp(): Promise<FastifyInstance> {
     max: 300,
     timeWindow: '1 hour',
     keyGenerator: (req: FastifyRequest) => {
+      // Website sign-in carries no real credential in the header — key by IP so
+      // a made-up Authorization value can't mint a fresh bucket per attempt.
+      if (WEB_SIGN_IN_PATHS.has(req.url.split('?')[0])) return req.ip
       const auth = req.headers.authorization
       // Hash the full header: raw slicing gave all Bearer JWTs one shared bucket
       // (constant "Bearer eyJ..." prefix) and let attackers mint fresh buckets.

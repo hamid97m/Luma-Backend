@@ -97,6 +97,20 @@ describe('POST /auth/telegram-web', () => {
     expect(await sql`select id from users`).toHaveLength(0)
   })
 
+  it('sign-in endpoints are rate-limited per IP, whatever Authorization header is sent', async () => {
+    const payload = signWidget({ id: 777, first_name: 'Reza', auth_date: now() })
+    const post = (url: string, authorization: string) =>
+      app.inject({ method: 'POST', url, payload, headers: { authorization } })
+
+    const first = await post('/auth/telegram-web', 'junk-1')
+    const second = await post('/auth/telegram-web', 'Bearer junk-2')
+    const google = await post('/auth/google', 'junk-3')
+
+    expect(first.headers['x-ratelimit-remaining']).toBe('299')
+    expect(second.headers['x-ratelimit-remaining']).toBe('298')
+    expect(google.headers['x-ratelimit-remaining']).toBe('297')
+  })
+
   it('tampered field → 401 invalid_telegram_login', async () => {
     const payload = signWidget({ id: 4242, first_name: 'Sara', auth_date: now() })
 

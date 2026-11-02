@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import Fastify from 'fastify'
-import http from 'node:http'
 import net from 'node:net'
 import type { FastifyBaseLogger } from 'fastify'
 
+import { WEBHOOK_ROUTE_PREFIX } from '../src/webhookRoute.js'
 import { registry, registerHttpMetrics, trackJob, startMetricsServer } from '../src/metrics.js'
 import { buildApp } from '../src/server.js'
 import { resetDb } from './helpers/db.js'
@@ -30,6 +30,16 @@ describe('metrics', () => {
     const out = await registry.getSingleMetricAsString('luma_http_request_duration_seconds')
     expect(out).toContain('route="unmatched",status_code="404"')
     expect(out).not.toContain('wp-login')
+  })
+
+  it('webhook route label hides the secret', async () => {
+    const app = Fastify()
+    registerHttpMetrics(app)
+    app.post(`${WEBHOOK_ROUTE_PREFIX}/abc123secret`, async () => ({ ok: true }))
+    await app.inject({ method: 'POST', url: `${WEBHOOK_ROUTE_PREFIX}/abc123secret` })
+    const out = await registry.getSingleMetricAsString('luma_http_request_duration_seconds')
+    expect(out).toContain(`route="${WEBHOOK_ROUTE_PREFIX}/:secret"`)
+    expect(out).not.toContain('abc123secret')
   })
 
   it('trackJob records success', async () => {
@@ -85,6 +95,7 @@ describe('public app', () => {
   it('has no /metrics', async () => {
     const app = await buildApp()
     const res = await app.inject({ method: 'GET', url: '/metrics' })
+    await app.close()
     // unauthenticated unknown paths hit the auth preHandler first (401), which is fine: never 200
     expect([401, 404]).toContain(res.statusCode)
     expect(res.body).not.toContain('nodejs_')

@@ -1,5 +1,6 @@
 import http from 'node:http'
 import type { FastifyBaseLogger, FastifyInstance } from 'fastify'
+import { WEBHOOK_ROUTE_PREFIX } from './webhookRoute.js'
 import { Registry, Histogram, Gauge, Counter, collectDefaultMetrics } from 'prom-client'
 
 export const registry = new Registry()
@@ -35,13 +36,22 @@ const jobDuration = new Histogram({
   registers: [registry],
 })
 
+/** Route label: the Telegram webhook path embeds a secret, so collapse it. */
+function routeLabel(url: string | undefined): string {
+  if (!url) return 'unmatched'
+  if (url === WEBHOOK_ROUTE_PREFIX || url.startsWith(`${WEBHOOK_ROUTE_PREFIX}/`)) {
+    return `${WEBHOOK_ROUTE_PREFIX}/:secret`
+  }
+  return url
+}
+
 /** Observe every response; `route` is the route pattern, never the raw URL. */
 export function registerHttpMetrics(app: FastifyInstance): void {
   app.addHook('onResponse', async (req, reply) => {
     httpDuration.observe(
       {
         method: req.method,
-        route: req.routeOptions?.url ?? 'unmatched',
+        route: routeLabel(req.routeOptions?.url),
         status_code: String(reply.statusCode),
       },
       reply.elapsedTime / 1000,
@@ -69,8 +79,9 @@ export function startMetricsServer(port: number, log: FastifyBaseLogger): http.S
     const path = (req.url ?? '').split('?')[0]
     if (req.method === 'GET' && path === '/metrics') {
       try {
+        const body = await registry.metrics()
         res.writeHead(200, { 'Content-Type': registry.contentType })
-        res.end(await registry.metrics())
+        res.end(body)
       } catch (err) {
         log.error({ err }, 'metrics render failed')
         res.statusCode = 500

@@ -1,5 +1,4 @@
 import postgres from 'postgres'
-import { createClient } from '@supabase/supabase-js'
 
 /**
  * Plain Postgres client (postgres.js). Tagged templates are parameterised by
@@ -57,14 +56,3 @@ export function isUuid(value: unknown): value is string {
 export function defined<T extends Record<string, unknown>>(obj: T): Partial<T> {
   return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined)) as Partial<T>
 }
-
-/**
- * @deprecated Supabase client — being removed (see
- * docs/plans/self-hosted-postgres-migration.md). Use `sql` in new code.
- * Placeholder credentials keep importing this module safe where the env is unset
- * (tests, local Postgres) while unconverted callers remain.
- */
-export const db = createClient(
-  process.env.SUPABASE_URL ?? 'http://supabase.invalid',
-  process.env.SUPABASE_SERVICE_KEY ?? 'unset',
-)

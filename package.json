@@ -16,12 +16,12 @@
     "fix:photo-cache": "tsx scripts/fix-photo-cache.ts",
     "db:migrate": "node dist/migrate.js",
     "db:migrate:dev": "tsx src/migrate.ts",
+    "import:supabase": "tsx scripts/import-from-supabase.ts",
     "test:db:up": "docker start luma-pg-test 2>/dev/null || docker run -d --name luma-pg-test -e POSTGRES_PASSWORD=luma -p 54329:5432 postgres:16-alpine"
   },
   "dependencies": {
     "@fastify/cors": "^9.0.0",
     "@fastify/rate-limit": "^9.0.0",
-    "@supabase/supabase-js": "^2.45.0",
     "bcryptjs": "^3.0.3",
     "dotenv": "^17.4.2",
     "fastify": "^4.28.0",

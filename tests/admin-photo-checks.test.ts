@@ -1,13 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-
-// Storage stays on supabase for now; the DB queries hit the real Postgres.
-vi.mock('../src/db.js', async (orig) => ({
-  ...(await orig<typeof import('../src/db.js')>()),
-  db: { storage: { from: vi.fn() } },
-}))
+import { describe, it, expect, beforeEach } from 'vitest'
 
 import { buildApp } from '../src/server.js'
-import { db } from '../src/db.js'
+import * as storage from '../src/storage.js'
 import { resetDb, createUser, insertRow } from './helpers/db.js'
 import { adminHeaders } from './helpers/admin.js'
 import { withTableBroken } from './helpers/admin-db-fault.js'
@@ -17,7 +11,6 @@ describe('admin photo checks', () => {
   let headers: Record<string, string>
 
   beforeEach(async () => {
-    vi.clearAllMocks()
     await resetDb()
     process.env.ADMIN_JWT_SECRET = 'test-secret'
     app = await buildApp()
@@ -66,18 +59,27 @@ describe('admin photo checks', () => {
       created_at: '2026-08-02T00:00:00Z',
     })
     await check(reza.id, { approved: true, photo_url: 'https://pub/u2/p2', created_at: '2026-08-01T00:00:00Z' })
-    const createSignedUrls = vi.fn().mockResolvedValue({ data: [{ path: 'u1/p1', signedUrl: 'https://signed/u1/p1' }] })
-    vi.mocked(db.storage.from).mockReturnValue({ createSignedUrls } as any)
+    await storage.upload('photo-ai-evidence', 'u1/p1', Buffer.from('evidence-bytes'))
 
+    const before = Date.now()
     const rejected = (await app.inject({ method: 'GET', url: '/admin/photo-checks?verdict=rejected&page=1', headers })).json()
-    expect(db.storage.from).toHaveBeenCalledWith('photo-ai-evidence')
-    expect(createSignedUrls).toHaveBeenCalledWith(['u1/p1'], 3600)
     expect(rejected.total).toBe(1)
     expect(rejected.items).toEqual([{
       photoId: p1.photo_id,
       user: { id: ali.id, name: 'Ali', gender: 'man', pausedAt: '2026-08-01T00:00:00.000Z', bannedAt: null, deletedAt: null },
-      approved: false, reason: 'nudity', createdAt: '2026-08-02T00:00:00.000Z', imageUrl: 'https://signed/u1/p1',
+      approved: false, reason: 'nudity', createdAt: '2026-08-02T00:00:00.000Z',
+      imageUrl: expect.stringMatching(/^http:\/\/api\.test\/media-private\/[^/]+$/),
     }])
+    // A 1h read token for the private evidence object…
+    const token = rejected.items[0].imageUrl.split('/').pop()
+    const claim = storage.verifyToken(token, 'get')
+    expect(claim).toMatchObject({ op: 'get', b: 'photo-ai-evidence', p: 'u1/p1' })
+    expect(claim!.exp * 1000 - before).toBeGreaterThan(3590_000)
+    expect(claim!.exp * 1000 - before).toBeLessThanOrEqual(3601_000)
+    // …that serves the file without admin auth.
+    const img = await app.inject({ method: 'GET', url: `/media-private/${token}` })
+    expect(img.statusCode).toBe(200)
+    expect(img.rawPayload.toString()).toBe('evidence-bytes')
 
     const all = (await app.inject({ method: 'GET', url: '/admin/photo-checks', headers })).json()
     expect(all.total).toBe(2)
@@ -87,6 +89,14 @@ describe('admin photo checks', () => {
     const approved = (await app.inject({ method: 'GET', url: '/admin/photo-checks?verdict=approved', headers })).json()
     expect(approved.items.map((i: any) => i.user.name)).toEqual(['Reza'])
     expect(approved.pageCount).toBe(1)
+  })
+
+  it('falls back to the public photo URL when the evidence path is unusable', async () => {
+    const u = await createUser()
+    await check(u.id, { approved: false, reason: 'nudity', photo_url: 'https://pub/u3/p3', evidence_path: '../escape' })
+
+    const body = (await app.inject({ method: 'GET', url: '/admin/photo-checks', headers })).json()
+    expect(body.items[0].imageUrl).toBe('https://pub/u3/p3')
   })
 
   it('500s when the list query fails', async () => {

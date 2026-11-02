@@ -1,15 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-// Storage still goes through supabase-js; the DB part is real Postgres.
-vi.mock('../src/db.js', async (orig) => ({ ...(await orig<object>()), db: { storage: { from: vi.fn() } } }))
 vi.mock('../src/bot.js', () => ({ notifyPaused: vi.fn(), notifyFakePhotoWarning: vi.fn() }))
 
-import { db } from '../src/db.js'
 import { notifyPaused } from '../src/bot.js'
 import { parsePhotoVerdict, askDeepSeekPhoto, checkMainPhoto, scheduleMainPhotoCheck } from '../src/moderation/photoAiCheck.js'
 import { randomUUID } from 'node:crypto'
+import { chmod, mkdir, readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { resetDb, createUser, createPhoto, insertRow, sql } from './helpers/db.js'
-import { storageMock, withMissingTable } from './helpers/profile.js'
+import { photoFileExists, seedPhotoFile, withMissingTable } from './helpers/profile.js'
 
 const MAN = { gender: 'man', looking_for: 'women', age: 27, is_seed: false, telegram_id: 100, allows_write_to_pm: true, locale: 'fa' }
 const MAIN = { id: 'photo-1', url: 'https://cdn.example/user-1/photo-1' }
@@ -107,14 +106,18 @@ describe('askDeepSeekPhoto', () => {
   })
 })
 
-/** A checkable man (unless overridden) with one main photo; storage mocked. */
-async function setup(user: Record<string, unknown> = {}) {
-  const storage = storageMock()
-  vi.mocked(db.storage.from).mockImplementation(() => storage as any)
+const MAIN_BYTES = Buffer.from('main-photo-bytes')
+
+/** A checkable man (unless overridden) with one main photo, its file on disk
+ *  unless `withFile` is false. */
+async function setup(user: Record<string, unknown> = {}, withFile = true) {
   const u = await createUser({ ...MAN, ...user })
   const main = await createPhoto(u.id, 0)
-  return { u, main, storage }
+  if (withFile) await seedPhotoFile(u.id, main.id, MAIN_BYTES)
+  return { u, main }
 }
+
+const evidenceFile = (path: string) => join(process.env.MEDIA_DIR!, 'private', 'photo-ai-evidence', ...path.split('/'))
 
 const checks = () => sql`select photo_id, user_id, approved, reason, photo_url, evidence_path, prompt_tokens, completion_tokens from photo_ai_checks`
 const pausedAt = async (id: string) => (await sql`select paused_at from users where id = ${id}`)[0].paused_at
@@ -189,7 +192,7 @@ describe('checkMainPhoto', () => {
   })
 
   it('keeps a private copy, then pauses, deletes photos and DMs on a rejection', async () => {
-    const { u, main, storage } = await setup()
+    const { u, main } = await setup()
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       choices: [{ message: { content: '{"approved":false,"reason":"celebrity_or_stock"}' } }],
       usage: { prompt_tokens: 600, completion_tokens: 12 },
@@ -197,30 +200,47 @@ describe('checkMainPhoto', () => {
 
     expect(await checkMainPhoto(u.id)).toEqual({ approved: false, reason: 'celebrity_or_stock' })
     const path = `${u.id}/${main.id}`
-    expect(storage.download).toHaveBeenCalledWith(path)
-    const blob = await storage.download.mock.results[0].value.then((r: any) => r.data)
-    expect(storage.upload).toHaveBeenCalledWith(path, blob, { contentType: 'image/jpeg', upsert: true })
-    expect(vi.mocked(db.storage.from).mock.calls.map((c) => c[0])).toContain('photo-ai-evidence')
+    // The private copy holds the original bytes — so it was made before the
+    // pause deleted the original (a later copy would have found no file).
+    expect(await readFile(evidenceFile(path))).toEqual(MAIN_BYTES)
     expect(await checks()).toEqual([expect.objectContaining({
       approved: false, reason: 'celebrity_or_stock', evidence_path: path, prompt_tokens: 600, completion_tokens: 12,
     })])
-    // the copy must exist before the pause deletes the original
-    expect(storage.upload.mock.invocationCallOrder[0]).toBeLessThan(storage.remove.mock.invocationCallOrder[0])
-    expect(storage.remove).toHaveBeenCalledWith([path])
+    expect(photoFileExists(u.id, main.id)).toBe(false)
     expect((await sql`select count(*)::int as n from user_photos`)[0].n).toBe(0)
     expect(await pausedAt(u.id)).not.toBeNull()
     expect(notifyPaused).toHaveBeenCalledWith(100, 'fa')
   })
 
-  it('still pauses when the evidence copy fails', async () => {
+  it('still pauses when the evidence copy fails (source file missing)', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const { u, storage } = await setup()
-    storage.download.mockResolvedValueOnce({ data: null, error: { message: 'not found' } })
+    const { u } = await setup({}, false)
     fetchMock.mockResolvedValueOnce(deepSeekReply('{"approved":false,"reason":"no_face"}'))
 
     await checkMainPhoto(u.id)
     expect(await checks()).toEqual([expect.objectContaining({ evidence_path: null })])
     expect(notifyPaused).toHaveBeenCalled()
+    expect(await pausedAt(u.id)).not.toBeNull()
+    expect(errorSpy).toHaveBeenCalledWith('[moderation] evidence download failed:', 'empty')
+    errorSpy.mockRestore()
+  })
+
+  it('still pauses when the evidence copy cannot be written', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { u, main } = await setup()
+    fetchMock.mockResolvedValueOnce(deepSeekReply('{"approved":false,"reason":"no_face"}'))
+    const bucketDir = join(process.env.MEDIA_DIR!, 'private', 'photo-ai-evidence')
+    await mkdir(bucketDir, { recursive: true })
+    await chmod(bucketDir, 0o500) // read-only: creating <userId>/ fails with EACCES
+    try {
+      await checkMainPhoto(u.id)
+    } finally {
+      await chmod(bucketDir, 0o700)
+    }
+    expect(await checks()).toEqual([expect.objectContaining({ evidence_path: null })])
+    expect(notifyPaused).toHaveBeenCalled()
+    expect(photoFileExists(u.id, main.id)).toBe(false)
+    expect(errorSpy).toHaveBeenCalledWith('[moderation] evidence upload failed:', expect.any(String))
     errorSpy.mockRestore()
   })
 

@@ -17,11 +17,13 @@ export async function mediaRoutes(app: FastifyInstance) {
     app.addContentTypeParser(type, { parseAs: 'buffer', bodyLimit: MAX_UPLOAD_BYTES }, (_req, body, done) => done(null, body))
   }
 
-  app.put<{ Params: { token: string } }>(
-    '/media-upload/:token',
+  // Tokens are ~130+ chars, over Fastify's default maxParamLength (100), which
+  // turns a `:token` param route into a 404 — so match them as a wildcard.
+  app.put<{ Params: { '*': string } }>(
+    '/media-upload/*',
     { bodyLimit: MAX_UPLOAD_BYTES },
     async (req, reply) => {
-      const claim = verifyToken(req.params.token, 'put')
+      const claim = verifyToken(req.params['*'], 'put')
       if (!claim) return reply.status(403).send({ error: 'invalid_upload_token' })
       const body = req.body
       if (!Buffer.isBuffer(body) || body.length === 0) {
@@ -37,8 +39,8 @@ export async function mediaRoutes(app: FastifyInstance) {
     },
   )
 
-  app.get<{ Params: { token: string } }>('/media-private/:token', async (req, reply) => {
-    const claim = verifyToken(req.params.token, 'get')
+  app.get<{ Params: { '*': string } }>('/media-private/*', async (req, reply) => {
+    const claim = verifyToken(req.params['*'], 'get')
     if (!claim) return reply.status(403).send({ error: 'invalid_media_token' })
     return sendFile(reply, claim.b, claim.p, 'private, max-age=300')
   })

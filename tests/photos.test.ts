@@ -1,33 +1,28 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
-// Storage still goes through supabase-js; the DB part is real Postgres.
-vi.mock('../src/db.js', async (orig) => ({ ...(await orig<object>()), db: { storage: { from: vi.fn() } } }))
 vi.mock('../src/referrals/rewards.js', () => ({ maybeQualifyReferral: vi.fn() }))
 vi.mock('../src/moderation/photoAiCheck.js', () => ({ scheduleMainPhotoCheck: vi.fn() }))
 
 import { randomUUID } from 'node:crypto'
 import { buildApp } from '../src/server.js'
-import { db } from '../src/db.js'
+import { verifyToken } from '../src/storage.js'
 import { scheduleMainPhotoCheck } from '../src/moderation/photoAiCheck.js'
 import { AUTH, authAs } from './helpers/auth.js'
 import { resetDb, createUser, createPhoto, sql } from './helpers/db.js'
-import { storageMock } from './helpers/profile.js'
+import { PHOTO_URL_BASE, photoFileExists, seedPhotoFile } from './helpers/profile.js'
 
 const positions = (userId: string) =>
   sql`select id, position from user_photos where user_id = ${userId} order by position`
 
 let app: Awaited<ReturnType<typeof buildApp>>
 let me: Record<string, any>
-let storage: ReturnType<typeof storageMock>
 
 beforeEach(async () => {
   await resetDb()
   app = await buildApp()
   me = await createUser({ name: 'Ali' })
   authAs(me)
-  storage = storageMock()
-  vi.mocked(db.storage.from).mockReturnValue(storage as any)
 })
 
 async function addPhotos(userId: string, n: number) {
@@ -56,10 +51,11 @@ describe('POST /profile/me/photos/upload-url', () => {
 
     expect(res.statusCode).toBe(200)
     const body = res.json()
-    expect(body).toHaveProperty('uploadUrl', 'https://cdn.test/signed-upload')
     expect(body).toHaveProperty('photoId')
     expect(body).not.toHaveProperty('publicUrl')
-    expect(storage.createSignedUploadUrl).toHaveBeenCalledWith(`${me.id}/${body.photoId}`)
+    expect(body.uploadUrl).toMatch(/^http:\/\/api\.test\/media-upload\/[^/]+$/)
+    const claim = verifyToken(body.uploadUrl.split('/').pop(), 'put')
+    expect(claim).toMatchObject({ op: 'put', b: 'profile-photos', p: `${me.id}/${body.photoId}` })
     expect(await positions(me.id)).toHaveLength(1)
   })
 
@@ -104,7 +100,7 @@ describe('POST /profile/me/photos/confirm', () => {
 
     const res = await confirm(newId)
 
-    const url = `https://cdn.test/profile-photos/${me.id}/${newId}`
+    const url = `${PHOTO_URL_BASE}/${me.id}/${newId}`
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ photo: { id: newId, url, position: 1 } })
     const [row] = await sql`select user_id, url, position from user_photos where id = ${newId}`
@@ -151,23 +147,27 @@ describe('DELETE /profile/me/photos/:photoId', () => {
 
   it('refuses to delete the last remaining photo with 409 last_photo', async () => {
     const [only] = await addPhotos(me.id, 1)
+    await seedPhotoFile(me.id, only.id)
 
     const res = await del(only.id)
 
     expect(res.statusCode).toBe(409)
     expect(res.json()).toEqual({ error: 'last_photo' })
     expect(await positions(me.id)).toHaveLength(1)
-    expect(storage.remove).not.toHaveBeenCalled()
+    expect(photoFileExists(me.id, only.id)).toBe(true)
   })
 
-  it('removes file from Supabase Storage and compacts positions', async () => {
+  it('removes the file from storage and compacts positions', async () => {
     const [p0, p1, p2, p3] = await addPhotos(me.id, 4)
+    await seedPhotoFile(me.id, p1.id)
+    await seedPhotoFile(me.id, p2.id)
 
     const res = await del(p1.id)
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ ok: true })
-    expect(storage.remove).toHaveBeenCalledWith([`${me.id}/${p1.id}`])
+    expect(photoFileExists(me.id, p1.id)).toBe(false)
+    expect(photoFileExists(me.id, p2.id)).toBe(true)
     expect(await positions(me.id)).toEqual([
       { id: p0.id, position: 0 }, { id: p2.id, position: 1 }, { id: p3.id, position: 2 },
     ])

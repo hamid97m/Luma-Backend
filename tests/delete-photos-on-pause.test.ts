@@ -1,19 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { chmod } from 'node:fs/promises'
+import { join } from 'node:path'
 
-// Storage still goes through supabase-js; the DB part is real Postgres.
-vi.mock('../src/db.js', async (orig) => ({ ...(await orig<object>()), db: { storage: { from: vi.fn() } } }))
-
-import { db } from '../src/db.js'
 import { deleteAllPhotosForUser } from '../src/photos/deleteAllPhotosForUser.js'
 import { resetDb, createUser, createPhoto, sql } from './helpers/db.js'
-import { storageMock, withMissingTable } from './helpers/profile.js'
+import { photoFileExists, seedPhotoFile, withMissingTable } from './helpers/profile.js'
 
 describe('deleteAllPhotosForUser', () => {
-  let storage: ReturnType<typeof storageMock>
   beforeEach(async () => {
     await resetDb()
-    storage = storageMock()
-    vi.mocked(db.storage.from).mockReturnValue(storage as any)
   })
 
   it('removes storage objects and deletes the user_photos rows when photos exist', async () => {
@@ -21,13 +16,16 @@ describe('deleteAllPhotosForUser', () => {
     const other = await createUser()
     const a = await createPhoto(u.id, 0)
     const b = await createPhoto(u.id, 1)
-    await createPhoto(other.id, 0)
+    const c = await createPhoto(other.id, 0)
+    await seedPhotoFile(u.id, a.id)
+    await seedPhotoFile(u.id, b.id)
+    await seedPhotoFile(other.id, c.id)
 
     await deleteAllPhotosForUser(u.id)
 
-    expect(db.storage.from).toHaveBeenCalledWith('profile-photos')
-    expect(storage.remove).toHaveBeenCalledTimes(1)
-    expect([...storage.remove.mock.calls[0][0]].sort()).toEqual([`${u.id}/${a.id}`, `${u.id}/${b.id}`].sort())
+    expect(photoFileExists(u.id, a.id)).toBe(false)
+    expect(photoFileExists(u.id, b.id)).toBe(false)
+    expect(photoFileExists(other.id, c.id)).toBe(true)
     expect((await sql`select count(*)::int as n from user_photos where user_id = ${u.id}`)[0].n).toBe(0)
     // Other users' photos are untouched.
     expect((await sql`select count(*)::int as n from user_photos where user_id = ${other.id}`)[0].n).toBe(1)
@@ -35,10 +33,39 @@ describe('deleteAllPhotosForUser', () => {
 
   it('does nothing when the user has no photos', async () => {
     const u = await createUser()
+    const other = await createUser()
+    const c = await createPhoto(other.id, 0)
+    await seedPhotoFile(other.id, c.id)
+
+    await expect(deleteAllPhotosForUser(u.id)).resolves.toBeUndefined()
+
+    expect(photoFileExists(other.id, c.id)).toBe(true)
+  })
+
+  it('still deletes the rows when a photo file is already gone', async () => {
+    const u = await createUser()
+    await createPhoto(u.id, 0) // no file on disk
 
     await deleteAllPhotosForUser(u.id)
 
-    expect(storage.remove).not.toHaveBeenCalled()
+    expect((await sql`select count(*)::int as n from user_photos where user_id = ${u.id}`)[0].n).toBe(0)
+  })
+
+  it('still deletes the rows when the files cannot be removed', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const u = await createUser()
+    const a = await createPhoto(u.id, 0)
+    await seedPhotoFile(u.id, a.id)
+    const userDir = join(process.env.MEDIA_DIR!, 'public', 'profile-photos', u.id)
+    await chmod(userDir, 0o500) // unlink fails with EACCES
+    try {
+      await expect(deleteAllPhotosForUser(u.id)).resolves.toBeUndefined()
+    } finally {
+      await chmod(userDir, 0o700)
+    }
+    expect((await sql`select count(*)::int as n from user_photos where user_id = ${u.id}`)[0].n).toBe(0)
+    expect(errorSpy).toHaveBeenCalled()
+    errorSpy.mockRestore()
   })
 
   it('swallows errors and never throws', async () => {

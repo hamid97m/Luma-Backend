@@ -1,21 +1,28 @@
-import { vi } from 'vitest'
 import { sql } from './db.js'
+import { join } from 'node:path'
+import { existsSync } from 'node:fs'
+import * as storage from '../../src/storage.js'
 
 /**
  * Fixtures for the profile / photos / moderation tests.
  *
- * Storage still goes through supabase-js (`db.storage`), so those tests mock it:
- *   vi.mock('../src/db.js', async (orig) => ({ ...(await orig<object>()), db: { storage: { from: vi.fn() } } }))
- * and install `storageMock()` as the bucket returned by `db.storage.from`.
+ * Storage is the real local-disk module (src/storage.ts) writing into the
+ * per-worker temp MEDIA_DIR set up in tests/setup/worker-db.ts.
  */
-export function storageMock(publicUrl = (path: string) => `https://cdn.test/profile-photos/${path}`) {
-  return {
-    remove: vi.fn().mockResolvedValue({ error: null }),
-    upload: vi.fn().mockResolvedValue({ error: null }),
-    download: vi.fn().mockResolvedValue({ data: new Blob(['img'], { type: 'image/jpeg' }), error: null }),
-    createSignedUploadUrl: vi.fn().mockResolvedValue({ data: { signedUrl: 'https://cdn.test/signed-upload' }, error: null }),
-    getPublicUrl: vi.fn((path: string) => ({ data: { publicUrl: publicUrl(path) } })),
-  }
+export const PHOTO_URL_BASE = 'http://api.test/media/profile-photos'
+
+/** On-disk location of a profile photo object (`<userId>/<photoId>`). */
+export function photoFile(userId: string, photoId: string): string {
+  return join(process.env.MEDIA_DIR!, 'public', 'profile-photos', userId, photoId)
+}
+
+export function photoFileExists(userId: string, photoId: string): boolean {
+  return existsSync(photoFile(userId, photoId))
+}
+
+/** Write a profile photo object to disk, as a client upload would. */
+export async function seedPhotoFile(userId: string, photoId: string, bytes: Uint8Array = Buffer.from('img')) {
+  await storage.upload('profile-photos', `${userId}/${photoId}`, bytes)
 }
 
 /**

@@ -1,29 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
-// Storage still goes through supabase-js; the DB part is real Postgres.
-vi.mock('../src/db.js', async (orig) => ({ ...(await orig<object>()), db: { storage: { from: vi.fn() } } }))
 vi.mock('../src/moderation/photoAiCheck.js', () => ({ scheduleMainPhotoCheck: vi.fn() }))
 
 import { randomUUID } from 'node:crypto'
 import { buildApp } from '../src/server.js'
-import { db } from '../src/db.js'
 import { scheduleMainPhotoCheck } from '../src/moderation/photoAiCheck.js'
 import { AUTH, authAs } from './helpers/auth.js'
 import { resetDb, createUser, createPhoto, sql } from './helpers/db.js'
-import { storageMock, createReport } from './helpers/profile.js'
+import { PHOTO_URL_BASE, createReport, photoFileExists, seedPhotoFile, withFailingWrites } from './helpers/profile.js'
 
 let app: Awaited<ReturnType<typeof buildApp>>
 let me: Record<string, any>
-let storage: ReturnType<typeof storageMock>
 
 beforeEach(async () => {
   await resetDb()
   app = await buildApp()
   me = await createUser({ name: 'Ali' })
   authAs(me)
-  storage = storageMock()
-  vi.mocked(db.storage.from).mockReturnValue(storage as any)
 })
 
 async function addPhotos(userId: string, n: number) {
@@ -44,7 +38,7 @@ describe('POST /profile/me/photos/upload-url (replace bypasses cap)', () => {
     const res = await uploadUrl(p1.id)
 
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toHaveProperty('uploadUrl', 'https://cdn.test/signed-upload')
+    expect(res.json().uploadUrl).toMatch(/^http:\/\/api\.test\/media-upload\/[^/]+$/)
   })
 
   it('still returns 400 at 6 photos when replacePhotoId is not owned', async () => {
@@ -73,13 +67,14 @@ describe('POST /profile/me/photos/:photoId/replace', () => {
   })
 
   it('returns 404 (not 500) for a malformed old photo id', async () => {
-    const res = await replace('old-photo', 'new-photo')
+    const res = await replace('old-photo', randomUUID())
     expect(res.statusCode).toBe(404)
     expect(res.json()).toEqual({ error: 'photo_not_found' })
   })
 
   it('returns 400 when newPhotoId equals the old id', async () => {
-    const res = await replace('old-photo', 'old-photo')
+    const [old] = await addPhotos(me.id, 1)
+    const res = await replace(old.id, old.id)
     expect(res.statusCode).toBe(400)
     expect(res.json()).toEqual({ error: 'invalid_photo_id' })
   })
@@ -87,12 +82,15 @@ describe('POST /profile/me/photos/:photoId/replace', () => {
   it('swaps the new photo into the old photo position and returns it', async () => {
     const [p0, p1, old] = await addPhotos(me.id, 3)
     const newId = randomUUID()
+    await seedPhotoFile(me.id, old.id)
+    await seedPhotoFile(me.id, newId)
 
     const res = await replace(old.id, newId)
 
-    const url = `https://cdn.test/profile-photos/${me.id}/${newId}`
+    const url = `${PHOTO_URL_BASE}/${me.id}/${newId}`
     expect(res.statusCode).toBe(200)
-    expect(storage.remove).toHaveBeenCalledWith([`${me.id}/${old.id}`])
+    expect(photoFileExists(me.id, old.id)).toBe(false)
+    expect(photoFileExists(me.id, newId)).toBe(true)
     expect(res.json()).toEqual({ photo: { id: newId, url, position: 2 } })
     expect(await sql`select id, position from user_photos where user_id = ${me.id} order by position`).toEqual([
       { id: p0.id, position: 0 }, { id: p1.id, position: 1 }, { id: newId, position: 2 },
@@ -118,9 +116,23 @@ describe('POST /profile/me/photos/:photoId/replace', () => {
     expect((await sql`select status from reports where id = ${report.id}`)[0].status).toBe('resolved_reuploaded')
   })
 
-  it('returns 500 photo_replace_failed when the new id cannot be inserted', async () => {
+  for (const bad of ['new-photo', 123, undefined]) {
+    it(`returns 400 invalid_photo_id for a malformed newPhotoId (${String(bad)}) and keeps the old photo`, async () => {
+      const [, old] = await addPhotos(me.id, 2)
+      await seedPhotoFile(me.id, old.id)
+
+      const res = await replace(old.id, bad)
+
+      expect(res.statusCode).toBe(400)
+      expect(res.json()).toEqual({ error: 'invalid_photo_id' })
+      expect(await sql`select id, position from user_photos where id = ${old.id}`).toEqual([{ id: old.id, position: 1 }])
+      expect(photoFileExists(me.id, old.id)).toBe(true)
+    })
+  }
+
+  it('returns 500 photo_replace_failed when the new row cannot be inserted', async () => {
     const [, old] = await addPhotos(me.id, 2)
-    const res = await replace(old.id, 'new-photo')
+    const res = await withFailingWrites('user_photos', 'insert', () => replace(old.id, randomUUID()))
     expect(res.statusCode).toBe(500)
     expect(res.json()).toEqual({ error: 'photo_replace_failed' })
   })

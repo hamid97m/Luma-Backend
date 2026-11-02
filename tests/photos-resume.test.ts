@@ -1,27 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
-// Storage still goes through supabase-js; the DB part is real Postgres.
-vi.mock('../src/db.js', async (orig) => ({ ...(await orig<object>()), db: { storage: { from: vi.fn() } } }))
 vi.mock('../src/referrals/rewards.js', () => ({ maybeQualifyReferral: vi.fn() }))
 vi.mock('../src/moderation/photoAiCheck.js', () => ({ scheduleMainPhotoCheck: vi.fn() }))
 
 import { buildApp } from '../src/server.js'
-import { db } from '../src/db.js'
 import { AUTH, authAs } from './helpers/auth.js'
 import { resetDb, createUser, createPhoto, sql } from './helpers/db.js'
-import { storageMock, createReport } from './helpers/profile.js'
+import { PHOTO_URL_BASE, createReport, photoFileExists, seedPhotoFile } from './helpers/profile.js'
 
 const PHOTO_ID = '11111111-1111-1111-1111-111111111111'
 
 describe('POST /profile/me/photos/confirm — resume', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
-  let storage: ReturnType<typeof storageMock>
   beforeEach(async () => {
     await resetDb()
     app = await buildApp()
-    storage = storageMock(() => 'https://cdn/me-1/photo.jpg')
-    vi.mocked(db.storage.from).mockReturnValue(storage as any)
   })
 
   const confirm = () => app.inject({
@@ -66,14 +60,17 @@ describe('POST /profile/me/photos/confirm — resume', () => {
     const photos = []
     for (let i = 0; i < 6; i++) photos.push(await createPhoto(me.id, i))
     const oldest = photos[0]
+    await seedPhotoFile(me.id, oldest.id)
+    await seedPhotoFile(me.id, photos[1].id)
     await createReport(me.id)
 
     const res = await confirm()
 
     expect(res.statusCode).toBe(200)
-    expect(storage.remove).toHaveBeenCalledWith([`${me.id}/${oldest.id}`])
+    expect(photoFileExists(me.id, oldest.id)).toBe(false)
+    expect(photoFileExists(me.id, photos[1].id)).toBe(true)
     expect(res.json()).toEqual({
-      photo: { id: PHOTO_ID, url: 'https://cdn/me-1/photo.jpg', position: oldest.position },
+      photo: { id: PHOTO_ID, url: `${PHOTO_URL_BASE}/${me.id}/${PHOTO_ID}`, position: oldest.position },
     })
     const rows = await sql`select id, position from user_photos where user_id = ${me.id} order by position`
     expect(rows).toHaveLength(6)

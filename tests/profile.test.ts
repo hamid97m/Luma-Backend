@@ -1,32 +1,28 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
-// Storage still goes through supabase-js; the DB part is real Postgres.
-vi.mock('../src/db.js', async (orig) => ({ ...(await orig<object>()), db: { storage: { from: vi.fn() } } }))
 vi.mock('../src/referrals/rewards.js', () => ({ maybeQualifyReferral: vi.fn() }))
 vi.mock('../src/geo/resolveCity.js', () => ({ scheduleUserGeo: vi.fn() }))
 vi.mock('../src/moderation/photoAiCheck.js', () => ({ scheduleMainPhotoCheck: vi.fn() }))
 
 import { buildApp } from '../src/server.js'
-import { db } from '../src/db.js'
 import { scheduleUserGeo } from '../src/geo/resolveCity.js'
 import { scheduleMainPhotoCheck } from '../src/moderation/photoAiCheck.js'
 import { maybeQualifyReferral } from '../src/referrals/rewards.js'
 import { AUTH, authAs } from './helpers/auth.js'
 import { resetDb, createUser, createPhoto, sql } from './helpers/db.js'
-import { storageMock, withFailingWrites } from './helpers/profile.js'
+import { photoFileExists, seedPhotoFile, withFailingWrites } from './helpers/profile.js'
+import { chmod } from 'node:fs/promises'
+import { join } from 'node:path'
 
 let app: Awaited<ReturnType<typeof buildApp>>
 let me: Record<string, any>
-let storage: ReturnType<typeof storageMock>
 
 beforeEach(async () => {
   await resetDb()
   app = await buildApp()
   me = await createUser({ name: 'Ali', age: 25, bio: null, location: 'Tehran' })
   authAs(me)
-  storage = storageMock()
-  vi.mocked(db.storage.from).mockReturnValue(storage as any)
 })
 
 const userRow = async (id = me.id) => (await sql`select * from users where id = ${id}`)[0]
@@ -239,13 +235,18 @@ describe('DELETE /profile/me', () => {
       icebreaker_prompt = 'p', icebreaker_answer = 'a' where id = ${me.id}`
     const p1 = await createPhoto(me.id, 0)
     const p2 = await createPhoto(me.id, 1)
+    const other = await createUser()
+    const theirs = await createPhoto(other.id, 0)
+    for (const [u, p] of [[me, p1], [me, p2], [other, theirs]]) await seedPhotoFile(u.id, p.id)
 
     const res = await del()
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ ok: true })
-    expect([...storage.remove.mock.calls[0][0]].sort()).toEqual([`${me.id}/${p1.id}`, `${me.id}/${p2.id}`].sort())
-    expect((await sql`select count(*)::int as n from user_photos`)[0].n).toBe(0)
+    expect(photoFileExists(me.id, p1.id)).toBe(false)
+    expect(photoFileExists(me.id, p2.id)).toBe(false)
+    expect(photoFileExists(other.id, theirs.id)).toBe(true)
+    expect((await sql`select count(*)::int as n from user_photos where user_id = ${me.id}`)[0].n).toBe(0)
     expect(await userRow()).toMatchObject({
       name: '', bio: null, interests: [], location: null, geo_city: null, geo_country: null,
       icebreaker_prompt: null, icebreaker_answer: null,
@@ -256,12 +257,36 @@ describe('DELETE /profile/me', () => {
     })
   })
 
-  it('skips storage cleanup when the user has no photos', async () => {
+  it('succeeds without photos and leaves other users\' files alone', async () => {
+    const other = await createUser()
+    const theirs = await createPhoto(other.id, 0)
+    await seedPhotoFile(other.id, theirs.id)
+
     const res = await del()
 
     expect(res.statusCode).toBe(200)
-    expect(db.storage.from).not.toHaveBeenCalled()
+    expect(photoFileExists(other.id, theirs.id)).toBe(true)
     expect((await userRow()).deleted_at).not.toBeNull()
+  })
+
+  it('still deletes the photo rows and the profile when the files cannot be removed', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const p1 = await createPhoto(me.id, 0)
+    await seedPhotoFile(me.id, p1.id)
+    const userDir = join(process.env.MEDIA_DIR!, 'public', 'profile-photos', me.id)
+    await chmod(userDir, 0o500) // unlink fails with EACCES
+    let res
+    try {
+      res = await del()
+    } finally {
+      await chmod(userDir, 0o700)
+    }
+
+    expect(res.statusCode).toBe(200)
+    expect(errorSpy).toHaveBeenCalled()
+    expect((await sql`select count(*)::int as n from user_photos`)[0].n).toBe(0)
+    expect((await userRow()).deleted_at).not.toBeNull()
+    errorSpy.mockRestore()
   })
 
   it('returns 401 when not authenticated', async () => {

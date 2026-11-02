@@ -1,16 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-// Storage still goes through supabase-js; the DB part is real Postgres.
-vi.mock('../src/db.js', async (orig) => ({ ...(await orig<object>()), db: { storage: { from: vi.fn() } } }))
 vi.mock('../src/bot.js', () => ({ notifyPaused: vi.fn(), notifyFakePhotoWarning: vi.fn() }))
 
-import { db } from '../src/db.js'
 import { notifyFakePhotoWarning, notifyPaused } from '../src/bot.js'
 import {
   maybeAutoPauseForReports, maybeWarnFakePhoto, getPhotoReportThreshold, pauseForPhotoReview,
 } from '../src/moderation/autoPause.js'
 import { resetDb, createUser, createPhoto, sql } from './helpers/db.js'
-import { storageMock, createReport, withMissingTable, withFailingWrites } from './helpers/profile.js'
+import { photoFileExists, seedPhotoFile, createReport, withMissingTable, withFailingWrites } from './helpers/profile.js'
 
 const setThreshold = (n: number) => sql`update moderation_config set photo_report_threshold = ${n} where id = true`
 const pausedAt = async (id: string) => (await sql`select paused_at from users where id = ${id}`)[0].paused_at
@@ -18,11 +15,8 @@ async function addReports(userId: string, n: number, overrides: Record<string, u
   for (let i = 0; i < n; i++) await createReport(userId, overrides)
 }
 
-let storage: ReturnType<typeof storageMock>
 beforeEach(async () => {
   await resetDb()
-  storage = storageMock()
-  vi.mocked(db.storage.from).mockReturnValue(storage as any)
 })
 
 describe('getPhotoReportThreshold', () => {
@@ -43,14 +37,16 @@ describe('maybeAutoPauseForReports', () => {
     const u = await createUser({ telegram_id: 100, allows_write_to_pm: true, locale: 'ar' })
     const p1 = await createPhoto(u.id, 0)
     const p2 = await createPhoto(u.id, 1)
+    await seedPhotoFile(u.id, p1.id)
+    await seedPhotoFile(u.id, p2.id)
     await setThreshold(3)
     await addReports(u.id, 3, { reason: 'inappropriate' })
 
     expect(await maybeAutoPauseForReports(u.id)).toBe(true)
     expect(await pausedAt(u.id)).not.toBeNull()
     expect(notifyPaused).toHaveBeenCalledWith(100, 'ar')
-    expect(db.storage.from).toHaveBeenCalledWith('profile-photos')
-    expect([...storage.remove.mock.calls[0][0]].sort()).toEqual([`${u.id}/${p1.id}`, `${u.id}/${p2.id}`].sort())
+    expect(photoFileExists(u.id, p1.id)).toBe(false)
+    expect(photoFileExists(u.id, p2.id)).toBe(false)
     expect((await sql`select count(*)::int as n from user_photos`)[0].n).toBe(0)
   })
 
@@ -81,7 +77,8 @@ describe('maybeAutoPauseForReports', () => {
   it('is a no-op when the user is already paused/banned (update matched no row)', async () => {
     const paused = await createUser({ paused_at: '2026-10-01T00:00:00Z' })
     const banned = await createUser({ banned_at: '2026-10-01T00:00:00Z' })
-    await createPhoto(banned.id, 0)
+    const bannedPhoto = await createPhoto(banned.id, 0)
+    await seedPhotoFile(banned.id, bannedPhoto.id)
     await addReports(paused.id, 5)
     await addReports(banned.id, 5)
     expect(await maybeAutoPauseForReports(paused.id)).toBe(false)
@@ -89,7 +86,8 @@ describe('maybeAutoPauseForReports', () => {
     expect(await pausedAt(paused.id)).toBe('2026-10-01T00:00:00.000Z')
     expect(await pausedAt(banned.id)).toBeNull()
     expect(notifyPaused).not.toHaveBeenCalled()
-    expect(storage.remove).not.toHaveBeenCalled()
+    expect(photoFileExists(banned.id, bannedPhoto.id)).toBe(true)
+    expect((await sql`select count(*)::int as n from user_photos where user_id = ${banned.id}`)[0].n).toBe(1)
   })
 
   it('pauses but skips the DM when the user blocked bot PMs', async () => {

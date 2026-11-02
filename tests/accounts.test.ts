@@ -44,6 +44,17 @@ describe('signIn', () => {
     expect((await sql`select count(*)::int as n from users`)[0].n).toBe(1)
   })
 
+  it('email-matched user already tied to another Google account → 401 google_account_mismatch', async () => {
+    const u = await createUser({ telegram_id: null, email: 'ali@gmail.com', google_sub: 'g-old' })
+
+    const res = await signIn(google({ sub: 'g-new' }))
+
+    expect(res).toEqual({ ok: false, status: 401, body: { error: 'google_account_mismatch' } })
+    // No re-link, no new account.
+    const rows = await sql`select id, google_sub from users`
+    expect(rows).toEqual([{ id: u.id, google_sub: 'g-old' }])
+  })
+
   it('banned email-matched user → ok:false 401 account_banned', async () => {
     await createUser({ telegram_id: null, email: 'ali@gmail.com', banned_at: '2026-08-04T00:00:00Z' })
 

@@ -53,8 +53,12 @@ export async function loadAuthUser(userId: string): Promise<AuthUser | null> {
 /** Find the account for an identity. A failed lookup is treated as "no such
  *  user" (the insert then fails on the unique identity and answers 500) — kept
  *  from the original /auth/verify. `attach` holds identity columns to write
- *  onto the matched row (a Google sub on an account found by email). */
-async function findAccount(identity: Identity): Promise<{ row?: AccountRow; attach: Record<string, unknown> }> {
+ *  onto the matched row (a Google sub on an account found by email).
+ *  `mismatch` = the email belongs to an account tied to a different Google
+ *  account (e.g. a recycled address) — never sign in or re-link it. */
+async function findAccount(
+  identity: Identity,
+): Promise<{ row?: AccountRow; attach: Record<string, unknown>; mismatch?: boolean }> {
   try {
     if (identity.kind === 'telegram') {
       const [row] = await sql<AccountRow[]>`
@@ -66,10 +70,12 @@ async function findAccount(identity: Identity): Promise<{ row?: AccountRow; atta
       select id, name, age, gender, looking_for, bio, deleted_at, banned_at, locale
       from users where google_sub = ${identity.sub}`
     if (bySub) return { row: bySub, attach: {} }
-    const [byEmail] = await sql<AccountRow[]>`
-      select id, name, age, gender, looking_for, bio, deleted_at, banned_at, locale
+    const [byEmail] = await sql<(AccountRow & { google_sub: string | null })[]>`
+      select id, name, age, gender, looking_for, bio, deleted_at, banned_at, locale, google_sub
       from users where email = ${normalizeEmail(identity.email)}`
-    return { row: byEmail, attach: byEmail ? { google_sub: identity.sub } : {} }
+    if (!byEmail) return { attach: {} }
+    if (byEmail.google_sub !== null) return { attach: {}, mismatch: true }
+    return { row: byEmail, attach: { google_sub: identity.sub } }
   } catch {
     return { attach: {} }
   }
@@ -96,7 +102,9 @@ export async function signIn(identity: Identity): Promise<SignInResult> {
       ? { allows_write_to_pm: identity.tgUser.allows_write_to_pm }
       : {}
 
-  const { row: existing, attach } = await findAccount(identity)
+  const { row: existing, attach, mismatch } = await findAccount(identity)
+
+  if (mismatch) return { ok: false, status: 401, body: { error: 'google_account_mismatch' } }
 
   if (existing?.banned_at) {
     // botUsername lets the Blocked screen deep-link into the support bot chat.

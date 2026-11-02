@@ -1,7 +1,7 @@
 import { createHash } from 'crypto'
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import cors from '@fastify/cors'
-import rateLimit from '@fastify/rate-limit'
+import rateLimit, { type errorResponseBuilderContext } from '@fastify/rate-limit'
 import { verifyInitData } from './auth.js'
 import { verifySessionToken } from './session.js'
 import { getBotUsername } from './bot.js'
@@ -26,6 +26,8 @@ import { referralRoutes } from './routes/referrals.js'
 import { adminRoutes } from './routes/admin/index.js'
 import { tonpaysWebhookRoutes } from './routes/tonpaysWebhook.js'
 import { mediaRoutes } from './routes/media.js'
+import { eventsRoutes } from './realtime/eventsRoute.js'
+import { registerHttpMetrics } from './metrics.js'
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -65,6 +67,8 @@ export async function buildApp(): Promise<FastifyInstance> {
     throw new Error('WEB_URL environment variable is required in production')
   }
 
+  registerHttpMetrics(app)
+
   // EXTRA_CORS_ORIGINS (comma-separated): e.g. a previous frontend host during a
   // migration, so Mini App links in old bot messages keep working.
   const corsOrigins = [
@@ -89,7 +93,15 @@ export async function buildApp(): Promise<FastifyInstance> {
       // (constant "Bearer eyJ..." prefix) and let attackers mint fresh buckets.
       return auth ? createHash('sha256').update(auth).digest('hex') : req.ip
     },
-    errorResponseBuilder: () => ({ error: 'rate_limited' }),
+    // The plugin throws what this returns and takes the HTTP status from its
+    // `.statusCode` (429, or 403 on ban); without it every limit hit was a 500.
+    // Non-enumerable so it stays out of the JSON body (same as admin/auth.ts).
+    errorResponseBuilder: (_req: FastifyRequest, context: errorResponseBuilderContext) => {
+      const body = { error: 'rate_limited' }
+      const statusCode = (context as unknown as { statusCode: number }).statusCode
+      Object.defineProperty(body, 'statusCode', { value: statusCode, enumerable: false })
+      return body
+    },
   })
 
   // Auth middleware — skips the sign-in endpoints and /health
@@ -171,6 +183,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(adminRoutes, { prefix: '/admin' })
   await app.register(tonpaysWebhookRoutes)
   await app.register(mediaRoutes)
+  await app.register(eventsRoutes())
 
   return app
 }

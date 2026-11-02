@@ -7,8 +7,10 @@ import { getLastFakeLikerRunAt } from './jobs/fakeLikerConfig.js'
 import { runPurchaseMessageJob } from './jobs/purchaseMessage.js'
 import { runTonPaysSweepJob } from './jobs/tonpaysSweep.js'
 import { runLikeRevealJob } from './jobs/likeReveal.js'
+import { trackJob, startMetricsServer } from './metrics.js'
 import { msUntilNextTehranHour } from './likes/revealPick.js'
 import { cleanupInterruptedBroadcasts } from './messaging/broadcast.js'
+import { startChatListener } from './realtime/listener.js'
 
 const FAKE_LIKER_FIRST_RUN_DELAY_MS = 60_000
 const FAKE_LIKER_INTERVAL_MS = 6 * 60 * 60 * 1000
@@ -31,6 +33,8 @@ function resolvePublicUrl(): string {
 }
 
 const app = await buildApp()
+// Real-time chat (GET /events) in every mode — standby still serves the API.
+startChatListener(app.log)
 // Any broadcast still 'running' was orphaned by a prior restart — mark it interrupted.
 await cleanupInterruptedBroadcasts().catch((err) =>
   console.error('[broadcast] interrupted-cleanup failed:', (err as Error).message))
@@ -45,7 +49,7 @@ if (isLive) {
 
   const runFakeLikerSafely = async () => {
     try {
-      await runFakeLikerJob('schedule', app.log)
+      await trackJob('fake_liker', () => runFakeLikerJob('schedule', app.log))
     } catch (err) {
       app.log.warn({ err }, 'fake liker: scheduled run failed')
     }
@@ -77,7 +81,7 @@ if (isLive) {
   const schedulePurchaseMessageRun = (delayMs: number) => {
     setTimeout(async () => {
       try {
-        await runPurchaseMessageJob({ log: app.log })
+        await trackJob('purchase_message', () => runPurchaseMessageJob({ log: app.log }))
       } catch (err) {
         app.log.warn({ err }, 'purchase-message: scheduled run failed')
       }
@@ -93,7 +97,7 @@ if (isLive) {
   const scheduleTonPaysSweepRun = (delayMs: number) => {
     setTimeout(async () => {
       try {
-        await runTonPaysSweepJob({ log: app.log })
+        await trackJob('tonpays_sweep', () => runTonPaysSweepJob({ log: app.log }))
       } catch (err) {
         app.log.warn({ err }, 'tonpays sweep: scheduled run failed')
       }
@@ -107,7 +111,7 @@ if (isLive) {
   const scheduleLikeReveal = (delayMs: number) => {
     setTimeout(async () => {
       try {
-        await runLikeRevealJob()
+        await trackJob('like_reveal', () => runLikeRevealJob())
       } catch (err) {
         app.log.warn({ err }, 'like-reveal: scheduled run failed')
       }
@@ -122,6 +126,7 @@ if (isLive) {
   console.log('[dev] Bot disabled (set NODE_ENV=production and a real BOT_TOKEN to enable)')
 }
 await app.listen({ port: Number(process.env.PORT ?? 3000), host: '0.0.0.0' })
+if (process.env.METRICS_PORT) startMetricsServer(Number(process.env.METRICS_PORT), app.log)
 
 if (isLive) {
   try {

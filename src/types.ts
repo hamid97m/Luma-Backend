@@ -1,6 +1,8 @@
 export interface DBUser {
   id: string
-  telegram_id: number
+  telegram_id: number | null
+  email: string | null
+  google_sub: string | null
   username: string | null
   name: string
   age: number

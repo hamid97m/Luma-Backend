@@ -60,7 +60,14 @@ export async function buildApp(): Promise<FastifyInstance> {
     throw new Error('WEB_URL environment variable is required in production')
   }
 
-  const corsOrigins = [process.env.WEB_URL, process.env.ADMIN_WEB_URL]
+  // EXTRA_CORS_ORIGINS (comma-separated): e.g. the old Vercel frontend during a
+  // migration, so Mini App links in old bot messages keep working.
+  const corsOrigins = [
+    process.env.WEB_URL,
+    process.env.ADMIN_WEB_URL,
+    ...(process.env.EXTRA_CORS_ORIGINS ?? '').split(','),
+  ]
+    .map((o) => o?.trim().replace(/\/+$/, ''))
     .filter((o): o is string => Boolean(o))
 
   await app.register(cors, {

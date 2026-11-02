@@ -97,7 +97,7 @@ export async function resolveCity(raw: string): Promise<Geo> {
   if (!key) return NONE
 
   // A failed cache read counts as a miss, and a failed cache write is ignored
-  // (as with supabase-js, which reported both without throwing).
+  // (the cache is an optimisation, never fatal).
   const [cached] = await sql<{ city: string | null; country: string | null }[]>`
     select city, country from city_lookups where key = ${key}`.catch(() => [])
   if (cached) return { city: cached.city ?? null, country: cached.country ?? null }

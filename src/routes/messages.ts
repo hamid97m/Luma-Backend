@@ -35,7 +35,7 @@ function participant(row: Record<string, any>, prefix: 'u1_' | 'u2_'): MatchPart
 }
 
 async function getUsableMatch(matchId: string, userId: string): Promise<UsableMatch | null> {
-  // A malformed id can't be a match — PostgREST answered "no rows"; Postgres would throw.
+  // A malformed id can't be a match — answer "no rows" (Postgres would throw on the cast).
   if (!isUuid(matchId)) return null
 
   let match: UsableMatch | undefined
@@ -158,7 +158,7 @@ export async function messagesRoutes(app: FastifyInstance) {
     }
 
     if (replyToMessageId) {
-      // Malformed or failed lookup → no parent, same as PostgREST's "no rows".
+      // Malformed or failed lookup → no parent (treated as "no rows").
       let parent: unknown
       if (isUuid(replyToMessageId)) {
         try {
@@ -223,7 +223,7 @@ export async function messagesRoutes(app: FastifyInstance) {
     // Ownership is enforced atomically by the filter — a non-sender can never
     // match a row, so there is no fetch-then-check race. Only text is
     // editable; gift and icebreaker rows fall through to 404.
-    // A malformed message id can't match a row → 404, as PostgREST did.
+    // A malformed message id can't match a row → 404.
     if (!isUuid(messageId)) return reply.status(404).send({ error: 'message_not_found' })
 
     let message: any

@@ -886,7 +886,7 @@ describe('runFakeLikerJob — run row', () => {
   })
 })
 
-describe('runFakeLikerJob — error handling (supabase-js resolves, never throws)', () => {
+describe('runFakeLikerJob — error handling (DB errors are counted/logged, never thrown)', () => {
   const realOpts = { looking_for: 'men', created_at: OLD }
 
   it('seeds counters via per-fake count(*) queries, not a raw-row fetch', async () => {
@@ -989,7 +989,7 @@ describe('runFakeLikerJob — error handling (supabase-js resolves, never throws
     expect((await logs.inserts()).messages).toEqual([{ match_id: 'm1', sender_id: 'f1', body: SALAM }])
   })
 
-  it('warns when the run-row insert errors (supabase-js resolves it, not throws)', async () => {
+  it('warns when the run-row insert errors (logged, not thrown)', async () => {
     const store: Store = {
       fake_liker_config: enabledConfig(),
       users: [mkFake('f1')],

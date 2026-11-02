@@ -62,7 +62,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
     // candidate query below applies them as NOT EXISTS / EXISTS filters itself.
     const [viewer, swipeLimit, directChat, hiddenRead] = await Promise.all([
       // Viewer's preference, gender, city/country and app language. A read error
-      // answered 404 before (supabase .single() → data null); keep that.
+      // answers 404 (treated as a missing viewer).
       sql<ViewerRow[]>`
         select looking_for, gender, location, geo_city, geo_country, locale
         from users where id = ${userId}`

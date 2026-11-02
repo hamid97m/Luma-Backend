@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { db } from '../src/db.js'
+import { sql } from '../src/db.js'
 import { updateUserGeo } from '../src/geo/resolveCity.js'
 
 // Resolves the hidden geo_city/geo_country for every user that has a typed
@@ -14,28 +14,20 @@ if (!process.env.DEEPSEEK_API_KEY) {
 // One-off catch-up gets a bigger ceiling than the live server (~$0.50 max).
 process.env.DEEPSEEK_DAILY_LIMIT ??= '5000'
 
-// PostgREST caps each response (1000 rows on Supabase), so collect the full
-// list page by page before any row is updated.
-const PAGE = 1000
 const CONCURRENCY = 5
 
-const todo: Array<{ id: string; location: string }> = []
-for (let from = 0; ; from += PAGE) {
-  const { data, error } = await db
-    .from('users')
-    .select('id, location')
-    .not('location', 'is', null)
-    .neq('location', '')
-    .is('geo_country', null)
-    .is('deleted_at', null)
-    .order('id', { ascending: true })
-    .range(from, from + PAGE - 1)
-  if (error) {
-    console.error('query failed:', error.message)
-    process.exit(1)
-  }
-  todo.push(...(data ?? []))
-  if (!data || data.length < PAGE) break
+// Collect the full list before any row is updated.
+let todo: Array<{ id: string; location: string }>
+try {
+  todo = await sql<Array<{ id: string; location: string }>>`
+    select id, location from users
+    where location is not null and location <> ''
+      and geo_country is null and deleted_at is null
+    order by id asc`
+} catch (err) {
+  console.error('query failed:', (err as Error).message)
+  await sql.end()
+  process.exit(1)
 }
 console.log(`${todo.length} users to resolve`)
 
@@ -62,3 +54,4 @@ async function worker() {
 
 await Promise.all(Array.from({ length: CONCURRENCY }, worker))
 console.log(`done: ${resolved} resolved, ${unrecognized} unrecognized, ${failed} failed`)
+await sql.end()

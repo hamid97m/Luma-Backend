@@ -45,7 +45,7 @@ export async function directChatRoutes(app: FastifyInstance) {
     const { targetUserId } = req.body as { targetUserId?: string }
     if (!targetUserId || targetUserId === req.userId) return reply.status(400).send({ error: 'invalid_target' })
 
-    // Malformed id or failed read → "not found", as PostgREST answered.
+    // Malformed id or failed read → "not found".
     let target: { id: string; name: string; telegram_id: number; username: string | null; deleted_at: string | null } | undefined
     if (isUuid(targetUserId)) {
       try {

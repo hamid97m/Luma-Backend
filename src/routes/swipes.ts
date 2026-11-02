@@ -26,7 +26,7 @@ export async function swipesRoutes(app: FastifyInstance) {
     // upsert would otherwise record a like against a ghost, which can create
     // an invisible match and DM an account that no longer exists. Checked
     // before the swipe limit so an invalid target never burns quota.
-    // A non-uuid id can't be a user (PostgREST answered "no rows"; Postgres would throw).
+    // A non-uuid id can't be a user: answer "no rows" (Postgres would throw on the cast).
     const [target] = isUuid(targetUserId)
       ? await sql<{ id: string; deleted_at: string | null }[]>`
           select id, deleted_at from users where id = ${targetUserId}`
@@ -51,7 +51,7 @@ export async function swipesRoutes(app: FastifyInstance) {
         on conflict (swiper_id, swiped_id)
         do update set direction = excluded.direction, created_at = excluded.created_at`
     } catch {
-      // e.g. an invalid direction (enum cast) — PostgREST returned an error here too.
+      // e.g. an invalid direction (enum cast).
       return reply.status(500).send({ error: 'swipe_failed' })
     }
 

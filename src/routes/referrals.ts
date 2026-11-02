@@ -16,7 +16,7 @@ export async function referralRoutes(app: FastifyInstance) {
 
     const [code, totals, rewards] = await Promise.all([
       ensureReferralCode(req.userId),
-      // A failed read rendered as empty before (supabase-js never threw).
+      // A failed read renders as empty on purpose (never fatal).
       sql<{ qualified_at: string | null }[]>`
         select qualified_at from referrals where referrer_id = ${req.userId} limit 1000`.catch(() => []),
       sql<{ milestone: number }[]>`

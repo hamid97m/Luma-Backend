@@ -77,7 +77,7 @@ export async function adminPhotoChecksRoutes(app: FastifyInstance) {
     const paths = rows.map((r) => r.evidence_path).filter(Boolean) as string[]
     let signed: Record<string, string> = {}
     if (paths.length) {
-      // Unsafe/odd paths just get no URL (Supabase omitted failed entries too).
+      // Unsafe/odd paths just get no URL (the entry is omitted).
       signed = Object.fromEntries(
         paths.flatMap((p) => {
           try {

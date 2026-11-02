@@ -3,7 +3,7 @@ import type { Transformer } from 'grammy'
 /**
  * APP_MODE=standby runs the HTTP API only: no Telegram webhook registration, no
  * scheduled jobs, and no outbound bot calls that reach users or change the bot.
- * Used on the new server before cutover, while the old deployment still owns
+ * Used for a second server (staging, or a replacement being prepared) while another deployment owns
  * the bot. Anything else (unset, "live") is normal operation.
  */
 export function isStandby(): boolean {

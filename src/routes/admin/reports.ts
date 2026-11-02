@@ -102,7 +102,7 @@ export async function adminReportsRoutes(app: FastifyInstance) {
   app.get('/reports/user/:userId', async (req, reply) => {
     const { userId } = req.params as { userId: string }
 
-    // Malformed id or a failed lookup → 404, as PostgREST's `data: null` did.
+    // Malformed id or a failed lookup → 404.
     let user: any
     try {
       ;[user] = isUuid(userId)
@@ -157,7 +157,7 @@ export async function adminReportsRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'invalid_action' })
     }
 
-    // A malformed id matches no user and no reports: nothing to do (PostgREST "no rows").
+    // A malformed id matches no user and no reports: nothing to do.
     if (!isUuid(userId)) return { ok: true }
 
     const now = new Date().toISOString()

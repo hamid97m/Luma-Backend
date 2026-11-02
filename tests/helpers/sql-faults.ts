@@ -1,8 +1,7 @@
 /**
  * Query-level fault injection for real-DB tests. Wraps the postgres.js `sql`
  * tag so a test can make specific queries reject (matched on their SQL text and
- * bound values) while everything else runs against the real database — the
- * postgres.js counterpart of the old "supabase resolves { error }" mocks.
+ * bound values) while everything else runs against the real database.
  *
  * Usage (this module must not import src/db.js — it is loaded inside the mock):
  *   vi.mock('../src/db.js', async (orig) => {

@@ -44,8 +44,8 @@ export function resolvePurchaseMessage(
 
 /** Reads the purchase_message_config singleton. Never throws: a missing
  * table/row or any query error is treated as "not configured" (null), so the
- * job just no-ops rather than crashing the scheduler. `_dbClient` is a leftover
- * of the supabase-js era (callers passed the client in) and is ignored. */
+ * job just no-ops rather than crashing the scheduler. `_dbClient` is a legacy
+ * parameter (callers used to pass a DB client in) and is ignored. */
 export async function getPurchaseMessageConfig(_dbClient?: unknown): Promise<PurchaseMessageConfig | null> {
   try {
     const [data] = await sql`

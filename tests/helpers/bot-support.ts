@@ -3,7 +3,7 @@ import { sql } from '../../src/db.js'
 /**
  * Failure injection for real-DB tests (bot / support / broadcasts / fake liker /
  * admin premium). Installs a statement-level trigger that makes every `op` on
- * `table` raise, standing in for the old "supabase returned { error }" mocks.
+ * `table` raise, simulating DB errors.
  * Each test file has its own database, so call `clearFailures()` in `afterEach`
  * (`resetDb()` truncates rows but keeps triggers).
  */

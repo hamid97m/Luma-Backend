@@ -27,7 +27,7 @@ export async function createTicket(userId: string, rawBody: string): Promise<Cre
   if (!body) return { ok: false, error: 'empty_body' }
   if (body.length > MAX_TICKET_BODY) return { ok: false, error: 'body_too_long' }
 
-  // A failed count used to read as 0 (supabase-js never threw) — keep that.
+  // A failed count reads as 0 on purpose (never blocks opening a ticket).
   const [{ count }] = await sql<{ count: number }[]>`
     select count(*)::int as count from support_tickets
     where user_id = ${userId} and status = 'open'`.catch(() => [{ count: 0 }])

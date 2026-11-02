@@ -82,7 +82,7 @@ describe('broadcast audience', () => {
     expect(await audience({ locales: ['de'] })).toEqual([])
   })
 
-  it('returns more than 1000 targets in one call (no PostgREST page cap)', async () => {
+  it('returns more than 1000 targets in one call (no page cap)', async () => {
       await sql`
       insert into users (telegram_id, name, age, gender, looking_for, account_status)
       select 5000000 + g, 'bulk', 28, 'man', 'women', 'active' from generate_series(1, 1005) g`

@@ -3,14 +3,14 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 /**
- * File storage on the server's own disk (replaces Supabase Storage).
+ * File storage on the server's own disk.
  *
  *   MEDIA_DIR/public/<bucket>/<path>   served by nginx at MEDIA_PUBLIC_URL/<bucket>/<path>
  *   MEDIA_DIR/private/<bucket>/<path>  only via short-lived signed URLs (GET /media-private/:token)
  *
  * Clients upload with a raw PUT to a signed URL (PUT /media-upload/:token, see
- * routes/media.ts) — the same request shape Supabase's signed upload URLs took,
- * so the frontend and admin panel need no change. Object paths match the old
+ * routes/media.ts) — the same request shape the clients already use, so the
+ * frontend and admin panel need no change. Object paths match the old
  * bucket paths (`<userId>/<photoId>`, `seed/<uuid>.jpg`), so migrated files keep
  * their names.
  */
@@ -20,7 +20,7 @@ export type Bucket = 'profile-photos' | 'photo-ai-evidence'
 const PUBLIC_BUCKETS: ReadonlySet<Bucket> = new Set(['profile-photos'])
 const BUCKETS: ReadonlySet<string> = new Set<Bucket>(['profile-photos', 'photo-ai-evidence'])
 
-const UPLOAD_TTL_S = 2 * 60 * 60 // Supabase signed upload URLs lived 2h
+const UPLOAD_TTL_S = 2 * 60 * 60 // signed upload URLs live 2h
 
 export function isPublicBucket(bucket: Bucket): boolean {
   return PUBLIC_BUCKETS.has(bucket)
@@ -78,7 +78,7 @@ export async function download(bucket: Bucket, path: string): Promise<Buffer | n
   }
 }
 
-/** Delete objects; missing files are fine (Supabase's remove was idempotent too). */
+/** Delete objects; missing files are fine (idempotent). */
 export async function remove(bucket: Bucket, paths: string[]): Promise<void> {
   await Promise.all(
     paths.map(async (p) => {

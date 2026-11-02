@@ -1,5 +1,5 @@
 // Awaitable Proxy: any method chain returns itself; `await chain` resolves
-// to `result`. Lets one mock serve arbitrary supabase-js query chains.
+// to `result`. Lets one mock serve arbitrary chained-method query builders.
 export function chainable(result: unknown, log?: Array<{ method: string; args: unknown[] }>): any {
   const proxy: any = new Proxy(function () {} as any, {
     get(_target, prop) {

@@ -91,7 +91,7 @@ export async function maybeAutoPauseForReports(reportedUserId: string): Promise<
 export async function pauseForPhotoReview(userId: string): Promise<boolean> {
   // The update only matches an active, non-banned, not-already-paused row,
   // so concurrent callers can't double-pause or double-notify.
-  // A failed write reads as "not paused" (false), as with supabase-js.
+  // A failed write reads as "not paused" (false) — never fatal.
   const [data] = await sql<{ telegram_id: number; allows_write_to_pm: boolean | null; locale: Locale | null }[]>`
     update users set paused_at = ${new Date().toISOString()}
     where id = ${userId} and paused_at is null and banned_at is null

@@ -68,7 +68,7 @@ export async function captureReferralAttribution(
     if (!code) return
     const [referrer] = await sql<{ id: string }[]>`select id from users where referral_code = ${code}`
     if (!referrer || referrer.id === newUserId) return
-    // Each write was independent and its error ignored (supabase-js never threw): a failed
+    // Each write is independent and its error is ignored on purpose: a failed
     // step must not skip the ones after it.
     await sql`update users set referred_by = ${referrer.id} where id = ${newUserId}`.catch(() => {})
     await sql`insert into referrals (referrer_id, referred_id) values (${referrer.id}, ${newUserId})`.catch(() => {})

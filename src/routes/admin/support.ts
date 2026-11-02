@@ -165,7 +165,7 @@ export async function adminSupportRoutes(app: FastifyInstance) {
 
   app.post('/support/tickets/:id/close', async (req, reply) => {
     const { id } = req.params as { id: string }
-    // A malformed id matches no ticket: a no-op update, like PostgREST's "no rows".
+    // A malformed id matches no ticket: a no-op update.
     if (isUuid(id)) {
       try {
         await sql`

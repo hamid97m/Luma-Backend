@@ -21,16 +21,11 @@ const TONPAYS_SWEEP_FIRST_RUN_DELAY_MS = 120_000
 const TONPAYS_SWEEP_INTERVAL_MS = 10 * 60 * 1000
 
 // The bot's own public base URL — where Telegram POSTs webhook updates.
-// PUBLIC_URL wins; otherwise fall back to the host platform's injected value.
+// Required in live mode.
 function resolvePublicUrl(): string {
-  const url =
-    process.env.PUBLIC_URL ||
-    process.env.RENDER_EXTERNAL_URL ||
-    (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : undefined)
+  const url = process.env.PUBLIC_URL
   if (!url) {
-    throw new Error(
-      'PUBLIC_URL (or RENDER_EXTERNAL_URL / RAILWAY_PUBLIC_DOMAIN) is required to register the Telegram webhook',
-    )
+    throw new Error('PUBLIC_URL is required to register the Telegram webhook')
   }
   return url
 }
@@ -40,7 +35,7 @@ const app = await buildApp()
 await cleanupInterruptedBroadcasts().catch((err) =>
   console.error('[broadcast] interrupted-cleanup failed:', (err as Error).message))
 
-// Standby (new server before cutover): API only — no webhook, no scheduled jobs.
+// Standby (a server that must not own the bot): API only — no webhook, no scheduled jobs.
 // The live deployment keeps the bot until APP_MODE is switched to live.
 const isLive = process.env.NODE_ENV === 'production' && !isStandby()
 

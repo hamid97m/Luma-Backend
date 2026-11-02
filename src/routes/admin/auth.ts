@@ -36,9 +36,8 @@ export async function adminAuthRoutes(app: FastifyInstance) {
     const { username, password } = (req.body ?? {}) as { username?: string; password?: string }
     if (!username || !password) return reply.status(400).send({ error: 'missing_credentials' })
 
-    // A lookup failure answers like an unknown username (supabase-js returned
-    // `data: null` on error). String() mirrors PostgREST's query-string coercion
-    // for a non-string username.
+    // A lookup failure answers like an unknown username (never reveals a DB
+    // error). String() coerces a non-string username.
     let admin: { id: string; username: string; password_hash: string } | undefined
     try {
       ;[admin] = await sql<{ id: string; username: string; password_hash: string }[]>`

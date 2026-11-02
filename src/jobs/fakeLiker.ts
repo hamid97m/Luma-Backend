@@ -56,7 +56,7 @@ interface Fake {
   counter: number
 }
 
-/** supabase-js-style result for a query: postgres.js throws, but this job's
+/** `{ data, error }` result for a query: postgres.js throws, but this job's
  * per-step error handling (count it, log it, carry on) is written against
  * `{ data, error }`, so keep that shape instead of nesting try/catch everywhere. */
 async function attempt<T>(q: PromiseLike<T>): Promise<{ data: T; error: null } | { data: null; error: any }> {
@@ -236,8 +236,8 @@ export async function runFakeLikerJob(
 
     // --- Seed per-fake like counters from history (for load balancing) ---
     // Per-fake head counts, not a raw-row fetch: an unbounded `select` over every fake
-    // like truncates at PostgREST's max-rows cap (~1000) once fakes accumulate that many
-    // cumulative likes, skewing balancing. The pool is small (~tens), so per-fake is cheap.
+    // like grows without bound as fakes accumulate cumulative likes. The pool is small
+    // (~tens), so per-fake is cheap.
     const counters: Record<string, number> = {}
     for (const f of (pool ?? []) as Array<{ id: string }>) {
       const { data: cntRows, error: cntErr } = await attempt(sql<{ count: number }[]>`
@@ -294,7 +294,7 @@ export async function runFakeLikerJob(
       let inScanned = 0
       let inOffset = 0
       while (inScanned < SCAN_CAP) {
-        // `desc nulls first` = PostgREST's ordering (created_at is nullable).
+        // `desc nulls first`: rows with no created_at come first (it is nullable).
         const { data: batch, error: inErr } = await attempt(sql`
           select swiper_id, swiped_id, created_at from swipes
           where swiped_id = any(${fakeIds}::uuid[]) and direction = 'like'
@@ -361,7 +361,7 @@ export async function runFakeLikerJob(
         )
       }
 
-      // A capped `.in()` (≤ maxTargetsPerRun ids) stays under PostgREST's max-rows cap.
+      // The id list is capped (≤ maxTargetsPerRun ids), keeping the lookup small.
       const slice = leads.slice(0, remainingBudget)
       if (slice.length > 0) {
         const realIds = [...new Set(slice.map((p) => p.realId))]
@@ -430,10 +430,10 @@ export async function runFakeLikerJob(
       scanned += rows.length
 
       const ids = rows.map((r) => r.id)
-      // Page the received-like lookup fully: a single unbounded `.in()` truncates at
-      // PostgREST's max-rows cap, and on truncation/error the batch would look like it has
-      // zero received likes (fakes would then like already-liked users). On error we skip
-      // the whole batch rather than silently treat it as zero.
+      // Page the received-like lookup fully, keeping each query bounded. On a partial
+      // result/error the batch would look like it has zero received likes (fakes would
+      // then like already-liked users), so on error we skip the whole batch rather than
+      // silently treat it as zero.
       const likedSet = new Set<string>()
       let likedOffset = 0
       let likedFailed = false

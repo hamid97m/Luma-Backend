@@ -97,7 +97,7 @@ describe('GET /admin/users', () => {
     expect(names(await list('?query=' + encodeURIComponent('  sara  ahmadi ')))).toEqual(['Sara Ahmadi'])
   })
 
-  it('keeps % and _ (and PostgREST *) as wildcards in the search term', async () => {
+  it('keeps % and _ (and *) as wildcards in the search term', async () => {
     await createUser({ name: 'Sara' })
     await createUser({ name: 'Sima' })
     expect(names(await list('?query=' + encodeURIComponent('s%a')))).toEqual(['Sara', 'Sima'])

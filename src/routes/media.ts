@@ -12,7 +12,7 @@ const MAX_UPLOAD_BYTES = 15 * 1024 * 1024 // matches nginx client_max_body_size
  * signed token is the credential.
  */
 export async function mediaRoutes(app: FastifyInstance) {
-  // Clients PUT the raw image (Content-Type: image/jpeg), like Supabase signed uploads.
+  // Clients PUT the raw image (Content-Type: image/jpeg) — the request shape they already use.
   for (const type of [/^image\//, 'application/octet-stream']) {
     app.addContentTypeParser(type, { parseAs: 'buffer', bodyLimit: MAX_UPLOAD_BYTES }, (_req, body, done) => done(null, body))
   }

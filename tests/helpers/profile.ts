@@ -27,7 +27,7 @@ export async function seedPhotoFile(userId: string, photoId: string, bytes: Uint
 
 /**
  * Run `fn` while every `op` on `table` fails inside Postgres (a BEFORE trigger
- * that raises). Simulates the DB errors the supabase-js mocks used to return.
+ * that raises). Simulates DB errors.
  * Row-level: only fires when the statement actually touches a row.
  */
 export async function withFailingWrites<T>(

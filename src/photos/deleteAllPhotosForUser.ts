@@ -9,8 +9,8 @@ export async function deleteAllPhotosForUser(userId: string): Promise<void> {
   try {
     const photos = await sql<{ id: string }[]>`select id from user_photos where user_id = ${userId}`
     if (!photos.length) return
-    // A failed file delete must not keep the rows (supabase-js returned the error
-    // instead of throwing, so the rows were always deleted): log and carry on.
+    // A failed file delete must not keep the rows (an orphaned file is harmless):
+    // log and carry on.
     await storage.remove('profile-photos', photos.map((p) => `${userId}/${p.id}`)).catch((err) => {
       console.error('[moderation] deleteAllPhotosForUser file delete failed:', (err as Error)?.message ?? err)
     })

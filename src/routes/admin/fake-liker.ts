@@ -65,9 +65,8 @@ export async function adminFakeLikerRoutes(app: FastifyInstance) {
     }
 
     // Aggregated server-side (not fetched-and-summed client-side): fake_liker_runs
-    // grows unbounded over time and an unordered unbounded `select` would silently
-    // truncate at PostgREST's max-rows cap, corrupting totals/lastRunAt once the
-    // table outgrows it.
+    // grows unbounded over time, so summing rows in the app would get slower
+    // and heavier as the table grows.
     let totalsRow: any
     try {
       ;[totalsRow] = await sql`select * from fake_liker_run_totals()`

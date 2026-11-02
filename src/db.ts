@@ -4,8 +4,7 @@ import postgres from 'postgres'
  * Plain Postgres client (postgres.js). Tagged templates are parameterised by
  * construction: ``sql`select * from users where id = ${id}` ``.
  *
- * Result types mirror what supabase-js/PostgREST returned, so callers that
- * moved over keep the same shapes:
+ * Result types are normalised to JSON-friendly shapes the routes return as-is:
  *   - timestamptz / timestamp → ISO string ("2026-11-02T17:32:01.773Z")
  *   - date                    → "YYYY-MM-DD" string
  *   - int8 (telegram_id, count(*)) → number (all our values are < 2^53)
@@ -43,14 +42,14 @@ export type Sql = typeof sql
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-/** PostgREST answered "no rows" for a malformed uuid filter; Postgres throws
- *  22P02 instead. Guard client-supplied ids with this to keep 404s as 404s. */
+/** Postgres throws 22P02 for a malformed uuid. Guard client-supplied ids with
+ *  this so a bad id answers "no rows" (404) instead of a 500. */
 export function isUuid(value: unknown): value is string {
   return typeof value === 'string' && UUID_RE.test(value)
 }
 
-/** Drop keys whose value is `undefined` — PostgREST silently ignored them (JSON
- *  has no undefined), postgres.js throws. Use for `sql(obj)` inserts/updates
+/** Drop keys whose value is `undefined` — postgres.js throws on them, and an
+ *  omitted optional field means "leave unchanged". Use for `sql(obj)` inserts/updates
  *  built from optional fields; never turn undefined into null (that would wipe
  *  columns on update). */
 export function defined<T extends Record<string, unknown>>(obj: T): Partial<T> {

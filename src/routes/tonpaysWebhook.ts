@@ -64,7 +64,7 @@ export async function tonpaysWebhookRoutes(app: FastifyInstance) {
       // Any other event (status transitions, cancellations, mismatches): keep
       // tonpays_status in sync for admin visibility. A no-op when the invoice
       // isn't ours (0 rows matched) — never surfaced as an error.
-      // Best-effort, as before (supabase-js never threw): a failed sync is
+      // Best-effort on purpose: a failed sync is
       // logged and still acked — tonpays_status is informational only.
       if (typeof body?.status === 'string') {
         try {

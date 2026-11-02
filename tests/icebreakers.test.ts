@@ -110,7 +110,7 @@ describe('seedIcebreakers', () => {
   })
 
   it('swallows a users read error without inserting', async () => {
-    // Malformed ids: Postgres throws 22P02 (PostgREST returned an error) → logged, no insert.
+    // Malformed ids: Postgres throws 22P02 → logged, no insert.
     await expect(seedIcebreakers('match-1', ['u1', 'u2'])).resolves.toBeUndefined()
     expect((await sql`select count(*)::int as n from messages`)[0].n).toBe(0)
     expect(errorSpy).toHaveBeenCalledWith('[icebreakers] users read failed', expect.anything())

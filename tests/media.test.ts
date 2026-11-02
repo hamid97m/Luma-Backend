@@ -333,13 +333,13 @@ describe('CORS EXTRA_CORS_ORIGINS', () => {
   it('allows the configured extra origin alongside WEB_URL/ADMIN_WEB_URL, and nothing else', async () => {
     process.env.WEB_URL = 'https://app.example.com'
     process.env.ADMIN_WEB_URL = 'https://admin.example.com'
-    process.env.EXTRA_CORS_ORIGINS = ' https://old-front.vercel.app/ ,'
+    process.env.EXTRA_CORS_ORIGINS = ' https://old-front.example.net/ ,'
     const app = await buildApp()
     const pre = (origin: string) => app.inject({
       method: 'OPTIONS', url: '/health',
       headers: { origin, 'access-control-request-method': 'GET' },
     })
-    expect((await pre('https://old-front.vercel.app')).headers['access-control-allow-origin']).toBe('https://old-front.vercel.app')
+    expect((await pre('https://old-front.example.net')).headers['access-control-allow-origin']).toBe('https://old-front.example.net')
     expect((await pre('https://app.example.com')).headers['access-control-allow-origin']).toBe('https://app.example.com')
     expect((await pre('https://evil.example')).headers['access-control-allow-origin']).toBeUndefined()
   })

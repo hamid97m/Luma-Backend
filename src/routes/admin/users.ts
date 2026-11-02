@@ -51,9 +51,8 @@ export async function adminUsersRoutes(app: FastifyInstance) {
 
     const genderFilter = GENDERS.includes(gender) ? sql`and gender = ${gender}` : sql``
 
-    // Same sanitising as the PostgREST `or=` string needed; kept so a search
-    // returns the same rows as before. The term is a bind parameter. `%`/`_`
-    // stay wildcards, and `*` too (PostgREST treated it as an alias of `%`).
+    // Strip separators/quotes so search behaviour stays stable. The term is a
+    // bind parameter. `%`/`_` stay wildcards, and `*` too (an alias of `%`).
     const search = query.trim().replace(/[,()"\\]/g, ' ').replace(/\s+/g, ' ').trim()
     let searchFilter = sql``
     if (search) {
@@ -160,7 +159,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
   app.get('/users/:id', async (req, reply) => {
     const { id } = req.params as { id: string }
 
-    // Malformed id or a failed lookup → 404, as with PostgREST's `data: null`.
+    // Malformed id or a failed lookup → 404.
     let user: any
     try {
       ;[user] = isUuid(id) ? await sql`select * from users where id = ${id}` : []
@@ -226,7 +225,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
       ;[user] = isUuid(id)
         ? await sql<{ id: string; is_seed: boolean }[]>`select id, is_seed from users where id = ${id}`
         : []
-    } catch { /* treated as not found, like PostgREST's data: null */ }
+    } catch { /* treated as not found */ }
     if (!user) {
       reply.status(404).send({ error: 'user_not_found' })
       return null

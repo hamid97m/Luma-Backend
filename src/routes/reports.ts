@@ -24,7 +24,7 @@ export async function reportsRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'invalid_report' })
     }
 
-    // Malformed id or failed read → "not found", as PostgREST answered.
+    // Malformed id or failed read → "not found".
     let reported: { id: string; deleted_at: string | null } | undefined
     if (isUuid(reportedUserId)) {
       try {

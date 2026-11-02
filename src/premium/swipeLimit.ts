@@ -51,7 +51,7 @@ type WindowRow = {
 }
 
 /** The limit's user row, or null when missing / unreadable (a read error —
- *  including a malformed id — fails open, as PostgREST's error result did). */
+ *  including a malformed id — fails open on purpose). */
 async function readWindowRow(userId: string): Promise<WindowRow | null> {
   try {
     const [row] = await sql<WindowRow[]>`

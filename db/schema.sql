@@ -1,7 +1,6 @@
--- Luma database schema — plain Postgres (no Supabase).
--- Generated 2026-11-02 from the LIVE Supabase catalog (public schema only), with
--- Supabase-only parts dropped (RLS policies, role grants, auth/storage schemas,
--- supabase_vault). This is the baseline; later changes go in db/migrations/.
+-- Luma database schema — plain Postgres.
+-- Baseline schema (public schema only), loaded by src/migrate.ts on an empty
+-- database. Later changes go in db/migrations/.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 

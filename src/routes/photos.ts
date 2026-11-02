@@ -10,8 +10,8 @@ const MAX_PHOTOS = 6
 
 type PhotoSlot = { id: string; position: number }
 
-/** Delete a photo's file. Failures are logged and ignored (the Supabase remove
- *  result was never checked either) — an orphaned file is harmless. */
+/** Delete a photo's file. Failures are logged and ignored on purpose — an
+ *  orphaned file is harmless. */
 async function removePhotoFile(
   userId: string | undefined,
   photoId: string,
@@ -21,7 +21,7 @@ async function removePhotoFile(
 }
 
 /** The user's photos, lowest position first. A failed read counts as no photos
- *  (the supabase-js code ignored this error). */
+ *  (never fatal for these endpoints). */
 async function photoSlots(userId: string): Promise<PhotoSlot[]> {
   try {
     return await sql<PhotoSlot[]>`
@@ -51,7 +51,7 @@ async function liftPhotoReviewPause(userId: string): Promise<void> {
   }
 }
 
-/** Ignored-error delete (the supabase-js code never checked it). */
+/** Best-effort delete: errors are logged and ignored on purpose. */
 async function deletePhotoRow(photoId: string): Promise<void> {
   await sql`delete from user_photos where id = ${photoId}`.catch((err) =>
     console.error('[photos] delete failed:', (err as Error)?.message ?? err))

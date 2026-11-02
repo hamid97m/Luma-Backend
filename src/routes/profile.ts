@@ -11,7 +11,7 @@ import { markActiveIfSignupComplete } from '../users/accountStatus.js'
 type Photo = { id: string; url: string; position: number }
 
 /** The user's photos in display order. A failed read counts as no photos
- *  (supabase-js callers ignored this error). */
+ *  (never fatal for this endpoint). */
 async function listPhotos(userId: string): Promise<Photo[]> {
   try {
     return await sql<Photo[]>`

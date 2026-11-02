@@ -25,8 +25,8 @@ async function loadRawCatalog() {
   return mapped
 }
 
-/** Run a read whose failure the supabase-js code tolerated (it never threw):
- *  a DB error yields `fallback`, exactly like the old `{ data: null }`. */
+/** Run a read whose failure is tolerated on purpose: a DB error yields
+ *  `fallback` instead of throwing. */
 async function tolerant<T extends readonly unknown[]>(query: () => PromiseLike<T>, fallback: T | []): Promise<T | []> {
   try {
     return await query()
@@ -64,7 +64,7 @@ async function resolveRecipient(
 ): Promise<{ id: string; telegramId: number } | { error: string }> {
   if (context === 'chat') {
     if (!matchId) return { error: 'match_required' }
-    // A non-uuid matchId can't be a match (PostgREST answered "no rows"; Postgres would throw).
+    // A non-uuid matchId can't be a match: answer "no rows" (Postgres would throw on the cast).
     const [m] = isUuid(matchId)
       ? await tolerant(() => sql`
           select m.user1_id, m.user2_id,

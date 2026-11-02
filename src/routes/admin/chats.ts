@@ -18,7 +18,7 @@ const participantCols = (alias: 'u1' | 'u2') => sql.unsafe(
 )
 
 function nestUser(row: any, alias: 'u1' | 'u2') {
-  if (row[`${alias}_id`] == null) return null // left join miss → null, as PostgREST did
+  if (row[`${alias}_id`] == null) return null // left join miss → null
   const u: Record<string, unknown> = {}
   for (const c of USER_COLS) u[c] = row[`${alias}_${c}`]
   u.user_photos = row[`${alias}_user_photos`] ?? []

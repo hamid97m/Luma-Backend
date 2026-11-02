@@ -63,8 +63,8 @@ export function chargedPrice(priceStars: number, discountPercent: number): numbe
   return Math.max(1, Math.round(priceStars * (1 - discountPercent / 100)))
 }
 
-/** Runs a read whose failure the supabase-js version tolerated (it returned
- * `data: null` instead of throwing): a query error answers "no rows". */
+/** Runs a read whose failure is tolerated on purpose: a query error answers
+ * "no rows" instead of throwing. */
 async function tolerant<R>(query: () => PromiseLike<R[]>): Promise<R[]> {
   try {
     return await query()
@@ -156,7 +156,7 @@ export async function createPremiumCheckout(userId: string, planId: string): Pro
   if (!(await isPremiumEnabled())) return { error: 'premium_disabled' }
 
   // A malformed (non-uuid) plan id can't name a plan — answer plan_unavailable
-  // like PostgREST's "no rows" did, instead of letting Postgres reject the cast.
+  // (treated as "no rows"), instead of letting Postgres reject the cast.
   const [plan] = isUuid(planId)
     ? await tolerant(() => sql<PlanRow[]>`
         select id, title, description, translations, price_stars, discount_percent, discount_ends_at, duration_days
@@ -245,7 +245,7 @@ async function createTonPaysCheckout(
 
   // The new attempt row never got an invoice, so dropping it is unconditional
   // (no paid-race to guard against) — unlike the old row's cancel below.
-  // Errors were ignored under supabase-js (it never threw); keep it best-effort.
+  // Errors are logged-and-ignored on purpose; this is best-effort.
   const dropNewRow = () =>
     tolerant(() => sql`update premium_transactions set status = 'canceled' where id = ${tx.id}`)
 

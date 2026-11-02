@@ -55,7 +55,7 @@ function webhookSecretToken(): string {
 async function replyLocale(ctx: Context): Promise<Locale> {
   const tgId = ctx.from?.id
   if (tgId) {
-    // A failed lookup falls back to the Telegram language (supabase-js never threw here).
+    // A failed lookup falls back to the Telegram language (never fatal).
     const [data] = await sql<{ locale: string | null }[]>`
       select locale from users where telegram_id = ${tgId}`.catch(() => [])
     if (data?.locale) return data.locale as Locale

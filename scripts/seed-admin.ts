@@ -1,6 +1,6 @@
 import 'dotenv/config'
-import { createClient } from '@supabase/supabase-js'
 import bcrypt from 'bcryptjs'
+import { sql } from '../src/db.js'
 
 const [username, password] = process.argv.slice(2)
 if (!username || !password) {
@@ -8,15 +8,17 @@ if (!username || !password) {
   process.exit(1)
 }
 
-const db = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_KEY!)
 const password_hash = await bcrypt.hash(password, 10)
 
-const { error } = await db
-  .from('admins')
-  .upsert({ username, password_hash }, { onConflict: 'username' })
-
-if (error) {
-  console.error('seed failed:', error.message)
+try {
+  await sql`
+    insert into admins (username, password_hash)
+    values (${username}, ${password_hash})
+    on conflict (username) do update set password_hash = excluded.password_hash`
+} catch (err) {
+  console.error('seed failed:', (err as Error).message)
+  await sql.end()
   process.exit(1)
 }
+await sql.end()
 console.log(`admin '${username}' is ready`)

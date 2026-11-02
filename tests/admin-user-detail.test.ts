@@ -59,7 +59,12 @@ describe('GET /admin/users/:id', () => {
   it('shows email and signInMethods for a Google user without telegram', async () => {
     const web = await createUser({ telegram_id: null, email: 'web@example.com', google_sub: 'g-123' })
     const body = (await get(web.id)).json()
-    expect(body.user).toMatchObject({ telegramId: null, email: 'web@example.com', signInMethods: ['google', 'email'] })
+    expect(body.user).toMatchObject({ telegramId: null, email: 'web@example.com', signInMethods: ['google'] })
+  })
+
+  it('lists email only for an email user without Google', async () => {
+    const web = await createUser({ telegram_id: null, email: 'mail@example.com' })
+    expect((await get(web.id)).json().user).toMatchObject({ email: 'mail@example.com', signInMethods: ['email'] })
   })
 
   it('lists telegram only for real telegram users and none for seeds', async () => {

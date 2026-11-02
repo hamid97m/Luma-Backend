@@ -27,7 +27,7 @@ describe('GET /admin/users', () => {
     await createUser({ name: 'Other' })
     const body = await list('?query=zed@exam')
     expect(names(body)).toEqual(['Web'])
-    expect(body.items[0]).toMatchObject({ telegramId: null, email: 'zed@example.com', signInMethods: ['google', 'email'] })
+    expect(body.items[0]).toMatchObject({ telegramId: null, email: 'zed@example.com', signInMethods: ['google'] })
   })
 
   it('requires a token', async () => {

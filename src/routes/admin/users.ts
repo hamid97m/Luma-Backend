@@ -13,11 +13,12 @@ const GENDERS = ['man', 'woman', 'nonbinary']
 const LOOKING = ['men', 'women', 'both', 'everyone']
 
 // Seeds have negative telegram_ids and website users have none: neither signed in with Telegram.
+// A Google account's email is its Google identity, not a separate email login.
 function signInMethods(u: any): ('telegram' | 'google' | 'email')[] {
   const methods: ('telegram' | 'google' | 'email')[] = []
   if (u.telegram_id > 0) methods.push('telegram')
   if (u.google_sub) methods.push('google')
-  if (u.email) methods.push('email')
+  if (u.email && !u.google_sub) methods.push('email')
   return methods
 }
 

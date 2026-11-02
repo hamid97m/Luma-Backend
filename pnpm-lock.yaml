@@ -32,6 +32,9 @@ importers:
       jsonwebtoken:
         specifier: ^9.0.3
         version: 9.0.3
+      postgres:
+        specifier: ^4.0.0
+        version: 4.0.0
     devDependencies:
       '@types/bcryptjs':
         specifier: ^3.0.0
@@ -844,6 +847,10 @@ packages:
   postcss@8.5.23:
     resolution: {integrity: sha512-g50586zr4bZmwFiTlflMu8E0bDTb5I5gertgwAKmsdUlTQIhZtunzUlD1WSzwcVWPoAVpsrA6vlfCD7oXvRwgg==}
     engines: {node: ^10 || ^12 || >=14}
+
+  postgres@4.0.0:
+    resolution: {integrity: sha512-kBh8qXtcvvIAc00DftQyOxz7M/3Zxww1tRMXZPLzipNXXl5PIzHml+9zB3Mrge2U8ldc0WF1ZdLp1iYQi7Kh3A==}
+    engines: {node: '>=20'}
 
   process-warning@3.0.0:
     resolution: {integrity: sha512-mqn0kFRl0EoqhnL0GQ0veqFHyIN1yig9RHh/InzORTUiZHFRAur+aMtRkELNwGs9aNwKS6tg/An4NYBPGwvtzQ==}
@@ -1689,6 +1696,8 @@ snapshots:
       nanoid: 3.3.16
       picocolors: 1.1.1
       source-map-js: 1.2.1
+
+  postgres@4.0.0: {}
 
   process-warning@3.0.0: {}
 

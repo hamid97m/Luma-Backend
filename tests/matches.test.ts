@@ -47,7 +47,7 @@ describe('GET /matches', () => {
     await createPhoto(sara.id, 0, { url: 'https://img/0' })
     await message(m.id, sara.id, { body: 'first', created_at: '2026-01-01T12:00:00Z' })
     await message(m.id, me.id, { body: 'mine', created_at: '2026-01-01T13:00:00Z', read_at: null })
-    await message(m.id, sara.id, { body: 'hey there', created_at: '2026-01-02T00:00:00Z' })
+    const last = await message(m.id, sara.id, { body: 'hey there', created_at: '2026-01-02T00:00:00Z' })
     await message(m.id, sara.id, { body: 'already read', created_at: '2026-01-01T11:00:00Z', read_at: '2026-01-01T11:30:00Z' })
 
     const res = await get()
@@ -64,7 +64,7 @@ describe('GET /matches', () => {
       photos: ['https://img/0', 'https://img/1'], premium: false,
     })
     expect(row.lastMessage).toEqual({
-      body: 'hey there', createdAt: '2026-01-02T00:00:00.000Z', senderId: sara.id, type: 'text',
+      id: last.id, body: 'hey there', createdAt: '2026-01-02T00:00:00.000Z', senderId: sara.id, type: 'text', readAt: null,
     })
     // Two unread from Sara; her read one and my own don't count.
     expect(row.unreadCount).toBe(2)

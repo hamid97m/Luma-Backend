@@ -21,6 +21,7 @@ interface MatchListRow {
   lm_created_at: string | null
   lm_sender_id: string | null
   lm_type: string | null
+  lm_read_at: string | null
   unread_count: number
 }
 
@@ -44,13 +45,13 @@ export async function matchesRoutes(app: FastifyInstance) {
             (select array_agg(p.url order by p.position) from user_photos p where p.user_id = o.id),
             '{}'
           ) as photos,
-          lm.id as lm_id, lm.body as lm_body, lm.created_at as lm_created_at, lm.sender_id as lm_sender_id, lm.type as lm_type,
+          lm.id as lm_id, lm.body as lm_body, lm.created_at as lm_created_at, lm.sender_id as lm_sender_id, lm.type as lm_type, lm.read_at as lm_read_at,
           (select count(*)::int from messages u
              where u.match_id = m.id and u.sender_id <> ${me} and u.read_at is null) as unread_count
         from matches m
         join users o on o.id = case when m.user1_id = ${me} then m.user2_id else m.user1_id end
         left join lateral (
-          select x.id, x.body, x.created_at, x.sender_id, x.type
+          select x.id, x.body, x.created_at, x.sender_id, x.type, x.read_at
           from messages x where x.match_id = m.id
           order by x.created_at desc
           limit 1
@@ -91,7 +92,7 @@ export async function matchesRoutes(app: FastifyInstance) {
         premium: isPremiumActive(row.premium_until ?? null),
       },
       lastMessage: row.lm_id
-        ? { body: row.lm_body, createdAt: row.lm_created_at, senderId: row.lm_sender_id, type: row.lm_type ?? 'text' }
+        ? { body: row.lm_body, createdAt: row.lm_created_at, senderId: row.lm_sender_id, type: row.lm_type ?? 'text', id: row.lm_id, readAt: row.lm_read_at ?? null }
         : null,
       unreadCount: row.unread_count ?? 0,
       // Locks the composer client-side for a 4th+ new conversation; the

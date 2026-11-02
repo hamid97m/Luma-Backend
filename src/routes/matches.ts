@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify'
 import { sql } from '../db.js'
 import { chatGateContext, matchPremiumRequired } from '../premium/chatLimit.js'
 import { isPremiumActive } from '../premium/service.js'
+import { chatHub } from '../realtime/hub.js'
 
 interface MatchListRow {
   id: string
@@ -90,6 +91,9 @@ export async function matchesRoutes(app: FastifyInstance) {
         icebreakerAnswer: row.icebreaker_answer ?? null,
         photos: row.photos ?? [],
         premium: isPremiumActive(row.premium_until ?? null),
+        // Has the app open right now (or closed it < 30 s ago); live changes
+        // arrive as `presence` events on GET /events.
+        online: chatHub.isOnline(row.other_id),
       },
       lastMessage: row.lm_id
         ? { body: row.lm_body, createdAt: row.lm_created_at, senderId: row.lm_sender_id, type: row.lm_type ?? 'text', id: row.lm_id, readAt: row.lm_read_at ?? null }

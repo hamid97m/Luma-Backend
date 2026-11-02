@@ -694,6 +694,60 @@ describe('runFakeLikerJob — new-like notification', () => {
   })
 })
 
+describe('runFakeLikerJob — web-only users (no Telegram account)', () => {
+  it('likes a web-only target but sends no new-like DM', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1', { name: 'Sara' }),
+        mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', telegram_id: null, email: 'w@x.com' }),
+      ],
+    }
+    await useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    await flush()
+
+    expect(res.likesSent).toBe(1)
+    expect(res.errors).toBe(0)
+    expect(notifyNewLike).not.toHaveBeenCalled()
+  })
+
+  it('matches a web-only user who liked the fake but sends no match DM', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1', { name: 'Sara' }),
+        mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', telegram_id: null, email: 'w@x.com' }),
+      ],
+      swipes: [{ swiper_id: 't1', swiped_id: 'f1', direction: 'like' }],
+    }
+    await useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    await flush()
+
+    expect(res.matchesCreated).toBe(1)
+    expect(res.errors).toBe(0)
+    expect(notifyMatch).not.toHaveBeenCalled()
+  })
+
+  it('sends the salam but no offline DM to a web-only match', async () => {
+    const store: Store = {
+      fake_liker_config: enabledConfig(),
+      users: [
+        mkFake('f1', { name: 'Sara' }),
+        mkUser('r1', { looking_for: 'men', created_at: OLD, last_active: STALE, telegram_id: null, email: 'w@x.com' }),
+      ],
+      matches: [{ id: 'm1', user1_id: 'f1', user2_id: 'r1' }],
+    }
+    const logs = await useStore(store)
+    await runFakeLikerJob('schedule', silent)
+    await flush()
+
+    expect((await logs.inserts()).messages).toEqual([{ match_id: 'm1', sender_id: 'f1', body: SALAM }])
+    expect(notifyNewMessage).not.toHaveBeenCalled()
+  })
+})
+
 describe('runFakeLikerJob — salam phase', () => {
   // Real users use looking_for:'men' so they are NOT selected as like targets;
   // this isolates the salam phase from the like phase.

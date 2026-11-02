@@ -423,7 +423,7 @@ export async function validatePremiumPreCheckout(transactionId: string, totalAmo
   return { ok: true as const }
 }
 
-type GrantUser = { premium_until: string | null; name: string | null; locale: string | null; telegram_id: number }
+type GrantUser = { premium_until: string | null; name: string | null; locale: string | null; telegram_id: number | null }
 
 /**
  * Adds `durationDays` of premium to a user, extending from the later of now /
@@ -547,8 +547,11 @@ export async function handleTonPaysPaid(
     at: new Date().toISOString(),
   })).catch(() => {})
 
-  notifyPremiumPurchased(user.telegram_id as number, tx.duration_days, (user.locale as Locale | null) ?? null)
-    .catch((err) => console.error('[tonpays] buyer DM failed:', err?.message ?? err))
+  // Website-only buyers (no Telegram account) get no bot DM.
+  if ((user.telegram_id ?? 0) > 0) {
+    notifyPremiumPurchased(user.telegram_id as number, tx.duration_days, (user.locale as Locale | null) ?? null)
+      .catch((err) => console.error('[tonpays] buyer DM failed:', err?.message ?? err))
+  }
 
   return 'granted'
 }

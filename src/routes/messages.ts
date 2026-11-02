@@ -8,7 +8,7 @@ const MAX_MESSAGE_LENGTH = 2000
 interface MatchParticipant {
   id: string
   name: string
-  telegram_id: number
+  telegram_id: number | null
   deleted_at: string | null
   last_active: string | null
   notified_offline_at: string | null

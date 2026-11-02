@@ -104,7 +104,8 @@ function pickFake(compatible: Fake[], targetLocation: string | null | undefined)
 interface LikeTarget {
   id: string
   gender: string
-  telegram_id: number
+  /** null = website-only user (no Telegram account); negative = fake. Either way: no DM. */
+  telegram_id: number | null
   allows_write_to_pm: boolean | null
   locale?: Locale | null
 }
@@ -153,8 +154,8 @@ async function likeTargetAndMatch(
     return
   }
   if (!reverse) {
-    if (target.gender !== 'woman' && target.telegram_id > 0 && target.allows_write_to_pm !== false) {
-      notifyNewLike(target.telegram_id, fake.name, target.locale ?? null)
+    if (target.gender !== 'woman' && (target.telegram_id ?? 0) > 0 && target.allows_write_to_pm !== false) {
+      notifyNewLike(target.telegram_id as number, fake.name, target.locale ?? null)
         .catch((err) => logger.warn({ err }, 'fake liker: new-like notify failed'))
     }
     return
@@ -176,9 +177,9 @@ async function likeTargetAndMatch(
   await seedIcebreakers(match.id, [fake.id, target.id])
 
   // Notify the real user only (fakes have a negative sentinel telegram_id).
-  if (target.telegram_id > 0 && target.allows_write_to_pm !== false) {
+  if ((target.telegram_id ?? 0) > 0 && target.allows_write_to_pm !== false) {
     notifyMatch([{
-      telegramId: target.telegram_id,
+      telegramId: target.telegram_id as number,
       matchName: fake.name,
       matchPhoto: fakePhoto(fake.id),
       locale: target.locale ?? null,

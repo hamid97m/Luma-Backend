@@ -31,6 +31,11 @@ describe('verifyTelegramWidget', () => {
     expect(verifyTelegramWidget(payload, BOT_TOKEN)).toEqual({ id: 42, first_name: 'Ali', username: 'ali' })
   })
 
+  it('fails closed (null) when the bot token is empty, even for a payload signed with it', () => {
+    const payload = signWidget({ id: 42, first_name: 'Ali', auth_date: now() }, '')
+    expect(verifyTelegramWidget(payload, '')).toBeNull()
+  })
+
   it('returns null when signed with another bot token', () => {
     const payload = signWidget({ id: 42, first_name: 'Ali', auth_date: now() }, 'other_token')
     expect(verifyTelegramWidget(payload, BOT_TOKEN)).toBeNull()

@@ -67,15 +67,15 @@ export async function swipesRoutes(app: FastifyInstance) {
       // A woman is not DMed on this path: her one like DM is sent from
       // ensureDailyReveal (the 18:00 job / her first Likes or discovery read).
       const pair = await sql<{
-        id: string; name: string; telegram_id: number; allows_write_to_pm: boolean | null
+        id: string; name: string; telegram_id: number | null; allows_write_to_pm: boolean | null
         locale: Locale | null; gender: string
       }[]>`
         select id, name, telegram_id, allows_write_to_pm, locale, gender
         from users where id = any(${[req.userId, targetUserId]}::uuid[])`
       const me = pair.find((u: { id: string }) => u.id === req.userId)
       const target = pair.find((u: { id: string }) => u.id === targetUserId)
-      if (me && target && target.gender !== 'woman' && target.telegram_id > 0 && target.allows_write_to_pm !== false) {
-        notifyNewLike(target.telegram_id, me.name, target.locale ?? null).catch(console.error)
+      if (me && target && target.gender !== 'woman' && (target.telegram_id ?? 0) > 0 && target.allows_write_to_pm !== false) {
+        notifyNewLike(target.telegram_id as number, me.name, target.locale ?? null).catch(console.error)
       }
       return { matched: false, ...swipeLimit }
     }
@@ -100,7 +100,7 @@ export async function swipesRoutes(app: FastifyInstance) {
     // Both users and their photos in one round trip (was two sequential reads).
     // A failure keeps the old minimal-response path rather than 500ing the match.
     type MatchUser = {
-      id: string; name: string; telegram_id: number; username: string | null
+      id: string; name: string; telegram_id: number | null; username: string | null
       allows_write_to_pm: boolean | null; locale: Locale | null
       icebreaker_prompt: string | null; icebreaker_answer: string | null
       primary_photo: string | null
@@ -134,12 +134,13 @@ export async function swipesRoutes(app: FastifyInstance) {
     // Fire-and-forget. Telegram rejects DMs from bots the user hasn't granted
     // write access to (never pressed Start / declined the popup), so skip
     // anyone with an explicit false — null means unknown, still worth trying.
+    // Website-only users (null telegram_id) and fakes (negative) can't get DMs.
     const recipients = [
       { user: them, matchName: me.name, matchPhoto: primaryPhoto(me.id) },
     ]
-      .filter((r) => r.user.allows_write_to_pm !== false)
+      .filter((r) => r.user.allows_write_to_pm !== false && (r.user.telegram_id ?? 0) > 0)
       .map((r) => ({
-        telegramId: r.user.telegram_id,
+        telegramId: r.user.telegram_id as number,
         matchName: r.matchName,
         matchPhoto: r.matchPhoto,
         locale: r.user.locale ?? null,

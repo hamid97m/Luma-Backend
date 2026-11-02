@@ -6,6 +6,8 @@ export function verifyInitData(initData: string, botToken: string): TelegramUser
   if (process.env.NODE_ENV !== 'production' && initData === 'dev_mode') {
     return { id: 999999, first_name: 'Dev', username: 'devuser' }
   }
+  // Fail closed: an unset token would make the HMAC key public.
+  if (!botToken) return null
 
   const params = new URLSearchParams(initData)
   const hash = params.get('hash')
@@ -44,6 +46,8 @@ export function verifyTelegramWidget(
   data: Record<string, string | number>,
   botToken: string,
 ): TelegramUser | null {
+  // Fail closed: an unset token would make the HMAC key public.
+  if (!botToken) return null
   const { hash, ...fields } = data
   if (typeof hash !== 'string' || !/^[0-9a-f]{64}$/i.test(hash)) return null
 

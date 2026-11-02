@@ -79,14 +79,15 @@ async function resolveRecipient(
       : []
     if (!m || (m.user1_id !== buyerId && m.user2_id !== buyerId)) return { error: 'match_not_found' }
     const other: any = m.user1_id === buyerId ? m.user2 : m.user1
-    if (!other || other.deleted_at || other.banned_at) return { error: 'recipient_unavailable' }
+    // Star gifts are delivered over Telegram: a website-only user can't receive one.
+    if (!other || other.deleted_at || other.banned_at || other.telegram_id == null) return { error: 'recipient_unavailable' }
     return { id: other.id, telegramId: other.telegram_id }
   }
   if (!targetUserId) return { error: 'target_required' }
   const [u] = isUuid(targetUserId)
     ? await tolerant(() => sql`select id, telegram_id, deleted_at, banned_at from users where id = ${targetUserId}`, [])
     : []
-  if (!u || u.deleted_at || u.banned_at) return { error: 'recipient_unavailable' }
+  if (!u || u.deleted_at || u.banned_at || u.telegram_id == null) return { error: 'recipient_unavailable' }
   return { id: u.id, telegramId: u.telegram_id }
 }
 
@@ -161,7 +162,8 @@ export async function handleGiftPaid(payload: string, chargeId: string, buyerTel
   // A failed lookup used to come back as `data: null` — keep that (missing recipient → refund).
   const [recipient] = await tolerant(() => sql`select telegram_id, name, locale from users where id = ${tx.recipient_id}`, [])
   const [buyer] = await tolerant(() => sql`select name from users where id = ${tx.buyer_id}`, [])
-  if (!recipient) { await failAndRefund(tx.id, buyerTelegramId, chargeId); return }
+  // No Telegram account (website-only user) → the gift can't be delivered; refund.
+  if (!recipient || recipient.telegram_id == null) { await failAndRefund(tx.id, buyerTelegramId, chargeId); return }
   // DMs below go to the recipient, so they're worded in the recipient's language.
   const recipientLocale = (recipient.locale as Locale | null) ?? null
   const rt = tFor(recipientLocale)

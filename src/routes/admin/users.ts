@@ -446,7 +446,8 @@ export async function adminUsersRoutes(app: FastifyInstance) {
       return reply.status(500).send({ error: 'user_fetch_failed' })
     }
     if (!user) return reply.status(404).send({ error: 'user_not_found' })
-    if ((user as any).is_seed || (user as any).telegram_id <= 0) {
+    // Fakes (negative) and website-only users (null telegram_id) can't get bot DMs.
+    if ((user as any).is_seed || !((user as any).telegram_id > 0)) {
       return reply.status(400).send({ error: 'not_messageable' })
     }
 

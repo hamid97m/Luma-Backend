@@ -270,9 +270,11 @@ export async function photosRoutes(app: FastifyInstance) {
   }, async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
-    const [u] = await sql<{ telegram_id: number }[]>`
+    const [u] = await sql<{ telegram_id: number | null }[]>`
       select telegram_id from users where id = ${req.userId}`.catch(() => [])
 
+    // Website-only account (Google/email sign-in): there is no Telegram profile.
+    if (u && u.telegram_id === null) return reply.status(400).send({ error: 'no_telegram' })
     if (!u || !u.telegram_id || u.telegram_id <= 0) {
       return reply.status(409).send({ error: 'no_telegram_photo' })
     }

@@ -25,6 +25,7 @@ import { referralRoutes } from './routes/referrals.js'
 import { adminRoutes } from './routes/admin/index.js'
 import { tonpaysWebhookRoutes } from './routes/tonpaysWebhook.js'
 import { mediaRoutes } from './routes/media.js'
+import { registerHttpMetrics } from './metrics.js'
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -59,6 +60,8 @@ export async function buildApp(): Promise<FastifyInstance> {
   if (!process.env.WEB_URL && process.env.NODE_ENV === 'production') {
     throw new Error('WEB_URL environment variable is required in production')
   }
+
+  registerHttpMetrics(app)
 
   // EXTRA_CORS_ORIGINS (comma-separated): e.g. a previous frontend host during a
   // migration, so Mini App links in old bot messages keep working.

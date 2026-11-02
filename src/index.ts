@@ -1,6 +1,7 @@
 import 'dotenv/config'
 import { buildApp } from './server.js'
-import { mountWebhook, initWebhook } from './bot.js'
+import { mountWebhook, initWebhook, initStandbyBot } from './bot.js'
+import { isStandby } from './appMode.js'
 import { runFakeLikerJob, setNextScheduledRunAt } from './jobs/fakeLiker.js'
 import { getLastFakeLikerRunAt } from './jobs/fakeLikerConfig.js'
 import { runPurchaseMessageJob } from './jobs/purchaseMessage.js'
@@ -40,7 +41,11 @@ const app = await buildApp()
 await cleanupInterruptedBroadcasts(db).catch((err) =>
   console.error('[broadcast] interrupted-cleanup failed:', (err as Error).message))
 
-if (process.env.NODE_ENV === 'production') {
+// Standby (new server before cutover): API only — no webhook, no scheduled jobs.
+// The live deployment keeps the bot until APP_MODE is switched to live.
+const isLive = process.env.NODE_ENV === 'production' && !isStandby()
+
+if (isLive) {
   // Route must be registered before app.listen(); initWebhook (below) runs after.
   mountWebhook(app)
 
@@ -116,13 +121,15 @@ if (process.env.NODE_ENV === 'production') {
     }, delayMs)
   }
   scheduleLikeReveal(msUntilNextTehranHour(18, new Date()))
+} else if (process.env.NODE_ENV === 'production') {
+  console.log('[standby] APP_MODE=standby: webhook and scheduled jobs disabled')
 } else {
   // Skip bot in dev — fake BOT_TOKEN would crash the process
   console.log('[dev] Bot disabled (set NODE_ENV=production and a real BOT_TOKEN to enable)')
 }
 await app.listen({ port: Number(process.env.PORT ?? 3000), host: '0.0.0.0' })
 
-if (process.env.NODE_ENV === 'production') {
+if (isLive) {
   try {
     await initWebhook(resolvePublicUrl())
   } catch (err) {
@@ -131,4 +138,8 @@ if (process.env.NODE_ENV === 'production') {
     console.error('[bot] webhook registration failed:', (err as Error).message)
     process.exit(1)
   }
+} else if (process.env.NODE_ENV === 'production') {
+  // Username only (used in API responses). Non-fatal: standby serves no bot traffic.
+  await initStandbyBot().catch((err) =>
+    console.error('[bot] standby init failed:', (err as Error).message))
 }

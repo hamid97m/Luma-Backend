@@ -13,7 +13,10 @@
     "seed:admin": "tsx scripts/seed-admin.ts",
     "backfill:geo": "tsx scripts/backfill-geo.ts",
     "try:photo-check": "tsx scripts/try-photo-check.ts",
-    "fix:photo-cache": "tsx scripts/fix-photo-cache.ts"
+    "fix:photo-cache": "tsx scripts/fix-photo-cache.ts",
+    "db:migrate": "node dist/migrate.js",
+    "db:migrate:dev": "tsx src/migrate.ts",
+    "test:db:up": "docker start luma-pg-test 2>/dev/null || docker run -d --name luma-pg-test -e POSTGRES_PASSWORD=luma -p 54329:5432 postgres:16-alpine"
   },
   "dependencies": {
     "@fastify/cors": "^9.0.0",

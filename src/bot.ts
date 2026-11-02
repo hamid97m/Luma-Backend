@@ -3,6 +3,7 @@ import { createHash } from 'crypto'
 import type { FastifyInstance } from 'fastify'
 import { db } from './db.js'
 import { WEBHOOK_ROUTE_PREFIX } from './webhookRoute.js'
+import { isStandby, standbyBotGuard } from './appMode.js'
 import { createTicket, shouldCaptureSupport } from './support/service.js'
 import { validatePreCheckout, handleGiftPaid } from './gifts/service.js'
 import {
@@ -15,7 +16,10 @@ import { parseRefCode, stashReferralClaim } from './referrals/attribution.js'
 let _bot: Bot | null = null
 
 function getBot(): Bot {
-  if (!_bot) _bot = new Bot(process.env.BOT_TOKEN!)
+  if (!_bot) {
+    _bot = new Bot(process.env.BOT_TOKEN!)
+    if (isStandby()) _bot.api.config.use(standbyBotGuard)
+  }
   return _bot
 }
 
@@ -192,6 +196,17 @@ export async function initWebhook(publicBaseUrl: string): Promise<void> {
     console.warn('[bot] setMyDescription failed (non-fatal):', err)
   }
   console.log(`[bot] webhook set (@${botUsername})`)
+}
+
+/**
+ * Standby counterpart of `initWebhook`: learn the bot username (used in API
+ * responses) without registering a webhook, so the live deployment keeps the bot.
+ */
+export async function initStandbyBot(): Promise<void> {
+  const bot = getBot()
+  await bot.init()
+  botUsername = bot.botInfo.username
+  console.log(`[bot] standby: webhook NOT registered (@${botUsername})`)
 }
 
 /** Mini-app URL that opens straight into a match's chat (screen=matches + chat=<id>). */

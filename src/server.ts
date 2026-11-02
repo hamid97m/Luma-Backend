@@ -1,7 +1,7 @@
 import { createHash } from 'crypto'
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import cors from '@fastify/cors'
-import rateLimit from '@fastify/rate-limit'
+import rateLimit, { type errorResponseBuilderContext } from '@fastify/rate-limit'
 import { verifyInitData } from './auth.js'
 import { getBotUsername } from './bot.js'
 import { WEBHOOK_ROUTE_PREFIX } from './webhookRoute.js'
@@ -85,7 +85,15 @@ export async function buildApp(): Promise<FastifyInstance> {
       // (constant "Bearer eyJ..." prefix) and let attackers mint fresh buckets.
       return auth ? createHash('sha256').update(auth).digest('hex') : req.ip
     },
-    errorResponseBuilder: () => ({ error: 'rate_limited' }),
+    // The plugin throws what this returns and takes the HTTP status from its
+    // `.statusCode` (429, or 403 on ban); without it every limit hit was a 500.
+    // Non-enumerable so it stays out of the JSON body (same as admin/auth.ts).
+    errorResponseBuilder: (_req: FastifyRequest, context: errorResponseBuilderContext) => {
+      const body = { error: 'rate_limited' }
+      const statusCode = (context as unknown as { statusCode: number }).statusCode
+      Object.defineProperty(body, 'statusCode', { value: statusCode, enumerable: false })
+      return body
+    },
   })
 
   // Auth middleware — skips /auth/verify and /health

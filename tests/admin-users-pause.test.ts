@@ -1,13 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn(), storage: { from: vi.fn() } } }))
 vi.mock('../src/bot.js', () => ({ notifyPaused: vi.fn(() => Promise.resolve()) }))
+// Cross-area (photos + storage); asserted as a call, its own tests cover the deletion.
+vi.mock('../src/photos/deleteAllPhotosForUser.js', () => ({ deleteAllPhotosForUser: vi.fn(() => Promise.resolve()) }))
 
 import { buildApp } from '../src/server.js'
-import { db } from '../src/db.js'
 import { notifyPaused } from '../src/bot.js'
-import { signAdminToken } from '../src/routes/admin/auth-utils.js'
-import { chainable } from './admin-helpers.js'
+import { deleteAllPhotosForUser } from '../src/photos/deleteAllPhotosForUser.js'
+import { resetDb, createUser, sql } from './helpers/db.js'
+import { adminHeaders } from './helpers/admin.js'
 
 describe('admin pause/unpause', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
@@ -15,63 +16,59 @@ describe('admin pause/unpause', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks()
+    await resetDb()
     process.env.ADMIN_JWT_SECRET = 'test-secret'
     app = await buildApp()
-    headers = { authorization: `Bearer ${signAdminToken({ adminId: 'a1', username: 'root' })}` }
+    headers = adminHeaders()
   })
 
-  it('pauses a user, sets paused_at, deletes their photos, and DMs them in their language', async () => {
-    const update = vi.fn(() => chainable({ data: { telegram_id: 100, allows_write_to_pm: true, locale: 'en' }, error: null }))
-    const photos = [{ id: 'photo-1' }, { id: 'photo-2' }]
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') return { update } as any
-      if (table === 'user_photos') return chainable({ data: photos, error: null })
-      return chainable({ data: null, error: null })
-    })
-    const storageRemove = vi.fn().mockResolvedValue({ error: null })
-    vi.mocked(db.storage.from).mockImplementation(() => ({ remove: storageRemove } as any))
+  const pausedAt = async (id: string) => (await sql`select paused_at from users where id = ${id}`)[0].paused_at
 
-    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/pause', headers })
+  it('pauses a user, sets paused_at, deletes their photos, and DMs them in their language', async () => {
+    const u = await createUser({ telegram_id: 100, allows_write_to_pm: true, locale: 'en' })
+
+    const res = await app.inject({ method: 'POST', url: `/admin/users/${u.id}/pause`, headers })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ ok: true })
-    expect((update.mock.calls[0][0] as any).paused_at).toBeTruthy()
+    expect(await pausedAt(u.id)).toBeTruthy()
     expect(notifyPaused).toHaveBeenCalledWith(100, 'en')
-    expect(db.storage.from).toHaveBeenCalledWith('profile-photos')
-    expect(storageRemove).toHaveBeenCalledWith(['u1/photo-1', 'u1/photo-2'])
+    expect(deleteAllPhotosForUser).toHaveBeenCalledWith(u.id)
   })
 
   it('DMs a user with no stored locale with a null locale (Persian)', async () => {
-    const update = vi.fn(() => chainable({ data: { telegram_id: 100, allows_write_to_pm: true, locale: null }, error: null }))
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') return { update } as any
-      return chainable({ data: null, error: null })
-    })
-    vi.mocked(db.storage.from).mockImplementation(() => ({ remove: vi.fn().mockResolvedValue({ error: null }) } as any))
-
-    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/pause', headers })
+    const u = await createUser({ telegram_id: 101, allows_write_to_pm: true })
+    const res = await app.inject({ method: 'POST', url: `/admin/users/${u.id}/pause`, headers })
     expect(res.statusCode).toBe(200)
-    expect(notifyPaused).toHaveBeenCalledWith(100, null)
+    expect(notifyPaused).toHaveBeenCalledWith(101, null)
+  })
+
+  it('does not DM a user who declined bot DMs, or a seed (non-positive telegram_id)', async () => {
+    const optedOut = await createUser({ allows_write_to_pm: false })
+    const seed = await createUser({ telegram_id: -5, is_seed: true })
+    for (const u of [optedOut, seed]) {
+      const res = await app.inject({ method: 'POST', url: `/admin/users/${u.id}/pause`, headers })
+      expect(res.statusCode).toBe(200)
+    }
+    expect(notifyPaused).not.toHaveBeenCalled()
   })
 
   it('unpauses a user (clears paused_at, no DM, no photo deletion)', async () => {
-    const update = vi.fn(() => chainable({ data: { telegram_id: 100, allows_write_to_pm: true }, error: null }))
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') return { update } as any
-      return chainable({ data: null, error: null })
-    })
-    const storageRemove = vi.fn().mockResolvedValue({ error: null })
-    vi.mocked(db.storage.from).mockImplementation(() => ({ remove: storageRemove } as any))
+    const u = await createUser({ telegram_id: 100, paused_at: new Date().toISOString() })
 
-    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/unpause', headers })
+    const res = await app.inject({ method: 'POST', url: `/admin/users/${u.id}/unpause`, headers })
     expect(res.statusCode).toBe(200)
-    expect((update.mock.calls[0][0] as any).paused_at).toBeNull()
+    expect(await pausedAt(u.id)).toBeNull()
     expect(notifyPaused).not.toHaveBeenCalled()
-    expect(storageRemove).not.toHaveBeenCalled()
+    expect(deleteAllPhotosForUser).not.toHaveBeenCalled()
   })
 
   it('404s when the user does not exist', async () => {
-    vi.mocked(db.from).mockImplementation(() =>
-      ({ update: () => chainable({ data: null, error: { message: 'no rows' } }) } as any))
+    const res = await app.inject({ method: 'POST', url: '/admin/users/00000000-0000-0000-0000-000000000000/pause', headers })
+    expect(res.statusCode).toBe(404)
+    expect(deleteAllPhotosForUser).not.toHaveBeenCalled()
+  })
+
+  it('404s (not 500) for a malformed id', async () => {
     const res = await app.inject({ method: 'POST', url: '/admin/users/nope/pause', headers })
     expect(res.statusCode).toBe(404)
   })

@@ -1,133 +1,128 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn(), storage: { from: vi.fn() } } }))
+// Storage still goes through supabase-js; the DB part is real Postgres.
+vi.mock('../src/db.js', async (orig) => ({ ...(await orig<object>()), db: { storage: { from: vi.fn() } } }))
+vi.mock('../src/moderation/photoAiCheck.js', () => ({ scheduleMainPhotoCheck: vi.fn() }))
 
+import { randomUUID } from 'node:crypto'
 import { buildApp } from '../src/server.js'
-import { verifyInitData } from '../src/auth.js'
 import { db } from '../src/db.js'
+import { scheduleMainPhotoCheck } from '../src/moderation/photoAiCheck.js'
+import { AUTH, authAs } from './helpers/auth.js'
+import { resetDb, createUser, createPhoto, sql } from './helpers/db.js'
+import { storageMock, createReport } from './helpers/profile.js'
 
-const AUTH = { authorization: 'valid_init_data' }
-const USER_ID = 'user-uuid-1'
+let app: Awaited<ReturnType<typeof buildApp>>
+let me: Record<string, any>
+let storage: ReturnType<typeof storageMock>
 
-// Queue the auth middleware's user lookup as the next db.from() call.
-function setupAuth() {
-  vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
-  vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({ eq: () => ({ single: () => ({ data: { id: USER_ID } }) }) }),
-  } as any)
+beforeEach(async () => {
+  await resetDb()
+  app = await buildApp()
+  me = await createUser({ name: 'Ali' })
+  authAs(me)
+  storage = storageMock()
+  vi.mocked(db.storage.from).mockReturnValue(storage as any)
+})
+
+async function addPhotos(userId: string, n: number) {
+  const out = []
+  for (let i = 0; i < n; i++) out.push(await createPhoto(userId, i))
+  return out
 }
 
 describe('POST /profile/me/photos/upload-url (replace bypasses cap)', () => {
-  let app: Awaited<ReturnType<typeof buildApp>>
-  beforeEach(async () => {
-    vi.mocked(db.from).mockReset()
-    app = await buildApp()
+  const uploadUrl = (replacePhotoId: string) => app.inject({
+    method: 'POST', url: '/profile/me/photos/upload-url',
+    headers: AUTH, payload: { contentType: 'image/jpeg', replacePhotoId },
   })
 
   it('allows the request at 6 photos when replacePhotoId matches an owned photo', async () => {
-    setupAuth()
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ data: [{ id: 'p1' }, ...new Array(5).fill({ id: 'x' })], error: null }) }),
-    } as any)
+    const [p1] = await addPhotos(me.id, 6)
 
-    const SIGNED_URL = 'https://supabase.example.com/signed-upload-url'
-    vi.mocked(db.storage.from).mockReturnValue({
-      createSignedUploadUrl: () => Promise.resolve({ data: { signedUrl: SIGNED_URL }, error: null }),
-    } as any)
-
-    const res = await app.inject({
-      method: 'POST', url: '/profile/me/photos/upload-url',
-      headers: AUTH, payload: { contentType: 'image/jpeg', replacePhotoId: 'p1' },
-    })
+    const res = await uploadUrl(p1.id)
 
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toHaveProperty('uploadUrl', SIGNED_URL)
+    expect(res.json()).toHaveProperty('uploadUrl', 'https://cdn.test/signed-upload')
   })
 
   it('still returns 400 at 6 photos when replacePhotoId is not owned', async () => {
-    setupAuth()
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ data: new Array(6).fill({ id: 'x' }), error: null }) }),
-    } as any)
+    await addPhotos(me.id, 6)
+    const other = await createUser()
+    const [theirs] = await addPhotos(other.id, 1)
 
-    const res = await app.inject({
-      method: 'POST', url: '/profile/me/photos/upload-url',
-      headers: AUTH, payload: { contentType: 'image/jpeg', replacePhotoId: 'not-mine' },
-    })
-
-    expect(res.statusCode).toBe(400)
-    expect(res.json()).toEqual({ error: 'max_photos_reached' })
+    for (const id of ['not-mine', theirs.id]) {
+      const res = await uploadUrl(id)
+      expect(res.statusCode).toBe(400)
+      expect(res.json()).toEqual({ error: 'max_photos_reached' })
+    }
   })
 })
 
 describe('POST /profile/me/photos/:photoId/replace', () => {
-  let app: Awaited<ReturnType<typeof buildApp>>
-  beforeEach(async () => {
-    vi.mocked(db.from).mockReset()
-    app = await buildApp()
+  const replace = (photoId: string, newPhotoId: unknown) => app.inject({
+    method: 'POST', url: `/profile/me/photos/${photoId}/replace`,
+    headers: AUTH, payload: { newPhotoId },
   })
 
   it('returns 404 when the old photo is not found', async () => {
-    setupAuth()
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: null, error: { code: 'PGRST116' } }) }) }) }),
-    } as any)
+    const res = await replace(randomUUID(), randomUUID())
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'photo_not_found' })
+  })
 
-    const res = await app.inject({
-      method: 'POST', url: '/profile/me/photos/old-photo/replace',
-      headers: AUTH, payload: { newPhotoId: 'new-photo' },
-    })
-
+  it('returns 404 (not 500) for a malformed old photo id', async () => {
+    const res = await replace('old-photo', 'new-photo')
     expect(res.statusCode).toBe(404)
     expect(res.json()).toEqual({ error: 'photo_not_found' })
   })
 
   it('returns 400 when newPhotoId equals the old id', async () => {
-    setupAuth()
-    const res = await app.inject({
-      method: 'POST', url: '/profile/me/photos/old-photo/replace',
-      headers: AUTH, payload: { newPhotoId: 'old-photo' },
-    })
+    const res = await replace('old-photo', 'old-photo')
     expect(res.statusCode).toBe(400)
     expect(res.json()).toEqual({ error: 'invalid_photo_id' })
   })
 
   it('swaps the new photo into the old photo position and returns it', async () => {
-    setupAuth()
+    const [p0, p1, old] = await addPhotos(me.id, 3)
+    const newId = randomUUID()
 
-    // Old photo lookup.
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ single: () => ({ data: { id: 'old-photo', position: 2 }, error: null }) }) }) }),
-    } as any)
-    // Delete old row.
-    vi.mocked(db.from).mockReturnValueOnce({
-      delete: () => ({ eq: () => ({ data: null, error: null }) }),
-    } as any)
-    // Insert new row.
-    vi.mocked(db.from).mockReturnValueOnce({
-      insert: () => ({ data: null, error: null }),
-    } as any)
-    // Resume check: not paused → no row.
-    vi.mocked(db.from).mockReturnValueOnce({
-      update: () => ({ eq: () => ({ not: () => ({ select: () => ({ maybeSingle: () => ({ data: null }) }) }) }) }),
-    } as any)
+    const res = await replace(old.id, newId)
 
-    const PUBLIC_URL = 'https://supabase.example.com/public/profile-photos/user-uuid-1/new-photo'
-    const storageMock = {
-      remove: vi.fn().mockResolvedValue({ error: null }),
-      getPublicUrl: () => ({ data: { publicUrl: PUBLIC_URL } }),
-    }
-    vi.mocked(db.storage.from).mockReturnValue(storageMock as any)
-
-    const res = await app.inject({
-      method: 'POST', url: '/profile/me/photos/old-photo/replace',
-      headers: AUTH, payload: { newPhotoId: 'new-photo' },
-    })
-
+    const url = `https://cdn.test/profile-photos/${me.id}/${newId}`
     expect(res.statusCode).toBe(200)
-    expect(storageMock.remove).toHaveBeenCalledWith([`${USER_ID}/old-photo`])
-    expect(res.json()).toEqual({ photo: { id: 'new-photo', url: PUBLIC_URL, position: 2 } })
+    expect(storage.remove).toHaveBeenCalledWith([`${me.id}/${old.id}`])
+    expect(res.json()).toEqual({ photo: { id: newId, url, position: 2 } })
+    expect(await sql`select id, position from user_photos where user_id = ${me.id} order by position`).toEqual([
+      { id: p0.id, position: 0 }, { id: p1.id, position: 1 }, { id: newId, position: 2 },
+    ])
+    expect(scheduleMainPhotoCheck).not.toHaveBeenCalled()
+  })
+
+  it('re-checks the main photo when the main photo is swapped', async () => {
+    const [main] = await addPhotos(me.id, 1)
+    expect((await replace(main.id, randomUUID())).statusCode).toBe(200)
+    expect(scheduleMainPhotoCheck).toHaveBeenCalledWith(me.id, expect.anything())
+  })
+
+  it('lifts a photo-review pause and resolves pending reports', async () => {
+    const paused = await createUser({ paused_at: '2026-10-01T00:00:00Z' })
+    authAs(paused)
+    const [old] = await addPhotos(paused.id, 1)
+    const report = await createReport(paused.id)
+
+    expect((await replace(old.id, randomUUID())).statusCode).toBe(200)
+
+    expect((await sql`select paused_at from users where id = ${paused.id}`)[0].paused_at).toBeNull()
+    expect((await sql`select status from reports where id = ${report.id}`)[0].status).toBe('resolved_reuploaded')
+  })
+
+  it('returns 500 photo_replace_failed when the new id cannot be inserted', async () => {
+    const [, old] = await addPhotos(me.id, 2)
+    const res = await replace(old.id, 'new-photo')
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toEqual({ error: 'photo_replace_failed' })
   })
 
   it('returns 401 when not authenticated', async () => {

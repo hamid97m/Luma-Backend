@@ -1,11 +1,11 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../../db.js'
+import { sql, isUuid } from '../../db.js'
 import { notifyPaused, sendBroadcastMessage, forwardBroadcastMessage } from '../../bot.js'
 import { deleteAllPhotosForUser } from '../../photos/deleteAllPhotosForUser.js'
 import { validateButton } from '../../messaging/messageButton.js'
 import { parseChannelMessageLink } from '../../messaging/channelLink.js'
 import { scheduleUserGeo } from '../../geo/resolveCity.js'
-import { isLocale } from '../../i18n/index.js'
+import { isLocale, type Locale } from '../../i18n/index.js'
 
 export const PAGE_SIZE = 20
 
@@ -41,33 +41,49 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const from = (pageNum - 1) * PAGE_SIZE
 
-    let q: any = db
-      .from('users')
-      .select(
-        'id, telegram_id, username, name, age, gender, looking_for, is_active, is_seed, banned_at, paused_at, deleted_at, created_at, last_active, geo_city, geo_country, locale, account_status',
-        { count: 'exact' }
-      )
+    const statusFilter =
+      status === 'active' ? sql`and account_status = 'active' and deleted_at is null and banned_at is null`
+      : status === 'preparing' ? sql`and account_status = 'preparing' and deleted_at is null and banned_at is null`
+      : status === 'banned' ? sql`and banned_at is not null`
+      : status === 'deleted' ? sql`and deleted_at is not null`
+      : status === 'seed' ? sql`and is_seed = true`
+      : sql``
 
-    if (status === 'active') q = q.eq('account_status', 'active').is('deleted_at', null).is('banned_at', null)
-    else if (status === 'preparing') q = q.eq('account_status', 'preparing').is('deleted_at', null).is('banned_at', null)
-    else if (status === 'banned') q = q.not('banned_at', 'is', null)
-    else if (status === 'deleted') q = q.not('deleted_at', 'is', null)
-    else if (status === 'seed') q = q.eq('is_seed', true)
+    const genderFilter = GENDERS.includes(gender) ? sql`and gender = ${gender}` : sql``
 
-    if (GENDERS.includes(gender)) q = q.eq('gender', gender)
-
+    // Same sanitising as the PostgREST `or=` string needed; kept so a search
+    // returns the same rows as before. The term is a bind parameter. `%`/`_`
+    // stay wildcards, and `*` too (PostgREST treated it as an alias of `%`).
     const search = query.trim().replace(/[,()"\\]/g, ' ').replace(/\s+/g, ' ').trim()
+    let searchFilter = sql``
     if (search) {
-      const ors = [`name.ilike.%${search}%`, `username.ilike.%${search}%`]
-      if (/^-?\d+$/.test(search)) ors.push(`telegram_id.eq.${search}`)
-      q = q.or(ors.join(','))
+      const pattern = `%${search.replace(/\*/g, '%')}%`
+      searchFilter = /^-?\d+$/.test(search)
+        ? sql`and (name ilike ${pattern} or username ilike ${pattern} or telegram_id = ${search}::bigint)`
+        : sql`and (name ilike ${pattern} or username ilike ${pattern})`
     }
 
-    const { data, count, error } = await q
-      .order('created_at', { ascending: false })
-      .range(from, from + PAGE_SIZE - 1)
-
-    if (error) return reply.status(500).send({ error: 'users_fetch_failed' })
+    // Admins see every user, deleted ones included (unless a status filter says otherwise).
+    let data: any[]
+    let count: number
+    try {
+      ;[data, [{ count }]] = await Promise.all([
+        sql`
+          select id, telegram_id, username, name, age, gender, looking_for, is_active, is_seed,
+                 banned_at, paused_at, deleted_at, created_at, last_active, geo_city, geo_country,
+                 locale, account_status
+          from users
+          where true ${statusFilter} ${genderFilter} ${searchFilter}
+          order by created_at desc
+          limit ${PAGE_SIZE} offset ${from}`,
+        sql<{ count: number }[]>`
+          select count(*)::int as count from users
+          where true ${statusFilter} ${genderFilter} ${searchFilter}`,
+      ])
+    } catch (err) {
+      req.log.error({ err }, 'users fetch failed')
+      return reply.status(500).send({ error: 'users_fetch_failed' })
+    }
 
     const total = count ?? 0
     return {
@@ -97,40 +113,45 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     const locale = body.locale === undefined ? 'fa' : body.locale
     if (!isLocale(locale)) return reply.status(400).send({ error: 'invalid_locale' })
 
-    const { data: user, error } = await db
-      .from('users')
-      .insert({
-        telegram_id: -Date.now(),
-        name,
-        age,
-        gender,
-        looking_for,
-        bio: typeof body.bio === 'string' ? body.bio : null,
-        interests: Array.isArray(body.interests) ? body.interests : [],
-        location: typeof body.location === 'string' ? body.location : null,
-        icebreaker_prompt: typeof body.icebreaker_prompt === 'string' ? body.icebreaker_prompt : null,
-        icebreaker_answer: typeof body.icebreaker_answer === 'string' ? body.icebreaker_answer : null,
-        locale,
-        is_seed: true,
-        is_active: true,
-        // A seed is discoverable only once it has a city and a photo, same bar
-        // as a finished signup. Age is already validated above.
-        account_status: (typeof body.location === 'string' && body.location.trim().length >= 2 && photos.length > 0)
-          ? 'active'
-          : 'preparing',
-      })
-      .select('id')
-      .single()
+    let user: { id: string } | undefined
+    try {
+      ;[user] = await sql<{ id: string }[]>`
+        insert into users ${sql({
+          telegram_id: -Date.now(),
+          name,
+          age,
+          gender,
+          looking_for,
+          bio: typeof body.bio === 'string' ? body.bio : null,
+          interests: Array.isArray(body.interests) ? body.interests : [],
+          location: typeof body.location === 'string' ? body.location : null,
+          icebreaker_prompt: typeof body.icebreaker_prompt === 'string' ? body.icebreaker_prompt : null,
+          icebreaker_answer: typeof body.icebreaker_answer === 'string' ? body.icebreaker_answer : null,
+          locale,
+          is_seed: true,
+          is_active: true,
+          // A seed is discoverable only once it has a city and a photo, same bar
+          // as a finished signup. Age is already validated above.
+          account_status: (typeof body.location === 'string' && body.location.trim().length >= 2 && photos.length > 0)
+            ? 'active'
+            : 'preparing',
+        } as Record<string, any>)}
+        returning id`
+    } catch (err) {
+      req.log.error({ err }, 'seed user create failed')
+    }
 
-    if (error || !user) return reply.status(500).send({ error: 'create_failed' })
+    if (!user) return reply.status(500).send({ error: 'create_failed' })
 
     scheduleUserGeo(user.id, typeof body.location === 'string' ? body.location : null, req.log)
 
     if (photos.length) {
-      const { error: photoErr } = await db
-        .from('user_photos')
-        .insert(photos.map((url, i) => ({ user_id: user.id, url, position: i })))
-      if (photoErr) req.log.warn({ err: photoErr }, 'failed to insert seed photos')
+      const userId = user.id
+      try {
+        await sql`insert into user_photos ${sql(photos.map((url, i) => ({ user_id: userId, url, position: i })))}`
+      } catch (photoErr) {
+        req.log.warn({ err: photoErr }, 'failed to insert seed photos')
+      }
     }
 
     return reply.status(201).send({ id: user.id })
@@ -139,52 +160,41 @@ export async function adminUsersRoutes(app: FastifyInstance) {
   app.get('/users/:id', async (req, reply) => {
     const { id } = req.params as { id: string }
 
-    const { data: user } = await db.from('users').select('*').eq('id', id).single()
+    // Malformed id or a failed lookup → 404, as with PostgREST's `data: null`.
+    let user: any
+    try {
+      ;[user] = isUuid(id) ? await sql`select * from users where id = ${id}` : []
+    } catch (err) {
+      req.log.error({ err }, 'user detail lookup failed')
+    }
     if (!user) return reply.status(404).send({ error: 'user_not_found' })
 
     try {
-      const { data: photos, error: photosErr } = await db
-        .from('user_photos')
-        .select('url, position')
-        .eq('user_id', id)
-        .order('position', { ascending: true })
-      if (photosErr) throw new Error('user detail photos failed')
-
-      const countOf = async (table: string, refine: (q: any) => any): Promise<number> => {
-        const { count, error } = await refine(db.from(table).select('id', { count: 'exact', head: true }))
-        if (error) throw new Error(`user detail count failed: ${table}`)
-        return count ?? 0
-      }
-
-      const [swipesGiven, likesReceived, messagesSent] = await Promise.all([
-        countOf('swipes', (q) => q.eq('swiper_id', id)),
-        countOf('swipes', (q) => q.eq('swiped_id', id).eq('direction', 'like')),
-        countOf('messages', (q) => q.eq('sender_id', id).neq('type', 'icebreaker')),
+      const [photos, [counts], matchRows] = await Promise.all([
+        sql<{ url: string }[]>`select url, position from user_photos where user_id = ${id} order by position asc`,
+        sql<{ swipes_given: number; likes_received: number; messages_sent: number }[]>`
+          select
+            (select count(*)::int from swipes where swiper_id = ${id}) as swipes_given,
+            (select count(*)::int from swipes where swiped_id = ${id} and direction = 'like') as likes_received,
+            (select count(*)::int from messages where sender_id = ${id} and type <> 'icebreaker') as messages_sent`,
+        // The other participant of each match, with their lowest-position photo.
+        sql<{ id: string; created_at: string; other_id: string | null; other_name: string | null; other_photo: string | null }[]>`
+          select m.id, m.created_at, o.id as other_id, o.name as other_name,
+                 (select p.url from user_photos p where p.user_id = o.id order by p.position asc limit 1) as other_photo
+          from matches m
+          left join users o on o.id = case when m.user1_id = ${id} then m.user2_id else m.user1_id end
+          where m.user1_id = ${id} or m.user2_id = ${id}
+          order by m.created_at desc`,
       ])
+      const swipesGiven = counts.swipes_given
+      const likesReceived = counts.likes_received
+      const messagesSent = counts.messages_sent
 
-      const { data: matchRows, error: matchesErr } = await db
-        .from('matches')
-        .select(`
-          id, created_at, user1_id, user2_id,
-          user1:users!matches_user1_id_fkey(id, name, user_photos(url, position)),
-          user2:users!matches_user2_id_fkey(id, name, user_photos(url, position))
-        `)
-        .or(`user1_id.eq.${id},user2_id.eq.${id}`)
-        .order('created_at', { ascending: false })
-      if (matchesErr) throw new Error('user detail matches failed')
-
-      const matches = (matchRows ?? []).map((row: any) => {
-        const other = row.user1_id === id ? row.user2 : row.user1
-        const photo =
-          (other?.user_photos ?? [])
-            .slice()
-            .sort((a: any, b: any) => a.position - b.position)[0]?.url ?? null
-        return {
-          matchId: row.id,
-          matchedAt: row.created_at,
-          user: { id: other?.id ?? null, name: other?.name ?? '', photo },
-        }
-      })
+      const matches = matchRows.map((row) => ({
+        matchId: row.id,
+        matchedAt: row.created_at,
+        user: { id: row.other_id ?? null, name: row.other_name ?? '', photo: row.other_photo ?? null },
+      }))
 
       return {
         user: {
@@ -211,7 +221,12 @@ export async function adminUsersRoutes(app: FastifyInstance) {
   // Fetches the user and enforces the seed-only guard shared by edit/delete.
   // Sends the error reply itself and returns null when the guard fails.
   const fetchSeedUser = async (id: string, reply: any) => {
-    const { data: user } = await db.from('users').select('id, is_seed').eq('id', id).single()
+    let user: { id: string; is_seed: boolean } | undefined
+    try {
+      ;[user] = isUuid(id)
+        ? await sql<{ id: string; is_seed: boolean }[]>`select id, is_seed from users where id = ${id}`
+        : []
+    } catch { /* treated as not found, like PostgREST's data: null */ }
     if (!user) {
       reply.status(404).send({ error: 'user_not_found' })
       return null
@@ -294,20 +309,29 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     }
 
     if (Object.keys(patch).length > 0) {
-      const { error } = await db.from('users').update(patch).eq('id', id)
-      if (error) return reply.status(500).send({ error: 'update_failed' })
+      try {
+        await sql`update users set ${sql(patch as Record<string, any>)} where id = ${id}`
+      } catch (err) {
+        req.log.error({ err }, 'seed user update failed')
+        return reply.status(500).send({ error: 'update_failed' })
+      }
       if ('location' in patch) scheduleUserGeo(id, patch.location as string | null, req.log)
     }
 
     if (photos !== null) {
       // Replace-all semantics: wipe existing rows, then re-insert in order.
-      const { error: delErr } = await db.from('user_photos').delete().eq('user_id', id)
-      if (delErr) return reply.status(500).send({ error: 'photos_update_failed' })
-      if (photos.length) {
-        const { error: insErr } = await db
-          .from('user_photos')
-          .insert(photos.map((url, i) => ({ user_id: id, url, position: i })))
-        if (insErr) return reply.status(500).send({ error: 'photos_update_failed' })
+      // In one transaction, so a failed insert no longer leaves the fake photo-less.
+      const newPhotos = photos
+      try {
+        await sql.begin(async (tx) => {
+          await tx`delete from user_photos where user_id = ${id}`
+          if (newPhotos.length) {
+            await tx`insert into user_photos ${tx(newPhotos.map((url, i) => ({ user_id: id, url, position: i })))}`
+          }
+        })
+      } catch (err) {
+        req.log.error({ err }, 'seed photos update failed')
+        return reply.status(500).send({ error: 'photos_update_failed' })
       }
     }
 
@@ -323,23 +347,24 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     // Soft delete: swipes/matches/messages FK-reference users without ON DELETE CASCADE, so a hard
     // delete would violate FKs once the fake has activity; deleted_at also removes it from the
     // fake-liker pool (which filters is('deleted_at', null)).
-    const { error } = await db
-      .from('users')
-      .update({ deleted_at: new Date().toISOString(), is_active: false })
-      .eq('id', id)
-    if (error) return reply.status(500).send({ error: 'delete_failed' })
+    try {
+      await sql`update users set deleted_at = ${new Date().toISOString()}, is_active = false where id = ${id}`
+    } catch (err) {
+      req.log.error({ err }, 'seed user delete failed')
+      return reply.status(500).send({ error: 'delete_failed' })
+    }
 
     return { ok: true }
   })
 
   const setBanned = async (id: string, bannedAt: string | null, reply: any) => {
-    const { data, error } = await db
-      .from('users')
-      .update({ banned_at: bannedAt })
-      .eq('id', id)
-      .select('id')
-      .single()
-    if (error || !data) return reply.status(404).send({ error: 'user_not_found' })
+    let data: { id: string } | undefined
+    try {
+      ;[data] = isUuid(id)
+        ? await sql<{ id: string }[]>`update users set banned_at = ${bannedAt} where id = ${id} returning id`
+        : []
+    } catch { /* any failure answered 404 before, too */ }
+    if (!data) return reply.status(404).send({ error: 'user_not_found' })
     return { ok: true }
   }
 
@@ -354,13 +379,16 @@ export async function adminUsersRoutes(app: FastifyInstance) {
   })
 
   const setPaused = async (id: string, pausedAt: string | null, reply: any) => {
-    const { data, error } = await db
-      .from('users')
-      .update({ paused_at: pausedAt })
-      .eq('id', id)
-      .select('telegram_id, allows_write_to_pm, locale')
-      .single()
-    if (error || !data) return reply.status(404).send({ error: 'user_not_found' })
+    type Paused = { telegram_id: number; allows_write_to_pm: boolean | null; locale: Locale | null }
+    let data: Paused | undefined
+    try {
+      ;[data] = isUuid(id)
+        ? await sql<Paused[]>`
+            update users set paused_at = ${pausedAt} where id = ${id}
+            returning telegram_id, allows_write_to_pm, locale`
+        : []
+    } catch { /* any failure answered 404 before, too */ }
+    if (!data) return reply.status(404).send({ error: 'user_not_found' })
 
     // Pausing for photo review means the user must re-upload from scratch;
     // best-effort by construction, never blocks the pause response.
@@ -409,13 +437,13 @@ export async function adminUsersRoutes(app: FastifyInstance) {
       deliver = (telegramId) => sendBroadcastMessage(telegramId, trimmed, btn.button)
     }
 
-    const { data: user, error } = await db
-      .from('users')
-      .select('telegram_id, is_seed')
-      .eq('id', id)
-      .single()
-    if (error && (error as any).code !== 'PGRST116') {
-      req.log.error({ err: error }, 'user lookup failed')
+    let user: { telegram_id: number; is_seed: boolean } | undefined
+    try {
+      ;[user] = isUuid(id)
+        ? await sql<{ telegram_id: number; is_seed: boolean }[]>`select telegram_id, is_seed from users where id = ${id}`
+        : []
+    } catch (err) {
+      req.log.error({ err }, 'user lookup failed')
       return reply.status(500).send({ error: 'user_fetch_failed' })
     }
     if (!user) return reply.status(404).send({ error: 'user_not_found' })

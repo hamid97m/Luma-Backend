@@ -1,75 +1,66 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import bcrypt from 'bcryptjs'
 
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
-
 import { buildApp } from '../src/server.js'
-import { db } from '../src/db.js'
-import { hashPassword, signAdminToken } from '../src/routes/admin/auth-utils.js'
-import { chainable } from './admin-helpers.js'
+import { signAdminToken } from '../src/routes/admin/auth-utils.js'
+import { resetDb, sql } from './helpers/db.js'
+import { createAdmin } from './helpers/admin.js'
 
 describe('admin auth', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
   beforeEach(async () => {
+    await resetDb()
     process.env.ADMIN_JWT_SECRET = 'test-secret'
     app = await buildApp()
   })
 
-  it('POST /admin/auth/login returns a token for valid credentials', async () => {
-    const password_hash = await hashPassword('hunter2')
-    vi.mocked(db.from).mockImplementation(() =>
-      chainable({ data: { id: 'admin-1', username: 'root', password_hash }, error: null })
-    )
+  const login = (payload: unknown) =>
+    app.inject({ method: 'POST', url: '/admin/auth/login', payload: payload as any })
 
-    const res = await app.inject({
-      method: 'POST', url: '/admin/auth/login',
-      payload: { username: 'root', password: 'hunter2' },
-    })
+  it('POST /admin/auth/login returns a token for valid credentials and stamps last_login_at', async () => {
+    const { admin } = await createAdmin('root', 'hunter2')
+
+    const res = await login({ username: 'root', password: 'hunter2' })
 
     expect(res.statusCode).toBe(200)
-    expect(res.json().token).toBeTruthy()
+    const token = res.json().token
+    expect(token).toBeTruthy()
+    // fire-and-forget update
+    await vi.waitFor(async () => {
+      const [row] = await sql`select last_login_at from admins where id = ${admin.id}`
+      expect(row.last_login_at).not.toBeNull()
+    })
+    const me = await app.inject({ method: 'GET', url: '/admin/me', headers: { authorization: `Bearer ${token}` } })
+    expect(me.json()).toEqual({ adminId: admin.id, username: 'root' })
   })
 
   it('rejects a wrong password with a generic error', async () => {
-    const password_hash = await hashPassword('hunter2')
-    vi.mocked(db.from).mockImplementation(() =>
-      chainable({ data: { id: 'admin-1', username: 'root', password_hash }, error: null })
-    )
-    const res = await app.inject({
-      method: 'POST', url: '/admin/auth/login',
-      payload: { username: 'root', password: 'wrong' },
-    })
+    await createAdmin('root', 'hunter2')
+    const res = await login({ username: 'root', password: 'wrong' })
     expect(res.statusCode).toBe(401)
     expect(res.json()).toEqual({ error: 'invalid_credentials' })
   })
 
   it('rejects an unknown username with the same generic error', async () => {
-    vi.mocked(db.from).mockImplementation(() =>
-      chainable({ data: null, error: { message: 'not found' } })
-    )
-    const res = await app.inject({
-      method: 'POST', url: '/admin/auth/login',
-      payload: { username: 'ghost', password: 'x' },
-    })
+    const res = await login({ username: 'ghost', password: 'x' })
+    expect(res.statusCode).toBe(401)
+    expect(res.json()).toEqual({ error: 'invalid_credentials' })
+  })
+
+  it('treats a non-string username as an unknown user (no 500)', async () => {
+    const res = await login({ username: { $ne: null }, password: 'x' })
     expect(res.statusCode).toBe(401)
     expect(res.json()).toEqual({ error: 'invalid_credentials' })
   })
 
   it('runs bcrypt against a dummy hash for unknown usernames (constant-time login)', async () => {
-    vi.mocked(db.from).mockImplementation(() =>
-      chainable({ data: null, error: { message: 'not found' } })
-    )
     const compareSpy = vi.spyOn(bcrypt, 'compare')
 
-    const res = await app.inject({
-      method: 'POST', url: '/admin/auth/login',
-      payload: { username: 'ghost', password: 'x' },
-    })
+    const res = await login({ username: 'ghost', password: 'x' })
 
     expect(res.statusCode).toBe(401)
     expect(res.json()).toEqual({ error: 'invalid_credentials' })
-    // Behavior is unchanged, but the code shape must always invoke bcrypt
-    // exactly once — this is what equalizes timing between known and
+    // Always exactly one bcrypt run — equalizes timing between known and
     // unknown usernames and prevents enumeration via response latency.
     expect(compareSpy).toHaveBeenCalledTimes(1)
 
@@ -77,16 +68,13 @@ describe('admin auth', () => {
   })
 
   it('returns 400 when credentials are missing', async () => {
-    const res = await app.inject({ method: 'POST', url: '/admin/auth/login', payload: {} })
+    const res = await login({})
     expect(res.statusCode).toBe(400)
   })
 
   it('returns 503 when ADMIN_JWT_SECRET is not configured', async () => {
     delete process.env.ADMIN_JWT_SECRET
-    const res = await app.inject({
-      method: 'POST', url: '/admin/auth/login',
-      payload: { username: 'root', password: 'x' },
-    })
+    const res = await login({ username: 'root', password: 'x' })
     expect(res.statusCode).toBe(503)
   })
 
@@ -116,24 +104,14 @@ describe('admin auth', () => {
   })
 
   it('rate limits repeated login attempts from the same IP regardless of Authorization header', async () => {
-    vi.mocked(db.from).mockImplementation(() =>
-      chainable({ data: null, error: { message: 'not found' } })
-    )
-
     // app.inject uses the same default remoteAddress for every call against
     // this single app instance, so the IP-keyed bucket accumulates across requests.
     for (let i = 0; i < 10; i++) {
-      const res = await app.inject({
-        method: 'POST', url: '/admin/auth/login',
-        payload: { username: 'ghost', password: 'x' },
-      })
+      const res = await login({ username: 'ghost', password: 'x' })
       expect(res.statusCode).toBe(401)
     }
 
-    const res = await app.inject({
-      method: 'POST', url: '/admin/auth/login',
-      payload: { username: 'ghost', password: 'x' },
-    })
+    const res = await login({ username: 'ghost', password: 'x' })
     expect(res.statusCode).toBe(429)
     expect(res.json()).toEqual({ error: 'rate_limited' })
   })

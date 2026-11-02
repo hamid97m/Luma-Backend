@@ -1,16 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 
-const { getReferralConfig, ensureReferralCode, evaluateReferralRewards, getBotUsername } = vi.hoisted(() => ({
-  getReferralConfig: vi.fn(),
-  ensureReferralCode: vi.fn(),
+const { evaluateReferralRewards, getBotUsername } = vi.hoisted(() => ({
   evaluateReferralRewards: vi.fn(() => Promise.resolve()),
   getBotUsername: vi.fn(),
 }))
-vi.mock('../src/referrals/config.js', () => ({ getReferralConfig }))
-vi.mock('../src/referrals/attribution.js', () => ({ ensureReferralCode }))
 vi.mock('../src/referrals/rewards.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/referrals/rewards.js')>()
   return { ...actual, evaluateReferralRewards }
@@ -18,23 +13,24 @@ vi.mock('../src/referrals/rewards.js', async (importOriginal) => {
 vi.mock('../src/bot.js', () => ({ getBotUsername }))
 
 import { buildApp } from '../src/server.js'
-import { verifyInitData } from '../src/auth.js'
-import { db } from '../src/db.js'
-
-const AUTH = { authorization: 'valid_init_data' }
-const USER_ID = 'user-1'
-
-function setupAuth() {
-  vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
-  // auth preHandler: users lookup by telegram_id
-  vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({ eq: () => ({ single: () => ({ data: { id: USER_ID } }) }) }),
-  } as any)
-}
+import { AUTH, authAs } from './helpers/auth.js'
+import { resetDb, createUser, sql } from './helpers/db.js'
 
 describe('GET /referrals/me', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
-  beforeEach(async () => { vi.clearAllMocks(); app = await buildApp() })
+  let me: Record<string, any>
+
+  beforeEach(async () => {
+    await resetDb()
+    app = await buildApp()
+    getBotUsername.mockReturnValue('LumaBot')
+    me = await createUser({ name: 'Ali' })
+  })
+
+  async function referred(qualifiedAt: string | null) {
+    const u = await createUser({ referred_by: me.id })
+    await sql`insert into referrals (referrer_id, referred_id, qualified_at) values (${me.id}, ${u.id}, ${qualifiedAt})`
+  }
 
   it('returns 401 when unauthenticated', async () => {
     const res = await app.inject({ method: 'GET', url: '/referrals/me' })
@@ -42,28 +38,14 @@ describe('GET /referrals/me', () => {
   })
 
   it('returns the full shape when enabled, and calls evaluateReferralRewards', async () => {
-    setupAuth()
-    getReferralConfig.mockResolvedValue({ enabled: true })
-    ensureReferralCode.mockResolvedValue('x9km2pqr')
-    getBotUsername.mockReturnValue('LumaBot')
-    vi.mocked(db.from)
-      .mockReturnValueOnce({ // referrals totals
-        select: () => ({
-          eq: () => ({
-            limit: () => Promise.resolve({
-              data: [
-                { qualified_at: '2026-01-01T00:00:00.000Z' },
-                { qualified_at: '2026-01-02T00:00:00.000Z' },
-                { qualified_at: null },
-                { qualified_at: null },
-              ],
-            }),
-          }),
-        }),
-      } as any)
-      .mockReturnValueOnce({ // referral_rewards
-        select: () => ({ eq: () => Promise.resolve({ data: [{ milestone: 1 }] }) }),
-      } as any)
+    authAs(me)
+    await sql`update referral_config set enabled = true`
+    await sql`update users set referral_code = 'x9km2pqr' where id = ${me.id}`
+    await referred('2026-01-01T00:00:00.000Z')
+    await referred('2026-01-02T00:00:00.000Z')
+    await referred(null)
+    await referred(null)
+    await sql`insert into referral_rewards (referrer_id, milestone) values (${me.id}, 1)`
 
     const res = await app.inject({ method: 'GET', url: '/referrals/me', headers: AUTH })
 
@@ -80,30 +62,24 @@ describe('GET /referrals/me', () => {
         { count: 10, rewardType: 'premium_days', rewardAmount: 30, achieved: false, granted: false },
       ],
     })
-    expect(evaluateReferralRewards).toHaveBeenCalledWith(USER_ID)
+    expect(evaluateReferralRewards).toHaveBeenCalledWith(me.id)
     expect(evaluateReferralRewards).toHaveBeenCalledTimes(1)
   })
 
-  it('returns enabled:false with the rest populated, and skips evaluateReferralRewards', async () => {
-    setupAuth()
-    getReferralConfig.mockResolvedValue({ enabled: false })
-    ensureReferralCode.mockResolvedValue('abcd1234')
-    getBotUsername.mockReturnValue('LumaBot')
-    vi.mocked(db.from)
-      .mockReturnValueOnce({
-        select: () => ({ eq: () => ({ limit: () => Promise.resolve({ data: [{ qualified_at: null }] }) }) }),
-      } as any)
-      .mockReturnValueOnce({
-        select: () => ({ eq: () => Promise.resolve({ data: [] }) }),
-      } as any)
+  it('returns enabled:false with the rest populated (code minted on first view), and skips evaluateReferralRewards', async () => {
+    authAs(me)
+    await referred(null)
 
     const res = await app.inject({ method: 'GET', url: '/referrals/me', headers: AUTH })
 
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({
+    const body = res.json()
+    const [{ referral_code }] = await sql`select referral_code from users where id = ${me.id}`
+    expect(referral_code).toHaveLength(8)
+    expect(body).toEqual({
       enabled: false,
-      code: 'abcd1234',
-      link: 'https://t.me/LumaBot?start=ref_abcd1234',
+      code: referral_code,
+      link: `https://t.me/LumaBot?start=ref_${referral_code}`,
       qualifiedCount: 0,
       totalCount: 1,
       milestones: [
@@ -113,5 +89,12 @@ describe('GET /referrals/me', () => {
       ],
     })
     expect(evaluateReferralRewards).not.toHaveBeenCalled()
+  })
+
+  it('link is null when the bot username is unknown', async () => {
+    authAs(me)
+    getBotUsername.mockReturnValue(undefined)
+    const res = await app.inject({ method: 'GET', url: '/referrals/me', headers: AUTH })
+    expect(res.json()).toMatchObject({ link: null, qualifiedCount: 0, totalCount: 0 })
   })
 })

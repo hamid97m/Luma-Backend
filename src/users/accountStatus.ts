@@ -1,4 +1,4 @@
-import { db } from '../db.js'
+import { sql } from '../db.js'
 
 /** A signup is finished only when the profile has an age, a city, and a photo. */
 export function isSignupComplete(
@@ -27,10 +27,11 @@ export async function markActiveIfSignupComplete(
 ): Promise<void> {
   if (user.account_status === 'active') return
   if (!isSignupComplete(user, photoCount)) return
-  const { error } = await db
-    .from('users')
-    .update({ account_status: 'active' })
-    .eq('id', userId)
-    .eq('account_status', 'preparing')
-  if (error) console.error('markActiveIfSignupComplete failed', error)
+  try {
+    await sql`
+      update users set account_status = 'active'
+      where id = ${userId} and account_status = 'preparing'`
+  } catch (error) {
+    console.error('markActiveIfSignupComplete failed', error)
+  }
 }

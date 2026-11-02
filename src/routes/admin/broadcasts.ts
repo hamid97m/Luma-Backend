@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../../db.js'
+import { sql, isUuid, defined } from '../../db.js'
 import { countAudience, fetchAudience, type BroadcastFilters } from '../../messaging/audience.js'
 import { runBroadcast } from '../../messaging/broadcast.js'
 import { sendBroadcastMessage, forwardBroadcastMessage, verifyForwardSource } from '../../bot.js'
@@ -80,27 +80,35 @@ async function executeBroadcast(
     const { sent, failed } = await runBroadcast(targets, {
       send: deliver,
       onOptOut: async (userId) => {
-        await db.from('users').update({ allows_write_to_pm: false }).eq('id', userId)
+        await sql`update users set allows_write_to_pm = false where id = ${userId}`
       },
+      // runBroadcast passes running totals from its single loop, so a plain set
+      // is race-free (one statement per batch). A failed progress write used to be
+      // ignored — keep the loop going rather than failing the whole broadcast.
       onProgress: async ({ sent, failed }) => {
-        await db.from('broadcasts').update({ sent_count: sent, failed_count: failed }).eq('id', id)
+        await sql`update broadcasts set sent_count = ${sent}, failed_count = ${failed} where id = ${id}`
+          .catch((err) => log?.warn?.({ err }, 'broadcast progress update failed'))
       },
     })
-    await db.from('broadcasts').update({
-      status: 'completed', sent_count: sent, failed_count: failed, finished_at: new Date().toISOString(),
-    }).eq('id', id)
+    await sql`
+      update broadcasts
+      set status = 'completed', sent_count = ${sent}, failed_count = ${failed},
+          finished_at = ${new Date().toISOString()}
+      where id = ${id}`.catch((err) => log?.error?.({ err }, 'broadcast completion write failed'))
   } catch (err: any) {
     log?.error?.({ err }, 'broadcast execution failed')
-    await db.from('broadcasts').update({
-      status: 'failed', error: String(err?.message ?? err), finished_at: new Date().toISOString(),
-    }).eq('id', id)
+    await sql`
+      update broadcasts
+      set status = 'failed', error = ${String(err?.message ?? err)}, finished_at = ${new Date().toISOString()}
+      where id = ${id}`.catch((e) => log?.error?.({ err: e }, 'broadcast failure write failed'))
   }
 }
 
 export async function adminBroadcastsRoutes(app: FastifyInstance) {
   app.post('/broadcasts/preview', async (req) => {
     const { filters } = req.body as { filters?: BroadcastFilters }
-    const count = await countAudience(db, filters ?? {})
+    // A failed count used to read as 0 (the query error was ignored).
+    const count = await countAudience(filters ?? {}).catch(() => 0)
     return { count }
   })
 
@@ -152,42 +160,47 @@ export async function adminBroadcastsRoutes(app: FastifyInstance) {
       deliver = (telegramId) => sendBroadcastMessage(telegramId, trimmed, btn.button)
     }
 
-    const targets = await fetchAudience(db, f)
+    const targets = await fetchAudience(f)
     if (targets.length === 0) return reply.status(400).send({ error: 'empty_audience' })
 
-    const { data: row, error } = await db.from('broadcasts').insert({
-      created_by: req.adminId,
-      created_by_username: req.adminUsername,
-      filters: f,
-      status: 'running',
-      total_recipients: targets.length,
-      ...insert,
-    }).select('*').single()
-    if (error || !row) {
-      req.log.error({ err: error }, 'broadcast create failed')
+    let row: any
+    try {
+      ;[row] = await sql`
+        insert into broadcasts ${sql(defined({
+          created_by: req.adminId,
+          created_by_username: req.adminUsername,
+          filters: sql.json(f as any),
+          status: 'running',
+          total_recipients: targets.length,
+          ...insert,
+        }) as Record<string, any>)}
+        returning *`
+    } catch (err) {
+      req.log.error({ err }, 'broadcast create failed')
       return reply.status(500).send({ error: 'broadcast_create_failed' })
     }
+    if (!row) return reply.status(500).send({ error: 'broadcast_create_failed' })
 
     void executeBroadcast(row.id, targets, deliver, req.log)
     return { broadcast: serialize(row) }
   })
 
   app.get('/broadcasts', async () => {
-    const { data } = await db.from('broadcasts').select('*').order('created_at', { ascending: false }).limit(100)
-    return { items: (data ?? []).map(serialize) }
+    // List errors used to degrade to an empty list.
+    const data = await sql`select * from broadcasts order by created_at desc limit 100`.catch(() => [])
+    return { items: data.map(serialize) }
   })
 
   // --- Abandoned-checkout auto-message config (a 30-min job does the sending) ---
 
   async function purchaseSentCount(): Promise<number> {
-    const { count } = await db
-      .from('purchase_message_sends')
-      .select('user_id', { count: 'exact', head: true })
-    return count ?? 0
+    const [{ count }] = await sql<{ count: number }[]>`
+      select count(*)::int as count from purchase_message_sends`.catch(() => [{ count: 0 }])
+    return count
   }
 
   app.get('/broadcasts/purchase-message', async () => {
-    const cfg = await getPurchaseMessageConfig(db)
+    const cfg = await getPurchaseMessageConfig()
     return { config: serializePurchaseConfig(cfg, await purchaseSentCount()) }
   })
 
@@ -239,16 +252,18 @@ export async function adminBroadcastsRoutes(app: FastifyInstance) {
       }
     }
 
-    const cfg = await updatePurchaseMessageConfig(patch, db)
+    const cfg = await updatePurchaseMessageConfig(patch)
     if (!cfg) return reply.status(500).send({ error: 'purchase_message_update_failed' })
     return { config: serializePurchaseConfig(cfg, await purchaseSentCount()) }
   })
 
   app.get('/broadcasts/:id', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const { data, error } = await db.from('broadcasts').select('*').eq('id', id).single()
-    if (error && error.code !== 'PGRST116') {
-      req.log.error({ err: error }, 'broadcast fetch failed')
+    let data: any
+    try {
+      ;[data] = isUuid(id) ? await sql`select * from broadcasts where id = ${id}` : []
+    } catch (err) {
+      req.log.error({ err }, 'broadcast fetch failed')
       return reply.status(500).send({ error: 'broadcast_fetch_failed' })
     }
     if (!data) return reply.status(404).send({ error: 'broadcast_not_found' })

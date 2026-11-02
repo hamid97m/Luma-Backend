@@ -1,213 +1,117 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/premium/swipeLimit.js', () => ({
   getSwipeLimitStatus: vi.fn().mockResolvedValue({ limited: false, resetAt: null }),
 }))
+// Another area's module — its own tests cover it.
 vi.mock('../src/premium/directChatLimit.js', () => ({
   getDirectChatStatus: vi.fn().mockResolvedValue({ gate: 'free', remaining: 3, limit: 3, resetAt: null }),
 }))
+// The reveal itself is covered by reveal.test.ts; here only its output matters.
 vi.mock('../src/likes/reveal.js', () => ({
   hiddenIncomingLikerIds: vi.fn().mockResolvedValue([]),
   ensureDailyReveal: vi.fn(),
 }))
 
 import { buildApp } from '../src/server.js'
-import { verifyInitData } from '../src/auth.js'
-import { db } from '../src/db.js'
 import { getSwipeLimitStatus } from '../src/premium/swipeLimit.js'
 import { hiddenIncomingLikerIds } from '../src/likes/reveal.js'
-import { chainable } from './admin-helpers.js'
+import { AUTH, authAs } from './helpers/auth.js'
+import { resetDb, createUser, createPhoto, sql } from './helpers/db.js'
+import { createProfile, like, pass, block, minutesAgo } from './helpers/discovery.js'
 
 const DIRECT_CHAT_DEFAULT = { gate: 'free', remaining: 3, limit: 3, resetAt: null }
-
-const AUTH = { authorization: 'valid_init_data' }
-const USER_ID = 'user-uuid-1'
-
-// Seed top-up query runs whenever the real-user batch is under BATCH_SIZE (10),
-// which is every case here — it's a fresh db.from('users') call, so it needs its
-// own queued mock after the real-profile tier(s). Fake/seed users rank last.
-function mockSeedTopUp(data: unknown[] = []) {
-  vi.mocked(db.from).mockReturnValueOnce(chainable({ data, error: null }))
-}
-
-function setupAuth() {
-  vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
-  vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({ eq: () => ({ single: () => ({ data: { id: USER_ID } }) }) }),
-  } as any)
-}
 
 describe('GET /discovery', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
   beforeEach(async () => {
+    await resetDb()
     app = await buildApp()
     vi.mocked(hiddenIncomingLikerIds).mockResolvedValue([])
+    vi.mocked(getSwipeLimitStatus).mockResolvedValue({ limited: false, resetAt: null })
   })
 
-  it('returns exhausted: true when no profiles remain', async () => {
-    setupAuth()
+  /** A viewer (default: a man seeking women, no geo, no locale) authenticated for the next request. */
+  async function viewerAs(overrides: Record<string, unknown> = {}) {
+    const v = await createUser({ name: 'Viewer', gender: 'man', looking_for: 'women', ...overrides })
+    authAs(v)
+    return v
+  }
 
-    // viewer lookup — looking_for: women → genderFilter = 'woman'
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women' }, error: null }) }) }),
-    } as any)
-    // recent swipes
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
-    } as any)
-    // blocks (both directions via .or())
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ or: () => ({ data: [], error: null }) }),
-    } as any)
-    // liker swipes — nobody has liked the viewer
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
-    } as any)
-    // profiles query — chainable tolerates the full is_active→banned→age→gender→… chain
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
-    // seed top-up — no seeds either
-    mockSeedTopUp()
-
+  async function discover() {
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null }, directChat: DIRECT_CHAT_DEFAULT })
+    return res.json() as { profiles: any[]; exhausted: boolean; swipeLimit: unknown; directChat: unknown }
+  }
+  const ids = (body: { profiles: Array<{ id: string }> }) => body.profiles.map((p) => p.id)
+  const names = (body: { profiles: Array<{ name: string }> }) => body.profiles.map((p) => p.name).sort()
+
+  it('returns exhausted: true when no profiles remain', async () => {
+    await viewerAs()
+    expect(await discover()).toEqual({
+      profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null }, directChat: DIRECT_CHAT_DEFAULT,
+    })
   })
 
   it('returns profiles with photos sorted by position', async () => {
-    setupAuth()
+    await viewerAs()
+    const sara = await createUser({
+      name: 'Sara', age: 27, bio: 'سلام', gender: 'woman', looking_for: 'men', premium_until: '2099-01-01T00:00:00.000Z',
+    })
+    // Inserted out of order: the response must sort by position.
+    await createPhoto(sara.id, 1, { url: 'https://img2.jpg' })
+    await createPhoto(sara.id, 0, { url: 'https://img1.jpg' })
 
-    // viewer lookup — looking_for: women
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women' }, error: null }) }) }),
-    } as any)
-    // recent swipes — one existing swipe to exclude
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ or: () => ({ data: [{ swiped_id: 'user-uuid-3' }], error: null }) }) }),
-    } as any)
-    // blocks — empty (both directions via .or())
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ or: () => ({ data: [], error: null }) }),
-    } as any)
-    // liker swipes — nobody has liked the viewer
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
-    } as any)
-    // profiles query — chainable tolerates the full is_active→banned→age→gender→… chain
-    vi.mocked(db.from).mockReturnValueOnce(chainable({
-      data: [
-        {
-          id: 'user-uuid-2',
-          name: 'Sara',
-          age: 27,
-          bio: 'سلام',
-          telegram_id: 999,
-          premium_until: '2099-01-01T00:00:00.000Z',
-          user_photos: [
-            { id: 'ph2', url: 'https://img2.jpg', position: 1 },
-            { id: 'ph1', url: 'https://img1.jpg', position: 0 },
-          ],
-        },
-      ],
-      error: null,
-    }))
-    // seed top-up — one real profile (< 10) still triggers the query; no seeds
-    mockSeedTopUp()
-
-    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-
-    expect(res.statusCode).toBe(200)
-    const body = res.json()
+    const body = await discover()
     expect(body.exhausted).toBe(false)
-    expect(body.profiles).toHaveLength(1)
-    expect(body.profiles[0]).toEqual({
-      id: 'user-uuid-2',
+    expect(body.profiles).toEqual([{
+      id: sara.id,
       name: 'Sara',
       age: 27,
       bio: 'سلام',
-      telegramId: 999,
+      telegramId: sara.telegram_id,
       interests: [],
       location: null,
       nearby: false,
       premium: true,
       photos: ['https://img1.jpg', 'https://img2.jpg'],
-    })
+    }])
   })
 
   it('filters candidates to those whose looking_for includes the viewer gender', async () => {
-    setupAuth()
+    // A man who looks for everyone: no viewer-side gender filter.
+    await viewerAs({ looking_for: 'everyone' })
+    await createProfile({ name: 'w-seeks-men', gender: 'woman', looking_for: 'men' })
+    await createProfile({ name: 'w-seeks-women', gender: 'woman', looking_for: 'women' })
+    await createProfile({ name: 'm-seeks-women', gender: 'man', looking_for: 'women' })
+    await createProfile({ name: 'm-seeks-everyone', gender: 'man', looking_for: 'everyone' })
+    await createProfile({ name: 'nb-seeks-both', gender: 'nonbinary', looking_for: 'both' })
 
-    // viewer — a man who looks for everyone (no viewer-side gender filter)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'everyone', gender: 'man', location: null }, error: null }) }) }),
-    } as any)
-    // recent swipes — empty
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
-    } as any)
-    // blocks — empty
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ or: () => ({ data: [], error: null }) }),
-    } as any)
-    // liker swipes — nobody has liked the viewer
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
-    } as any)
-    // rest-tier profile query — capture the chain calls
-    const log: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }, log))
-    // seed top-up — separate query, not part of the captured rest-tier log
-    mockSeedTopUp()
-
-    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-
-    expect(res.statusCode).toBe(200)
-    // A man-viewer must only see candidates whose looking_for includes men.
-    const inCall = log.find((c) => c.method === 'in' && c.args[0] === 'looking_for')
-    expect(inCall).toBeDefined()
-    expect(inCall!.args[1]).toEqual(['men', 'everyone', 'both'])
+    expect(names(await discover())).toEqual(['m-seeks-everyone', 'nb-seeks-both', 'w-seeks-men'])
   })
 
-  it('explicitly excludes soft-deleted users from every profile query', async () => {
-    setupAuth()
+  it('applies no reciprocal filter for a nonbinary viewer', async () => {
+    await viewerAs({ gender: 'nonbinary', looking_for: 'women' })
+    await createProfile({ name: 'w-seeks-men', looking_for: 'men' })
+    await createProfile({ name: 'w-seeks-women', looking_for: 'women' })
+    expect(names(await discover())).toEqual(['w-seeks-men', 'w-seeks-women'])
+  })
 
-    // viewer lookup
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women' }, error: null }) }) }),
-    } as any)
-    // recent swipes — empty
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
-    } as any)
-    // blocks — empty
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ or: () => ({ data: [], error: null }) }),
-    } as any)
-    // liker swipes — nobody has liked the viewer
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
-    } as any)
-    // rest-tier profile query — capture the chain calls
-    const restLog: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }, restLog))
-    // seed top-up — capture too: seeds must also honor the deleted_at guard
-    const seedLog: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }, seedLog))
-
-    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-
-    expect(res.statusCode).toBe(200)
-    // deleted_at must be guarded explicitly — not left to the is_active
-    // coincidence (delete also flips is_active=false today).
-    for (const log of [restLog, seedLog]) {
-      const isCall = log.find((c) => c.method === 'is' && c.args[0] === 'deleted_at')
-      expect(isCall).toBeDefined()
-      expect(isCall!.args[1]).toBeNull()
-      const statusCall = log.find((c) => c.method === 'eq' && c.args[0] === 'account_status')
-      expect(statusCall?.args[1]).toBe('active')
+  it('excludes deleted, banned, paused, inactive, unfinished, ageless and photo-less users — real and seed', async () => {
+    await viewerAs()
+    for (const is_seed of [false, true]) {
+      await createProfile({ is_seed, name: `deleted-${is_seed}`, deleted_at: minutesAgo(5) })
+      await createProfile({ is_seed, name: `banned-${is_seed}`, banned_at: minutesAgo(5) })
+      await createProfile({ is_seed, name: `paused-${is_seed}`, paused_at: minutesAgo(5) })
+      await createProfile({ is_seed, name: `inactive-${is_seed}`, is_active: false })
+      await createProfile({ is_seed, name: `preparing-${is_seed}`, account_status: 'preparing' })
+      await createProfile({ is_seed, name: `age0-${is_seed}`, age: 0 })
+      await createProfile({ is_seed, name: `nophoto-${is_seed}` }, 0)
+      await createProfile({ is_seed, name: `ok-${is_seed}` })
     }
+    // Soft-deleted but still flagged active — the deleted_at guard must hold on its own.
+    expect(names(await discover())).toEqual(['ok-false', 'ok-true'])
   })
 
   it('returns 401 when no auth header', async () => {
@@ -215,490 +119,257 @@ describe('GET /discovery', () => {
     expect(res.statusCode).toBe(401)
   })
 
-  it('returns 404 when viewer not found in users table', async () => {
-    setupAuth()
-
-    // viewer lookup → null (user not found)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: null, error: { message: 'not found' } }) }) }),
-    } as any)
-    // recent swipes, blocks, liker swipes — read concurrently with the viewer
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
-
+  it('returns 404 when the viewer row is gone by the time discovery reads it', async () => {
+    const v = await viewerAs()
+    // Runs after the auth preHandler: the account disappears mid-request.
+    app.addHook('preHandler', async () => {
+      await sql`delete from users where id = ${v.id}`
+    })
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
     expect(res.statusCode).toBe(404)
     expect(res.json()).toEqual({ error: 'user_not_found' })
   })
 
   it('applies no gender filter when looking_for is both', async () => {
-    setupAuth()
-
-    // viewer lookup → looking_for: both — no genderFilter applied
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'both' }, error: null }) }) }),
-    } as any)
-    // recent swipes — empty
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
-    } as any)
-    // blocks — empty (both directions via .or())
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ or: () => ({ data: [], error: null }) }),
-    } as any)
-    // liker swipes — nobody has liked the viewer
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
-    } as any)
-    // profiles query — chainable tolerates the is_active→banned→age→(no gender)→… chain
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
-    // seed top-up — no seeds
-    mockSeedTopUp()
-
-    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-    expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null }, directChat: DIRECT_CHAT_DEFAULT })
+    await viewerAs({ looking_for: 'both' })
+    await createProfile({ name: 'woman', gender: 'woman', looking_for: 'men' })
+    await createProfile({ name: 'man', gender: 'man', looking_for: 'men' })
+    expect(names(await discover())).toEqual(['man', 'woman'])
   })
 
   it('includes the liker, same-city, and rest profiles in the batch (order shuffled)', async () => {
-    setupAuth()
+    const v = await viewerAs({ location: 'Tehran', geo_city: 'Tehran', geo_country: 'IR' })
+    const liker = await createProfile({ name: 'liker-1', location: 'Tehran' })
+    await like(liker, v)
+    await createProfile({ name: 'city-1', location: 'Tehran', geo_city: 'Tehran', geo_country: 'IR' })
+    await createProfile({ name: 'rest-1', location: 'Mashhad' })
 
-    // viewer — resolved geo so the city and country tiers run
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women', location: 'Tehran', geo_city: 'Tehran', geo_country: 'IR' }, error: null }) }) }),
-    } as any)
-    // recent swipes — empty
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
-    } as any)
-    // blocks — empty
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ or: () => ({ data: [], error: null }) }),
-    } as any)
-    // liker swipes — one person liked the viewer
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [{ swiper_id: 'liker-1' }], error: null }) }) }) }) }),
-    } as any)
-    const profile = (id: string, location: string) => ({
-      id, name: 'N', age: 25, bio: null, telegram_id: 1,
-      interests: [], location, user_photos: [],
-    })
-    // Each tier's profileQuery chain (now includes .gt('age', 0)) → chainable
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('liker-1', 'Tehran')], error: null }))
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('city-1', 'Tehran')], error: null }))
-    // same-country tier — nobody extra
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('rest-1', 'Mashhad')], error: null }))
-    // seed top-up — 3 real profiles (< 10) still triggers it; no seeds so the
-    // batch stays real-only. Seeds would otherwise land at the tail.
-    mockSeedTopUp()
-
-    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-
-    expect(res.statusCode).toBe(200)
-    const body = res.json()
-    // All three tiers land in the batch; order is shuffled so assert membership,
-    // not position. No liker marker leaks into the payload.
-    expect(body.profiles.map((p: any) => p.id).sort()).toEqual(['city-1', 'liker-1', 'rest-1'])
-    expect(body.profiles[0]).not.toHaveProperty('likedYou')
+    const body = await discover()
+    expect(names(body)).toEqual(['city-1', 'liker-1', 'rest-1'])
+    // No liker marker leaks into the payload.
+    for (const p of body.profiles) expect(p).not.toHaveProperty('likedYou')
   })
 
   it('shows same city, then country, then language, then rest — and never returns ranking fields', async () => {
-    setupAuth()
+    // Viewer typed Persian, resolved to Tehran/IR, app language fa.
+    await viewerAs({ location: 'تهران', geo_city: 'Tehran', geo_country: 'IR', locale: 'fa' })
+    await createProfile({ name: 'rest-1', location: 'Berlin', geo_city: 'Berlin', geo_country: 'DE', locale: 'en' })
+    await createProfile({ name: 'lang-1', location: 'Dubai', geo_city: 'Dubai', geo_country: 'AE', locale: 'fa' })
+    await createProfile({ name: 'country-1', location: 'Mashhad', geo_city: 'Mashhad', geo_country: 'IR', locale: 'en' })
+    await createProfile({ name: 'city-1', location: 'tehran', geo_city: 'Tehran', geo_country: 'IR', locale: 'en' })
 
-    // viewer typed Persian, resolved to Tehran/IR, app language fa
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women', location: 'تهران', geo_city: 'Tehran', geo_country: 'IR', locale: 'fa' }, error: null }) }) }),
-    } as any)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
-    } as any)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ or: () => ({ data: [], error: null }) }),
-    } as any)
-    // liker swipes — nobody
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
-    } as any)
-    const profile = (id: string, location: string, geo_city: string | null, geo_country: string | null, locale = 'en') => ({
-      id, name: 'N', age: 25, bio: null, telegram_id: 1, interests: [], location, geo_city, geo_country, locale, user_photos: [],
-    })
-    const cityLog: Array<{ method: string; args: unknown[] }> = []
-    const countryLog: Array<{ method: string; args: unknown[] }> = []
-    const languageLog: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('city-1', 'tehran', 'Tehran', 'IR')], error: null }, cityLog))
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('country-1', 'Mashhad', 'Mashhad', 'IR')], error: null }, countryLog))
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('lang-1', 'Dubai', 'Dubai', 'AE', 'fa')], error: null }, languageLog))
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('rest-1', 'Berlin', 'Berlin', 'DE')], error: null }))
-    mockSeedTopUp()
-
-    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-
-    expect(res.statusCode).toBe(200)
-    // city tier matches the normalized city, not the typed text
-    expect(cityLog).toContainEqual({ method: 'eq', args: ['geo_country', 'IR'] })
-    expect(cityLog).toContainEqual({ method: 'eq', args: ['geo_city', 'Tehran'] })
-    expect(cityLog.find((c) => c.method === 'ilike')).toBeUndefined()
-    // country tier excludes the city-tier pick
-    expect(countryLog).toContainEqual({ method: 'eq', args: ['geo_country', 'IR'] })
-    expect(countryLog).toContainEqual({ method: 'not', args: ['id', 'in', `(${USER_ID},city-1)`] })
-
-    // language tier matches the viewer's app language and excludes earlier picks
-    expect(languageLog).toContainEqual({ method: 'eq', args: ['locale', 'fa'] })
-    expect(languageLog).toContainEqual({ method: 'not', args: ['id', 'in', `(${USER_ID},city-1,country-1)`] })
-
-    // display order is closest-first
-    expect(res.json().profiles.map((p: any) => p.id)).toEqual(['city-1', 'country-1', 'lang-1', 'rest-1'])
-
-    const byId = Object.fromEntries(res.json().profiles.map((p: any) => [p.id, p]))
-    // "تهران" vs "tehran" is the same city once normalized
-    expect(byId['city-1'].nearby).toBe(true)
-    expect(byId['country-1'].nearby).toBe(false)
-    for (const p of res.json().profiles) {
-      expect(p).not.toHaveProperty('geo_city')
-      expect(p).not.toHaveProperty('geo_country')
-      expect(p).not.toHaveProperty('locale')
+    for (let i = 0; i < 5; i++) {
+      const body = await discover()
+      // Display order is closest-first.
+      expect(body.profiles.map((p) => p.name)).toEqual(['city-1', 'country-1', 'lang-1', 'rest-1'])
+      const byName = Object.fromEntries(body.profiles.map((p) => [p.name, p]))
+      // "تهران" vs "tehran" is the same city once normalized.
+      expect(byName['city-1'].nearby).toBe(true)
+      expect(byName['country-1'].nearby).toBe(false)
+      for (const p of body.profiles) {
+        expect(p).not.toHaveProperty('geo_city')
+        expect(p).not.toHaveProperty('geo_country')
+        expect(p).not.toHaveProperty('locale')
+      }
     }
+  })
+
+  it('does not treat the same city name in another country as nearby', async () => {
+    await viewerAs({ geo_city: 'Paris', geo_country: 'FR' })
+    await createProfile({ name: 'paris-us', geo_city: 'Paris', geo_country: 'US' })
+    const body = await discover()
+    expect(body.profiles[0].nearby).toBe(false)
   })
 
   it('ignores the typed city when the viewer has no resolved geo', async () => {
-    setupAuth()
-
-    // viewer typed a city but it is not resolved → no city/country tier, no text matching
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women', location: 'Tehran', geo_city: null, geo_country: null }, error: null }) }) }),
-    } as any)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
-    } as any)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ or: () => ({ data: [], error: null }) }),
-    } as any)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
-    } as any)
-    const restLog: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockReturnValueOnce(chainable({
-      data: [{ id: 'rest-1', name: 'N', age: 25, bio: null, telegram_id: 1, interests: [], location: 'Tehran', geo_city: null, geo_country: null, user_photos: [] }],
-      error: null,
-    }, restLog))
-    mockSeedTopUp()
-
-    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-
-    expect(res.statusCode).toBe(200)
-    // auth + viewer + swipes + blocks + likerSwipes + rest + seed — no city tier
-    expect(vi.mocked(db.from)).toHaveBeenCalledTimes(7)
-    expect(restLog.find((c) => c.method === 'ilike')).toBeUndefined()
-    // same typed text, but unresolved → not "nearby"
-    expect(res.json().profiles[0].nearby).toBe(false)
+    await viewerAs({ location: 'Tehran', geo_city: null, geo_country: null })
+    await createProfile({ name: 'rest-1', location: 'Tehran', geo_city: null, geo_country: null })
+    const body = await discover()
+    expect(names(body)).toEqual(['rest-1'])
+    // Same typed text, but unresolved → not "nearby".
+    expect(body.profiles[0].nearby).toBe(false)
   })
 
   it('appends seed/fake profiles at the tail when real users run low', async () => {
-    setupAuth()
+    await viewerAs()
+    // The seed is more recently active, yet still lands after the real user.
+    await createProfile({ name: 'seed-1', is_seed: true, last_active: minutesAgo(1) })
+    await createProfile({ name: 'real-1', last_active: minutesAgo(600) })
+    for (let i = 0; i < 5; i++) {
+      expect((await discover()).profiles.map((p) => p.name)).toEqual(['real-1', 'seed-1'])
+    }
+  })
 
-    // viewer — no location so only the rest tier runs for real users
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women', location: null }, error: null }) }) }),
-    } as any)
-    // recent swipes — empty
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
-    } as any)
-    // blocks — empty
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ or: () => ({ data: [], error: null }) }),
-    } as any)
-    // liker swipes — nobody has liked the viewer
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
-    } as any)
-    const profile = (id: string) => ({
-      id, name: 'N', age: 25, bio: null, telegram_id: 1, interests: [], location: null, user_photos: [],
-    })
-    // rest tier — one real user
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('real-1')], error: null }))
-    // seed top-up — one seed user fills the tail
-    mockSeedTopUp([profile('seed-1')])
+  it('tops up only the free slots with the most recently active seeds', async () => {
+    await viewerAs()
+    for (let i = 0; i < 8; i++) await createProfile({ name: `real-${i}` })
+    await createProfile({ name: 'seed-new', is_seed: true, last_active: minutesAgo(1) })
+    await createProfile({ name: 'seed-mid', is_seed: true, last_active: minutesAgo(10) })
+    await createProfile({ name: 'seed-old', is_seed: true, last_active: minutesAgo(100) })
 
-    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+    const body = await discover()
+    expect(body.profiles).toHaveLength(10)
+    expect(body.profiles.slice(0, 8).every((p) => p.name.startsWith('real-'))).toBe(true)
+    expect(body.profiles.slice(8).map((p) => p.name).sort()).toEqual(['seed-mid', 'seed-new'])
+  })
 
-    expect(res.statusCode).toBe(200)
-    const body = res.json()
-    // Real user first, seed appended at the tail (never shuffled among reals).
-    expect(body.profiles.map((p: any) => p.id)).toEqual(['real-1', 'seed-1'])
+  it('shows no seeds when real users fill the batch', async () => {
+    await viewerAs()
+    for (let i = 0; i < 12; i++) await createProfile({ name: `real-${i}` })
+    await createProfile({ name: 'seed', is_seed: true })
+    const body = await discover()
+    expect(body.profiles).toHaveLength(10)
+    expect(body.profiles.map((p) => p.name)).not.toContain('seed')
   })
 
   it('fills the deck with seeds only in the viewer language', async () => {
-    const seedOr = async (locale: string | null) => {
-      setupAuth()
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women', location: null, locale }, error: null }) }) }),
-      } as any)
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
-      } as any)
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ or: () => ({ data: [], error: null }) }),
-      } as any)
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
-      } as any)
-      // A set locale adds the same-language tier before the rest tier.
-      if (locale) vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
-      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
-      const seedLog: Array<{ method: string; args: unknown[] }> = []
-      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }, seedLog))
-      const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-      expect(res.statusCode).toBe(200)
-      return seedLog.find((c) => c.method === 'or')?.args[0]
+    const seedsFor = async (locale: string | null) => {
+      await resetDb()
+      await viewerAs({ locale })
+      for (const l of [null, 'fa', 'en', 'ar']) await createProfile({ name: `seed-${l}`, is_seed: true, locale: l })
+      return names(await discover())
     }
-
-    // Unset locale is Persian, same as an explicit fa viewer. Current fakes
-    // have no locale, so they match this filter and not en/ar.
-    expect(await seedOr(null)).toBe('locale.eq.fa,locale.is.null')
-    expect(await seedOr('fa')).toBe('locale.eq.fa,locale.is.null')
-    expect(await seedOr('en')).toBe('locale.eq.en')
-    expect(await seedOr('ar')).toBe('locale.eq.ar')
+    // Unset locale is Persian, same as an explicit fa viewer. Current fakes have
+    // no locale, so they match this filter and not en/ar.
+    expect(await seedsFor(null)).toEqual(['seed-fa', 'seed-null'])
+    expect(await seedsFor('fa')).toEqual(['seed-fa', 'seed-null'])
+    expect(await seedsFor('en')).toEqual(['seed-en'])
+    expect(await seedsFor('ar')).toEqual(['seed-ar'])
   })
 
   it('excludes already-swiped likers and skips the city tier without a location', async () => {
-    setupAuth()
+    const v = await viewerAs({ looking_for: 'both', location: null })
+    // Viewer already liked liker-1 (they are matched or pending).
+    const liker = await createProfile({ name: 'liker-1' })
+    await like(liker, v)
+    await like(v, liker)
+    expect(await discover()).toEqual({
+      profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null }, directChat: DIRECT_CHAT_DEFAULT,
+    })
+  })
 
-    // viewer — no location → city tier must be skipped
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'both', location: null }, error: null }) }) }),
-    } as any)
-    // recent swipes — viewer already liked 'liker-1' (they are matched or pending)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ or: () => ({ data: [{ swiped_id: 'liker-1' }], error: null }) }) }),
-    } as any)
-    // blocks — empty
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ or: () => ({ data: [], error: null }) }),
-    } as any)
-    // liker swipes — only the excluded liker → liker-profiles query must NOT run
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [{ swiper_id: 'liker-1' }], error: null }) }) }) }) }),
-    } as any)
-    // rest profiles (no gender filter) — chainable tolerates the is_active→banned→age→… chain
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
-    // seed top-up — no seeds
-    mockSeedTopUp()
+  it('recycles passes older than 9 days but keeps recent passes and all likes out', async () => {
+    const v = await viewerAs()
+    const old = await createProfile({ name: 'old-pass' })
+    const recent = await createProfile({ name: 'recent-pass' })
+    const liked = await createProfile({ name: 'liked-long-ago' })
+    await pass(v, old, { created_at: new Date(Date.now() - 10 * 24 * 3600_000).toISOString() })
+    await pass(v, recent, { created_at: new Date(Date.now() - 8 * 24 * 3600_000).toISOString() })
+    await like(v, liked, { created_at: new Date(Date.now() - 30 * 24 * 3600_000).toISOString() })
+    expect(names(await discover())).toEqual(['old-pass'])
+  })
 
-    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
+  it('excludes blocks in both directions (and someone else\'s swipes do not matter)', async () => {
+    const v = await viewerAs()
+    const blockedByMe = await createProfile({ name: 'blocked-by-me' })
+    const blockedMe = await createProfile({ name: 'blocked-me' })
+    const free = await createProfile({ name: 'free' })
+    await block(v, blockedByMe)
+    await block(blockedMe, v)
+    const other = await createUser()
+    await pass(other, free)
+    await block(other, free)
+    expect(names(await discover())).toEqual(['free'])
+  })
 
-    expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ profiles: [], exhausted: true, swipeLimit: { limited: false, resetAt: null }, directChat: DIRECT_CHAT_DEFAULT })
-    // auth + viewer + swipes + blocks + likerSwipes + rest + seed = exactly 7 db calls
-    expect(vi.mocked(db.from)).toHaveBeenCalledTimes(7)
+  it('boosts a liker into the batch even when 15 more recently active people compete', async () => {
+    const v = await viewerAs()
+    for (let i = 0; i < 15; i++) await createProfile({ name: `fresh-${i}`, last_active: minutesAgo(1) })
+    const liker = await createProfile({ name: 'stale-liker', last_active: minutesAgo(10_000) })
+    await like(liker, v)
+    for (let i = 0; i < 3; i++) {
+      const body = await discover()
+      expect(body.profiles).toHaveLength(10)
+      expect(body.profiles.map((p) => p.name)).toContain('stale-liker')
+    }
+  })
+
+  it('caps liker slots at 4 but lets unpicked likers fall through to filler tiers', async () => {
+    const v = await viewerAs()
+    for (let i = 0; i < 6; i++) await like(await createProfile({ name: `liker-${i}` }), v)
+    const body = await discover()
+    expect(names(body)).toEqual(['liker-0', 'liker-1', 'liker-2', 'liker-3', 'liker-4', 'liker-5'])
+  })
+
+  it('never returns more than one batch, and never a duplicate', async () => {
+    const v = await viewerAs({ geo_city: 'Tehran', geo_country: 'IR', locale: 'fa' })
+    for (let i = 0; i < 25; i++) {
+      const p = await createProfile({ name: `p-${i}`, geo_city: 'Tehran', geo_country: 'IR', locale: 'fa' })
+      if (i < 3) await like(p, v)
+    }
+    const body = await discover()
+    expect(body.profiles).toHaveLength(10)
+    expect(new Set(ids(body)).size).toBe(10)
   })
 
   it('includes swipeLimit status in the response', async () => {
-    setupAuth()
-
-    // viewer lookup — looking_for: women → genderFilter = 'woman'
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women' }, error: null }) }) }),
-    } as any)
-    // recent swipes
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
-    } as any)
-    // blocks (both directions via .or())
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ or: () => ({ data: [], error: null }) }),
-    } as any)
-    // liker swipes — nobody has liked the viewer
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [], error: null }) }) }) }) }),
-    } as any)
-    // profiles query — chainable tolerates the full is_active→banned→age→gender→… chain
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
-    // seed top-up — no seeds
-    mockSeedTopUp()
-
+    await viewerAs()
     vi.mocked(getSwipeLimitStatus).mockResolvedValueOnce({ limited: true, resetAt: '2026-08-07T16:00:00.000Z' })
-
-    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-
-    expect(res.statusCode).toBe(200)
-    expect(res.json().swipeLimit).toEqual({ limited: true, resetAt: '2026-08-07T16:00:00.000Z' })
+    expect((await discover()).swipeLimit).toEqual({ limited: true, resetAt: '2026-08-07T16:00:00.000Z' })
   })
 
   it('drops queued likers from a woman\'s deck and keeps the revealed one', async () => {
-    setupAuth()
-    vi.mocked(hiddenIncomingLikerIds).mockResolvedValue(['hidden-man'])
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'men', gender: 'woman', geo_city: null, geo_country: null, locale: null }, error: null }) }) }),
-    } as any)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
-    } as any)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ or: () => ({ data: [], error: null }) }),
-    } as any)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [
-        { swiper_id: 'revealed-man' },
-        { swiper_id: 'hidden-man' },
-      ], error: null }) }) }) }) }),
-    } as any)
-    const likerLog: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockReturnValueOnce(chainable({
-      data: [{
-        id: 'revealed-man', name: 'Ali', age: 30, bio: null, telegram_id: 3,
-        interests: [], location: null, premium_until: null,
-        user_photos: [{ id: 'p1', url: 'http://p/a.jpg', position: 0 }],
-      }],
-      error: null,
-    }, likerLog))
-    // No city, country, or locale on the viewer, so the only remaining real-profile
-    // query is the final "everyone else" tier. Then the seed top-up.
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
-    mockSeedTopUp()
+    const v = await viewerAs({ gender: 'woman', looking_for: 'men' })
+    const revealed = await createProfile({ name: 'revealed-man', gender: 'man', looking_for: 'women' })
+    const hidden = await createProfile({ name: 'hidden-man', gender: 'man', looking_for: 'women' })
+    await like(revealed, v)
+    await like(hidden, v)
+    vi.mocked(hiddenIncomingLikerIds).mockResolvedValue([hidden.id])
 
-    const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-    expect(res.statusCode).toBe(200)
-    const ids = res.json().profiles.map((p: { id: string }) => p.id)
-    expect(ids).toContain('revealed-man')
-    expect(ids).not.toContain('hidden-man')
-    const inCall = likerLog.find((c) => c.method === 'in' && c.args[0] === 'id')
-    expect(inCall?.args[1]).toEqual(['revealed-man'])
+    const body = await discover()
+    expect(names(body)).toEqual(['revealed-man'])
+    expect(hiddenIncomingLikerIds).toHaveBeenCalledWith(v.id)
   })
 
   describe('hidden likers never leak', () => {
-    const profile = (id: string) => ({
-      id, name: id, age: 30, bio: null, telegram_id: 3,
-      interests: [], location: null, premium_until: null,
-      user_photos: [{ id: `p-${id}`, url: `http://p/${id}.jpg`, position: 0 }],
-    })
-
-    // Viewer has no city/country/locale → the only real-profile query after tier 1
-    // is the "everyone else" tier, then the seed top-up.
-    function setupWoman(likerIds: string[], tierData: unknown[], opts: { likerQueryData?: unknown[] } = {}) {
-      setupAuth()
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'men', gender: 'woman', geo_city: null, geo_country: null, locale: null }, error: null }) }) }),
-      } as any)
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
-      } as any)
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ or: () => ({ data: [], error: null }) }),
-      } as any)
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: likerIds.map((id) => ({ swiper_id: id })), error: null }) }) }) }) }),
-      } as any)
-      const likerLog: Array<{ method: string; args: unknown[] }> = []
-      if (opts.likerQueryData) {
-        vi.mocked(db.from).mockReturnValueOnce(chainable({ data: opts.likerQueryData, error: null }, likerLog))
-      }
-      const tierLog: Array<{ method: string; args: unknown[] }> = []
-      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: tierData, error: null }, tierLog))
-      const seedLog: Array<{ method: string; args: unknown[] }> = []
-      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }, seedLog))
-      return { likerLog, tierLog, seedLog }
+    async function woman() {
+      return viewerAs({ gender: 'woman', looking_for: 'men' })
     }
+    const man = (name: string, extra: Record<string, unknown> = {}) =>
+      createProfile({ name, gender: 'man', looking_for: 'women', ...extra })
 
-    it('drops a hidden liker returned by a later-tier query', async () => {
-      vi.mocked(hiddenIncomingLikerIds).mockResolvedValue(['hidden-man'])
-      setupWoman(['hidden-man'], [profile('hidden-man'), profile('stranger')])
-      const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-      expect(res.statusCode).toBe(200)
-      expect(res.json().profiles.map((p: { id: string }) => p.id)).toEqual(['stranger'])
+    it('drops a hidden liker from every tier, including seeds', async () => {
+      const v = await woman()
+      const hiddenReal = await man('hidden-man')
+      const hiddenSeed = await man('hidden-seed', { is_seed: true, locale: 'fa' })
+      await like(hiddenReal, v)
+      await like(hiddenSeed, v)
+      await man('stranger')
+      vi.mocked(hiddenIncomingLikerIds).mockResolvedValue([hiddenReal.id, hiddenSeed.id])
+      expect(names(await discover())).toEqual(['stranger'])
     })
 
-    it('does not interpolate more than 50 hidden ids into .not(id, in, …) and still drops them', async () => {
-      const hidden = Array.from({ length: 60 }, (_, i) => `hidden-${i}`)
-      vi.mocked(hiddenIncomingLikerIds).mockResolvedValue(hidden)
-      const { tierLog, seedLog } = setupWoman(hidden, [profile('hidden-3'), profile('stranger')])
-      const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-      expect(res.statusCode).toBe(200)
-      expect(res.json().profiles.map((p: { id: string }) => p.id)).toEqual(['stranger'])
-      for (const log of [tierLog, seedLog]) {
-        const notCall = log.find((c) => c.method === 'not' && c.args[0] === 'id')
-        expect(notCall).toBeDefined()
-        expect(String(notCall!.args[2])).not.toContain('hidden-')
+    it('drops more than 50 hidden likers, even when they are all more recently active', async () => {
+      const v = await woman()
+      const hidden: string[] = []
+      for (let i = 0; i < 60; i++) {
+        const m = await man(`hidden-${i}`, { last_active: minutesAgo(1) })
+        await like(m, v)
+        hidden.push(m.id)
       }
-    })
-
-    it('interpolates a short hidden list into .not(id, in, …)', async () => {
-      vi.mocked(hiddenIncomingLikerIds).mockResolvedValue(['hidden-man'])
-      const { tierLog } = setupWoman(['hidden-man'], [profile('stranger')])
-      await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-      const notCall = tierLog.find((c) => c.method === 'not' && c.args[0] === 'id')
-      expect(String(notCall!.args[2])).toContain('hidden-man')
-    })
-
-    it('pages past more than 50 hidden likers so a later tier still returns a non-liker', async () => {
-      const FILLER_POOL = 20
-      const hidden = Array.from({ length: 60 }, (_, i) => `hidden-${i}`)
+      // The only visible man sits behind 60 more recently active hidden ones.
+      await man('stranger', { last_active: minutesAgo(10_000) })
       vi.mocked(hiddenIncomingLikerIds).mockResolvedValue(hidden)
-      // Page 1 is a full FILLER_POOL of hidden men; the non-liker sits behind them on page 2.
-      const page1 = hidden.slice(0, FILLER_POOL).map(profile)
-      const page2 = [profile('stranger')]
-      setupAuth()
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'men', gender: 'woman', geo_city: null, geo_country: null, locale: null }, error: null }) }) }),
-      } as any)
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
-      } as any)
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ or: () => ({ data: [], error: null }) }),
-      } as any)
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: hidden.map((id) => ({ swiper_id: id })), error: null }) }) }) }) }),
-      } as any)
-      const rangeLog: Array<{ method: string; args: unknown[] }> = []
-      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: page1, error: null }, rangeLog))
-      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: page2, error: null }, rangeLog))
-      mockSeedTopUp()
-      const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-      expect(res.statusCode).toBe(200)
-      expect(res.json().profiles.map((p: { id: string }) => p.id)).toEqual(['stranger'])
-      expect(rangeLog.filter((c) => c.method === 'range').map((c) => c.args)).toEqual([[0, FILLER_POOL - 1], [FILLER_POOL, 2 * FILLER_POOL - 1]])
+      expect(names(await discover())).toEqual(['stranger'])
     })
 
     it('keeps a man\'s likers visible when the reveal read throws', async () => {
       vi.mocked(hiddenIncomingLikerIds).mockRejectedValue(new Error('boom'))
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-      setupAuth()
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ eq: () => ({ single: () => ({ data: { looking_for: 'women', gender: 'man', geo_city: null, geo_country: null, locale: null }, error: null }) }) }),
-      } as any)
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ eq: () => ({ or: () => ({ data: [], error: null }) }) }),
-      } as any)
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ or: () => ({ data: [], error: null }) }),
-      } as any)
-      vi.mocked(db.from).mockReturnValueOnce({
-        select: () => ({ eq: () => ({ eq: () => ({ order: () => ({ range: () => ({ data: [{ swiper_id: 'f1' }], error: null }) }) }) }) }),
-      } as any)
-      const likerLog: Array<{ method: string; args: unknown[] }> = []
-      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [profile('f1')], error: null }, likerLog))
-      vi.mocked(db.from).mockReturnValueOnce(chainable({ data: [], error: null }))
-      mockSeedTopUp()
-      const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-      expect(res.statusCode).toBe(200)
-      expect(res.json().profiles.map((p: { id: string }) => p.id)).toEqual(['f1'])
-      expect(likerLog.find((c) => c.method === 'in' && c.args[0] === 'id')?.args[1]).toEqual(['f1'])
+      const v = await viewerAs({ gender: 'man', looking_for: 'women' })
+      await like(await createProfile({ name: 'f1' }), v)
+      expect(names(await discover())).toEqual(['f1'])
       errSpy.mockRestore()
     })
 
     it('hides every liker, without a 500, when the reveal read throws', async () => {
       vi.mocked(hiddenIncomingLikerIds).mockRejectedValue(new Error('boom'))
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-      const { likerLog, tierLog } = setupWoman(['m1', 'm2'], [profile('m1'), profile('stranger')])
-      const res = await app.inject({ method: 'GET', url: '/discovery', headers: AUTH })
-      expect(res.statusCode).toBe(200)
-      expect(res.json().profiles.map((p: { id: string }) => p.id)).toEqual(['stranger'])
-      // tier 1 gets nobody, so no liker-profile query ran (the queued tier mock served tier 5)
-      expect(likerLog).toEqual([])
-      expect(String(tierLog.find((c) => c.method === 'not')!.args[2])).toContain('m1')
+      const v = await woman()
+      await like(await man('m1'), v)
+      await like(await man('m2'), v)
+      await man('stranger')
+      expect(names(await discover())).toEqual(['stranger'])
       expect(errSpy).toHaveBeenCalled()
       errSpy.mockRestore()
     })

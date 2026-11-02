@@ -1,8 +1,4 @@
-import { describe, it, expect, beforeAll, vi } from 'vitest'
-
-// bot.ts imports db.ts, which calls createClient() at load — mock it so the
-// import doesn't require Supabase env. buildMessageKeyboard never touches db.
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
+import { describe, it, expect, beforeAll } from 'vitest'
 
 import { buildMessageKeyboard } from '../src/bot.js'
 

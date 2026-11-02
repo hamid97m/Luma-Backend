@@ -1,4 +1,4 @@
-import { db } from '../db.js'
+import { sql } from '../db.js'
 import { notifyNewLike } from '../bot.js'
 import { isEligibleRevealLiker, pickRevealCandidate, tehranDate, type RevealCandidate } from './revealPick.js'
 
@@ -16,185 +16,131 @@ type Viewer = {
 
 type StoredReveal = { swiper_id: string; revealed_on: string; notified_at: string | null }
 
-const PAGE = 1000
-// Ids per `.in('id', …)` read — keeps the request URL short.
-const CHUNK = 50
-
-function chunks<T>(items: T[], size: number): T[][] {
-  const out: T[][] = []
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
-  return out
+/** Viewer row + her latest reveal, with whether she has acted on that liker and
+ *  whether he is still a live incoming liker — one round trip. */
+type ViewerState = Viewer & {
+  reveal_swiper_id: string | null
+  reveal_revealed_on: string | null
+  reveal_notified_at: string | null
+  /** She has swiped the revealed liker (either direction). */
+  acted: boolean | null
+  /**
+   * The revealed liker is still a live incoming liker. Seed / no-photo do NOT
+   * count as gone (an already-shown reveal can stay). Gone = deleted, banned,
+   * paused, blocked either way, or matched (any route).
+   */
+  live: boolean | null
 }
 
 // A query error must fail the whole reveal: reading it as "no row" would either
-// show her every like (viewer) or send a second like DM (reveal).
-async function loadViewer(userId: string): Promise<Viewer | null> {
-  const { data, error } = await db
-    .from('users')
-    .select('id, gender, is_seed, geo_city, telegram_id, allows_write_to_pm, locale')
-    .eq('id', userId)
-    .maybeSingle()
-  if (error) throw error
-  return (data as Viewer | null) ?? null
+// show her every like (viewer) or send a second like DM (reveal). postgres.js
+// throws on every read error, so nothing below swallows one.
+async function loadViewerState(userId: string): Promise<ViewerState | null> {
+  const [row] = await sql<ViewerState[]>`
+    select v.id, v.gender, v.is_seed, v.geo_city, v.telegram_id, v.allows_write_to_pm, v.locale,
+           r.swiper_id as reveal_swiper_id, r.revealed_on as reveal_revealed_on,
+           r.notified_at as reveal_notified_at,
+           case when r.swiper_id is null then null else exists (
+             select 1 from swipes s where s.swiper_id = v.id and s.swiped_id = r.swiper_id
+           ) end as acted,
+           case when r.swiper_id is null then null else (
+             exists (
+               select 1 from users l
+               where l.id = r.swiper_id
+                 and l.deleted_at is null and l.banned_at is null and l.paused_at is null)
+             and not exists (
+               select 1 from blocks b
+               where (b.blocker_id = v.id and b.blocked_id = r.swiper_id)
+                  or (b.blocker_id = r.swiper_id and b.blocked_id = v.id))
+             and not exists (
+               select 1 from matches m
+               where (m.user1_id = v.id and m.user2_id = r.swiper_id)
+                  or (m.user1_id = r.swiper_id and m.user2_id = v.id))
+           ) end as live
+    from users v
+    left join lateral (
+      select lr.swiper_id, lr.revealed_on, lr.notified_at
+      from like_reveals lr where lr.user_id = v.id
+      order by lr.revealed_on desc limit 1
+    ) r on true
+    where v.id = ${userId}`
+  return row ?? null
 }
 
 async function latestReveal(userId: string): Promise<StoredReveal | null> {
-  const { data, error } = await db
-    .from('like_reveals')
-    .select('swiper_id, revealed_on, notified_at')
-    .eq('user_id', userId)
-    .order('revealed_on', { ascending: false })
-    .limit(1)
-  if (error) throw error
-  return ((data as StoredReveal[] | null) ?? [])[0] ?? null
+  const [row] = await sql<StoredReveal[]>`
+    select swiper_id, revealed_on, notified_at from like_reveals
+    where user_id = ${userId}
+    order by revealed_on desc
+    limit 1`
+  return row ?? null
 }
 
-async function hasSwiped(userId: string, swiperId: string): Promise<boolean> {
-  const { data, error } = await db
-    .from('swipes')
-    .select('swiped_id')
-    .eq('swiper_id', userId)
-    .eq('swiped_id', swiperId)
-    .limit(1)
-  if (error) throw error
-  return ((data as Array<{ swiped_id: string }> | null) ?? []).length > 0
-}
-
-/** Every like-swipe aimed at her, uncapped (paged). */
+/** Every like-swipe aimed at her, uncapped. */
 async function loadLikeSwipes(userId: string): Promise<Array<{ swiper_id: string; created_at: string }>> {
-  const rows: Array<{ swiper_id: string; created_at: string }> = []
-  for (let from = 0; ; from += PAGE) {
-    const { data, error } = await db
-      .from('swipes')
-      .select('swiper_id, created_at')
-      .eq('swiped_id', userId)
-      .eq('direction', 'like')
-      .order('swiper_id', { ascending: true })
-      .range(from, from + PAGE - 1)
-    if (error) throw error
-    const page = (data as Array<{ swiper_id: string; created_at: string }> | null) ?? []
-    rows.push(...page)
-    if (page.length < PAGE) break
-  }
-  return rows
+  return sql<Array<{ swiper_id: string; created_at: string }>>`
+    select swiper_id, created_at from swipes
+    where swiped_id = ${userId} and direction = 'like'
+    order by swiper_id asc`
 }
 
-/** Everyone she has already swiped (either direction), uncapped (paged). */
-async function loadSwipedByHer(userId: string): Promise<Set<string>> {
-  const ids = new Set<string>()
-  for (let from = 0; ; from += PAGE) {
-    const { data, error } = await db
-      .from('swipes')
-      .select('swiped_id')
-      .eq('swiper_id', userId)
-      .order('swiped_id', { ascending: true })
-      .range(from, from + PAGE - 1)
-    if (error) throw error
-    const page = (data as Array<{ swiped_id: string }> | null) ?? []
-    for (const r of page) ids.add(r.swiped_id)
-    if (page.length < PAGE) break
-  }
-  return ids
+type CandidateRow = {
+  id: string
+  liked_at: string
+  name: string | null
+  geo_city: string | null
+  last_active: string | null
+  is_seed: boolean | null
+  paused_at: string | null
+  deleted_at: string | null
+  banned_at: string | null
+  photo_count: number
 }
 
-async function loadBlockedEitherWay(userId: string): Promise<Set<string>> {
-  const { data, error } = await db
-    .from('blocks')
-    .select('blocker_id, blocked_id')
-    .or(`blocker_id.eq.${userId},blocked_id.eq.${userId}`)
-  if (error) throw error
-  return new Set(
-    ((data as Array<{ blocker_id: string; blocked_id: string }> | null) ?? []).map((b) =>
-      b.blocker_id === userId ? b.blocked_id : b.blocker_id,
-    ),
-  )
-}
+/** Incoming likers she has not swiped, not blocked either way and not matched,
+ *  filtered to reveal-eligible ones. Also returns their names (for the DM). */
+async function loadCandidates(userId: string): Promise<{ candidates: RevealCandidate[]; names: Map<string, string> }> {
+  // One statement (was: paged likes, paged her swipes, blocks, matches, then
+  // users + photos in chunks of 50).
+  const rows = await sql<CandidateRow[]>`
+    select s.swiper_id as id, s.created_at as liked_at,
+           u.name, u.geo_city, u.last_active, u.is_seed, u.paused_at, u.deleted_at, u.banned_at,
+           (select count(*) from user_photos p where p.user_id = u.id)::int as photo_count
+    from swipes s
+    join users u on u.id = s.swiper_id
+    where s.swiped_id = ${userId}
+      and s.direction = 'like'
+      and not exists (
+        select 1 from swipes mine where mine.swiper_id = ${userId} and mine.swiped_id = s.swiper_id)
+      and not exists (
+        select 1 from blocks b
+        where (b.blocker_id = ${userId} and b.blocked_id = s.swiper_id)
+           or (b.blocker_id = s.swiper_id and b.blocked_id = ${userId}))
+      and not exists (
+        select 1 from matches m
+        where (m.user1_id = ${userId} and m.user2_id = s.swiper_id)
+           or (m.user1_id = s.swiper_id and m.user2_id = ${userId}))
+    order by s.swiper_id asc`
 
-async function loadMatchedIds(userId: string): Promise<Set<string>> {
-  const { data, error } = await db
-    .from('matches')
-    .select('user1_id, user2_id')
-    .or(`user1_id.eq.${userId},user2_id.eq.${userId}`)
-  if (error) throw error
-  return new Set(
-    ((data as Array<{ user1_id: string; user2_id: string }> | null) ?? []).map((m) =>
-      m.user1_id === userId ? m.user2_id : m.user1_id,
-    ),
-  )
-}
-
-/**
- * Is `likerId` still a live incoming liker of `userId`? Seed / no-photo do NOT
- * count as gone (an already-shown reveal can stay). Gone = deleted, banned,
- * paused, blocked either way, or matched (any route). Throws on any read error.
- */
-async function isStillLiveLiker(userId: string, likerId: string): Promise<boolean> {
-  const pair = (a: string, b: string, x: string, y: string) =>
-    `and(${x}.eq.${a},${y}.eq.${b}),and(${x}.eq.${b},${y}.eq.${a})`
-  const [userRes, blockRes, matchRes] = await Promise.all([
-    db.from('users').select('id, deleted_at, banned_at, paused_at').eq('id', likerId).maybeSingle(),
-    db.from('blocks').select('blocker_id').or(pair(userId, likerId, 'blocker_id', 'blocked_id')).limit(1),
-    db.from('matches').select('user1_id').or(pair(userId, likerId, 'user1_id', 'user2_id')).limit(1),
-  ])
-  if (userRes.error) throw userRes.error
-  if (blockRes.error) throw blockRes.error
-  if (matchRes.error) throw matchRes.error
-  const u = userRes.data as { deleted_at: string | null; banned_at: string | null; paused_at: string | null } | null
-  if (!u || u.deleted_at || u.banned_at || u.paused_at) return false
-  if (((blockRes.data as unknown[] | null) ?? []).length > 0) return false
-  if (((matchRes.data as unknown[] | null) ?? []).length > 0) return false
-  return true
-}
-
-async function loadCandidates(userId: string): Promise<RevealCandidate[]> {
-  const likes = await loadLikeSwipes(userId)
-  if (likes.length === 0) return []
-  const [swiped, blocked, matched] = await Promise.all([
-    loadSwipedByHer(userId),
-    loadBlockedEitherWay(userId),
-    loadMatchedIds(userId),
-  ])
-  const likedAt = new Map<string, string>()
-  for (const l of likes) {
-    if (swiped.has(l.swiper_id) || blocked.has(l.swiper_id) || matched.has(l.swiper_id)) continue
-    likedAt.set(l.swiper_id, l.created_at)
-  }
-  const ids = [...likedAt.keys()]
-  if (ids.length === 0) return []
-
-  const byId = new Map<string, any>()
-  const photoCount = new Map<string, number>()
-  for (const part of chunks(ids, CHUNK)) {
-    const [usersRes, photosRes] = await Promise.all([
-      db.from('users').select('id, geo_city, last_active, is_seed, paused_at, deleted_at, banned_at, name').in('id', part),
-      db.from('user_photos').select('user_id').in('user_id', part),
-    ])
-    if (usersRes.error) throw usersRes.error
-    if (photosRes.error) throw photosRes.error
-    for (const u of (usersRes.data as any[] | null) ?? []) byId.set(u.id, u)
-    for (const p of (photosRes.data as Array<{ user_id: string }> | null) ?? []) {
-      photoCount.set(p.user_id, (photoCount.get(p.user_id) ?? 0) + 1)
-    }
-  }
   const candidates: RevealCandidate[] = []
-  for (const id of ids) {
-    const u = byId.get(id)
-    if (!u) continue
+  const names = new Map<string, string>()
+  for (const u of rows) {
     if (!isEligibleRevealLiker({
       isSeed: Boolean(u.is_seed),
       pausedAt: u.paused_at ?? null,
       deletedAt: u.deleted_at ?? null,
       bannedAt: u.banned_at ?? null,
-      photoCount: photoCount.get(id) ?? 0,
+      photoCount: u.photo_count,
     })) continue
+    names.set(u.id, u.name ?? '')
     candidates.push({
-      id,
+      id: u.id,
       geoCity: u.geo_city ?? null,
-      lastActive: u.last_active ?? likedAt.get(id) ?? '',
-      likedAt: likedAt.get(id) ?? '',
+      lastActive: u.last_active ?? u.liked_at ?? '',
+      likedAt: u.liked_at ?? '',
     })
   }
-  return candidates
+  return { candidates, names }
 }
 
 /**
@@ -207,43 +153,45 @@ export async function ensureDailyReveal(
   now = new Date(),
   { waitForNotify = true }: { waitForNotify?: boolean } = {},
 ): Promise<RevealResult> {
-  const viewer = await loadViewer(userId)
+  const viewer = await loadViewerState(userId)
   if (!viewer || viewer.gender !== 'woman' || viewer.is_seed) return { applies: false }
 
   const today = tehranDate(now)
-  const current = await latestReveal(userId)
-  if (current) {
-    const acted = await hasSwiped(userId, current.swiper_id)
-    if (!acted) {
+  if (viewer.reveal_swiper_id) {
+    const current = { swiper_id: viewer.reveal_swiper_id, revealed_on: viewer.reveal_revealed_on }
+    if (!viewer.acted) {
       // An unanswered reveal outlives midnight only while he is still a live
       // incoming liker; a dead one must not lock her slot forever.
-      if (await isStillLiveLiker(userId, current.swiper_id)) return { applies: true, swiperId: current.swiper_id }
+      if (viewer.live) return { applies: true, swiperId: current.swiper_id }
       if (current.revealed_on === today) return { applies: true, swiperId: null }
     } else if (current.revealed_on === today) {
       return { applies: true, swiperId: null }
     }
   }
 
-  const candidates = await loadCandidates(userId)
+  const { candidates, names } = await loadCandidates(userId)
   const picked = pickRevealCandidate({ geoCity: viewer.geo_city }, candidates)
   if (!picked) return { applies: true, swiperId: null }
 
-  const { data: inserted, error } = await db
-    .from('like_reveals')
-    .insert({ user_id: userId, swiper_id: picked.id, revealed_on: today })
-    .select('swiper_id')
-  if (error && (error as { code?: string }).code !== '23505') throw error
-  if (!inserted || (inserted as unknown[]).length === 0) {
+  // One reveal per woman per Tehran day (PK user_id, revealed_on): a racing
+  // insert loses quietly and reads the winner's pick.
+  const inserted = await sql`
+    insert into like_reveals (user_id, swiper_id, revealed_on)
+    values (${userId}, ${picked.id}, ${today})
+    on conflict (user_id, revealed_on) do nothing
+    returning swiper_id`
+  if (inserted.length === 0) {
     const raced = await latestReveal(userId)
     return { applies: true, swiperId: raced?.swiper_id ?? null }
   }
 
-  const name = (await db.from('users').select('name').eq('id', picked.id).maybeSingle()).data as { name?: string } | null
   if (viewer.telegram_id > 0 && viewer.allows_write_to_pm !== false) {
     const notify = (async () => {
       try {
-        await notifyNewLike(viewer.telegram_id, name?.name ?? '', (viewer.locale as 'fa' | 'en' | 'ar' | null) ?? null)
-        await db.from('like_reveals').update({ notified_at: new Date().toISOString() }).eq('user_id', userId).eq('revealed_on', today)
+        await notifyNewLike(viewer.telegram_id, names.get(picked.id) ?? '', (viewer.locale as 'fa' | 'en' | 'ar' | null) ?? null)
+        await sql`
+          update like_reveals set notified_at = ${new Date().toISOString()}
+          where user_id = ${userId} and revealed_on = ${today}`
       } catch (err) {
         console.error(err)
       }

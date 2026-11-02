@@ -1,47 +1,47 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
+import { describe, it, expect, beforeEach } from 'vitest'
 
 import { buildApp } from '../src/server.js'
-import { db } from '../src/db.js'
-import { signAdminToken } from '../src/routes/admin/auth-utils.js'
-import { chainable } from './admin-helpers.js'
+import { resetDb, createUser, sql } from './helpers/db.js'
+import { adminHeaders } from './helpers/admin.js'
 
 describe('admin ban/unban', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
   let headers: Record<string, string>
+  let user: Record<string, any>
 
   beforeEach(async () => {
+    await resetDb()
     process.env.ADMIN_JWT_SECRET = 'test-secret'
     app = await buildApp()
-    headers = { authorization: `Bearer ${signAdminToken({ adminId: 'a1', username: 'root' })}` }
+    headers = adminHeaders()
+    user = await createUser()
   })
 
-  it('bans a user', async () => {
-    const update = vi.fn(() => chainable({ data: { id: 'u1' }, error: null }))
-    vi.mocked(db.from).mockImplementation(() => ({ update } as any))
+  const bannedAt = async () => (await sql`select banned_at from users where id = ${user.id}`)[0].banned_at
 
-    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/ban', headers })
+  it('bans a user', async () => {
+    const res = await app.inject({ method: 'POST', url: `/admin/users/${user.id}/ban`, headers })
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ ok: true })
-    expect((update.mock.calls[0][0] as any).banned_at).toBeTruthy()
+    expect(await bannedAt()).toBeTruthy()
   })
 
   it('unbans a user by clearing banned_at', async () => {
-    const update = vi.fn(() => chainable({ data: { id: 'u1' }, error: null }))
-    vi.mocked(db.from).mockImplementation(() => ({ update } as any))
-
-    const res = await app.inject({ method: 'POST', url: '/admin/users/u1/unban', headers })
+    await sql`update users set banned_at = now() where id = ${user.id}`
+    const res = await app.inject({ method: 'POST', url: `/admin/users/${user.id}/unban`, headers })
 
     expect(res.statusCode).toBe(200)
-    expect(update).toHaveBeenCalledWith({ banned_at: null })
+    expect(await bannedAt()).toBeNull()
   })
 
   it('returns 404 for an unknown user', async () => {
-    vi.mocked(db.from).mockImplementation(() =>
-      ({ update: () => chainable({ data: null, error: { message: 'not found' } }) } as any)
-    )
+    const res = await app.inject({ method: 'POST', url: '/admin/users/00000000-0000-0000-0000-000000000000/ban', headers })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'user_not_found' })
+  })
+
+  it('returns 404 (not 500) for a malformed id', async () => {
     const res = await app.inject({ method: 'POST', url: '/admin/users/nope/ban', headers })
     expect(res.statusCode).toBe(404)
   })

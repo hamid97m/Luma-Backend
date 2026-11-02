@@ -1,6 +1,10 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
+vi.mock('../src/db.js', async (orig) => {
+  const m = await orig<typeof import('../src/db.js')>()
+  const { withFaults } = await import('./helpers/sql-faults.js')
+  return { ...m, sql: withFaults(m.sql) }
+})
 vi.mock('../src/bot.js', () => ({
   notifyMatch: vi.fn().mockResolvedValue(undefined),
   notifyNewMessage: vi.fn().mockResolvedValue(undefined),
@@ -8,162 +12,144 @@ vi.mock('../src/bot.js', () => ({
 }))
 vi.mock('../src/icebreakers/seed.js', () => ({ seedIcebreakers: vi.fn().mockResolvedValue(undefined) }))
 
-import { db } from '../src/db.js'
 import { notifyMatch, notifyNewMessage, notifyNewLike } from '../src/bot.js'
 import { runFakeLikerJob } from '../src/jobs/fakeLiker.js'
 import { seedIcebreakers } from '../src/icebreakers/seed.js'
 import { icebreakerQuestion } from '../src/icebreakers/catalog.js'
+import { tFor } from '../src/i18n/index.js'
+import { resetDb, insertRow, sql } from './helpers/db.js'
+import { failQuery, clearFaults, queriesRun, withoutFaults } from './helpers/sql-faults.js'
 
 // ---------------------------------------------------------------------------
-// In-memory Supabase mock: a thenable query builder resolving against seeded
-// arrays. Supports exactly the chain methods the job uses. Insert simulates the
-// swipes/matches UNIQUE(...) constraints (23505) from the real DB.
+// Scenario fixtures: each test describes its world as a `Store` keyed by table
+// with readable symbolic ids ('f1', 't1', 'm1'). `useStore` writes it into the
+// real Postgres (symbolic ids → uuids whose sort order matches the symbols, so
+// "sorted pair" assertions still hold), and `logs.inserts()` reads back the
+// rows the job created, translated back to symbolic ids. The `__fail*` hooks
+// inject query failures (postgres.js throws; the job must count/log and go on).
 // ---------------------------------------------------------------------------
 
 type Store = Record<string, any[]> & {
-  __failInsert?: Record<string, boolean>
-  // Fault-injection hooks, all keyed by table (supabase-js never throws — it resolves
-  // an `{ error }`, so these simulate that path per query shape):
-  __failSelect?: Record<string, boolean> // plain multi-row select resolves an error
-  __failCount?: Record<string, boolean> // head/count select resolves an error
-  __failSingle?: Record<string, boolean> // single()/maybeSingle() select resolves an error
-  __failCountMatch?: Set<string> // head/count select whose eq('match_id', x) has x ∈ set errors
+  __failInsert?: Record<string, boolean> // insert into <table> throws
+  __failSelect?: Record<string, boolean> // plain multi-row select on <table> throws
+  __failCount?: Record<string, boolean> // count(*) on <table> throws
+  __failSingle?: Record<string, boolean> // the single-row reverse-like lookup (`select id from <table>`) throws
+  __failCountMatch?: Set<string> // message count(*) for these match ids throws
 }
+
+const ID = new Map<string, string>() // symbolic → uuid
+const NAME = new Map<string, string>() // uuid → symbolic
+/** uuid for a symbolic id (users/matches seeded by the current test, or 'match-N' after `inserts()`). */
+const id = (sym: string): string => {
+  const v = ID.get(sym)
+  if (!v) throw new Error(`unknown symbolic id ${sym}`)
+  return v
+}
+const sym = (uuid: string | null): string | null => (uuid == null ? null : NAME.get(uuid) ?? uuid)
+
+function uuidAt(prefix: number, i: number): string {
+  return `${String(prefix).padStart(8, '0')}-0000-4000-8000-${i.toString(16).padStart(12, '0')}`
+}
+
 interface Logs {
-  inserts: Record<string, any[]>
-  updates: Array<{ table: string; patch: any; filters: any[] }>
+  /** Rows the job inserted (not seeded), symbolic ids restored; a table is absent when nothing was inserted. */
+  inserts: () => Promise<Record<string, any[]>>
 }
 
-class QB {
-  private op: 'select' | 'insert' | 'update' = 'select'
-  private filters: Array<[string, string, any]> = []
-  private _order: { col: string; ascending: boolean } | null = null
-  private _range: [number, number] | null = null
-  private _limit: number | null = null
-  private _insert: any = null
-  private _update: any = null
-  private _selected = false
-  private _single: 'single' | 'maybe' | null = null
-  private _count = false
-  private _head = false
+async function useStore(store: Store): Promise<Logs> {
+  ID.clear()
+  NAME.clear()
+  const users = store.users ?? []
 
-  constructor(private table: string, private store: Store, private logs: Logs) {}
+  // Every symbolic user id referenced anywhere; unknown ones become inert placeholders.
+  const userSyms = new Set<string>(users.map((u) => u.id))
+  for (const s of store.swipes ?? []) { userSyms.add(s.swiper_id); userSyms.add(s.swiped_id) }
+  for (const m of store.matches ?? []) { userSyms.add(m.user1_id); userSyms.add(m.user2_id) }
+  ;[...userSyms].sort().forEach((s, i) => { ID.set(s, uuidAt(1, i + 1)); NAME.set(uuidAt(1, i + 1), s) })
+  ;(store.matches ?? []).forEach((m, i) => { ID.set(m.id, uuidAt(2, i + 1)); NAME.set(uuidAt(2, i + 1), m.id) })
 
-  select(_cols?: string, opts?: { count?: string; head?: boolean }) {
-    if (this.op === 'insert') this._selected = true
-    if (opts?.count) {
-      this._count = true
-      this._head = !!opts.head
-    }
-    return this
-  }
-  insert(row: any) { this.op = 'insert'; this._insert = row; return this }
-  update(patch: any) { this.op = 'update'; this._update = patch; return this }
-  eq(col: string, val: any) { this.filters.push(['eq', col, val]); return this }
-  neq(col: string, val: any) { this.filters.push(['neq', col, val]); return this }
-  or(expr: string) { this.filters.push(['or', '', expr]); return this }
-  is(col: string, val: any) { this.filters.push(['is', col, val]); return this }
-  in(col: string, val: any[]) { this.filters.push(['in', col, val]); return this }
-  lte(col: string, val: any) { this.filters.push(['lte', col, val]); return this }
-  order(col: string, opts?: { ascending?: boolean }) {
-    this._order = { col, ascending: opts?.ascending !== false }
-    return this
-  }
-  range(from: number, to: number) { this._range = [from, to]; return this }
-  limit(n: number) { this._limit = n; return this }
-  single() { this._single = 'single'; return this }
-  maybeSingle() { this._single = 'maybe'; return this }
-
-  then(resolve: any, reject: any) {
-    return Promise.resolve(this.resolve()).then(resolve, reject)
+  // fake_liker_config: [] = row missing; otherwise apply the given values.
+  const cfg = store.fake_liker_config
+  if (cfg && cfg.length === 0) await sql`delete from fake_liker_config`
+  else if (cfg?.[0]) {
+    await sql`update fake_liker_config set enabled = ${cfg[0].enabled}, max_targets_per_run = ${cfg[0].max_targets_per_run}`
   }
 
-  private rows() {
-    let rows = (this.store[this.table] ?? []).slice()
-    for (const [t, col, val] of this.filters) {
-      if (t === 'eq') rows = rows.filter((r) => r[col] === val)
-      else if (t === 'neq') rows = rows.filter((r) => (r[col] ?? 'text') !== val) // messages.type defaults to 'text'
-      else if (t === 'or') rows = rows.filter((r) => matchesOr(r, val))
-      else if (t === 'is') rows = rows.filter((r) => (r[col] ?? null) === val)
-      else if (t === 'in') rows = rows.filter((r) => (val as any[]).includes(r[col]))
-      else if (t === 'lte') rows = rows.filter((r) => r[col] <= val)
-    }
-    if (this._order) {
-      const { col, ascending } = this._order
-      rows.sort((a, b) => (a[col] < b[col] ? -1 : a[col] > b[col] ? 1 : 0))
-      if (!ascending) rows.reverse()
-    }
-    if (this._range) rows = rows.slice(this._range[0], this._range[1] + 1)
-    if (this._limit != null) rows = rows.slice(0, this._limit)
-    return rows
+  // telegram_id is UNIQUE: keep explicit ids, re-number the builder defaults (1000 / -1).
+  const usedTg = new Set<number>()
+  let nextPos = 2_000_000
+  let nextNeg = -2_000_000
+  const known = new Set(users.map((u) => u.id))
+  for (const u of users) {
+    let tg = u.telegram_id as number
+    if (tg === 1000 || tg === -1 || usedTg.has(tg)) tg = tg > 0 ? nextPos++ : nextNeg--
+    usedTg.add(tg)
+    await insertRow('users', { age: 28, ...u, id: id(u.id), telegram_id: tg })
+  }
+  const placeholders = [...userSyms].filter((s) => !known.has(s)).map((s) => ({
+    id: id(s), telegram_id: nextPos++, name: `P-${s}`, age: 30, gender: 'man', looking_for: 'women',
+    is_active: false, account_status: 'active',
+  }))
+  if (placeholders.length) await sql`insert into users ${sql(placeholders)}`
+
+  for (const p of store.user_photos ?? []) await insertRow('user_photos', { ...p, user_id: id(p.user_id) })
+  for (const s of store.swipes ?? []) {
+    await insertRow('swipes', { ...s, swiper_id: id(s.swiper_id), swiped_id: id(s.swiped_id) })
+  }
+  for (const m of store.matches ?? []) {
+    await insertRow('matches', { ...m, id: id(m.id), user1_id: id(m.user1_id), user2_id: id(m.user2_id) })
+  }
+  for (const msg of store.messages ?? []) {
+    await insertRow('messages', { ...msg, match_id: id(msg.match_id), sender_id: id(msg.sender_id) })
   }
 
-  private resolve() {
-    if (this.op === 'select') {
-      const rows = this.rows()
-      if (this._count) {
-        if (this.store.__failCount?.[this.table]) return { data: null, count: null, error: { code: 'XX', message: 'count fail' } }
-        const matchFilter = this.filters.find(([t, col]) => t === 'eq' && col === 'match_id')
-        if (matchFilter && this.store.__failCountMatch?.has(matchFilter[2])) {
-          return { data: null, count: null, error: { code: 'XX', message: 'count fail' } }
-        }
-        return { data: this._head ? null : rows, count: rows.length, error: null }
+  // Fault hooks → query predicates on the real SQL text.
+  for (const t of Object.keys(store.__failInsert ?? {})) failQuery((q) => q.startsWith(`insert into ${t}`))
+  for (const t of Object.keys(store.__failCount ?? {})) failQuery((q) => /count\(\*\)/.test(q) && q.includes(` from ${t} `))
+  for (const t of Object.keys(store.__failSingle ?? {})) failQuery((q) => q.startsWith(`select id from ${t} `))
+  for (const t of Object.keys(store.__failSelect ?? {})) {
+    failQuery((q) => q.startsWith('select ') && !/count\(\*\)/.test(q) && !q.startsWith('select id from')
+      && q.includes(` from ${t} `))
+  }
+  if (store.__failCountMatch?.size) {
+    const bad = new Set([...store.__failCountMatch].map(id))
+    failQuery((q, values) => /count\(\*\)/.test(q) && q.includes(' from messages ') && values.some((v) => bad.has(v as string)))
+  }
+
+  const seeded = {
+    swipes: new Set((await sql`select id from swipes`).map((r) => r.id)),
+    matches: new Set((await sql`select id from matches`).map((r) => r.id)),
+    messages: new Set((await sql`select id from messages`).map((r) => r.id)),
+  }
+
+  return {
+    inserts: () => withoutFaults(async () => {
+      const out: Record<string, any[]> = {}
+      const swipes = (await sql`select id, swiper_id, swiped_id, direction from swipes order by created_at, id`)
+        .filter((r) => !seeded.swipes.has(r.id))
+        .map((r) => ({ swiper_id: sym(r.swiper_id), swiped_id: sym(r.swiped_id), direction: r.direction }))
+      if (swipes.length) out.swipes = swipes
+      const matches = (await sql`select id, user1_id, user2_id from matches order by created_at, id`)
+        .filter((r) => !seeded.matches.has(r.id))
+      matches.forEach((m, i) => {
+        if (!NAME.has(m.id)) { ID.set(`match-${i + 1}`, m.id); NAME.set(m.id, `match-${i + 1}`) }
+      })
+      if (matches.length) {
+        out.matches = matches.map((m) => ({ id: sym(m.id), user1_id: sym(m.user1_id), user2_id: sym(m.user2_id) }))
       }
-      if (this._single) {
-        if (this.store.__failSingle?.[this.table]) return { data: null, error: { code: 'XX', message: 'single fail' } }
-        return { data: rows[0] ?? null, error: null }
-      }
-      if (this.store.__failSelect?.[this.table]) return { data: null, error: { code: 'XX', message: 'select fail' } }
-      return { data: rows, error: null }
-    }
-    if (this.op === 'update') {
-      for (const r of this.rows()) Object.assign(r, this._update)
-      this.logs.updates.push({ table: this.table, patch: this._update, filters: this.filters })
-      return { data: null, error: null }
-    }
-    // insert
-    const row = this._insert
-    if (this.table === 'swipes') {
-      const dup = (this.store.swipes ?? []).some(
-        (s) => s.swiper_id === row.swiper_id && s.swiped_id === row.swiped_id,
-      )
-      if (dup) return { data: null, error: { code: '23505', message: 'dup swipe' } }
-      ;(this.store.swipes ??= []).push({ ...row })
-    } else if (this.table === 'matches') {
-      const dup = (this.store.matches ?? []).some(
-        (m) => m.user1_id === row.user1_id && m.user2_id === row.user2_id,
-      )
-      if (dup) return { data: null, error: { code: '23505', message: 'dup match' } }
-      const id = `match-${(this.store.matches?.length ?? 0) + 1}`
-      ;(this.store.matches ??= []).push({ id, ...row })
-      ;(this.logs.inserts.matches ??= []).push({ id, ...row })
-      return this._selected ? { data: { id }, error: null } : { data: null, error: null }
-    } else {
-      ;(this.store[this.table] ??= []).push({ ...row })
-    }
-    ;(this.logs.inserts[this.table] ??= []).push({ ...row })
-    if (this.store.__failInsert?.[this.table]) return { data: null, error: { code: 'XX', message: 'forced' } }
-    return { data: null, error: null }
+      const messages = (await sql`select id, match_id, sender_id, body from messages order by created_at, id`)
+        .filter((r) => !seeded.messages.has(r.id))
+        .map((r) => ({ match_id: sym(r.match_id), sender_id: sym(r.sender_id), body: r.body }))
+      if (messages.length) out.messages = messages
+      const runs = await sql`select * from fake_liker_runs`
+      if (runs.length) out.fake_liker_runs = runs
+      return out
+    }),
   }
 }
 
-/** PostgREST `.or('col.eq.x,col.is.null')` — enough for the job's locale filter. */
-function matchesOr(row: any, expr: string): boolean {
-  return expr.split(',').some((clause) => {
-    const m = /^([a-z_]+)\.(eq|is)\.(.+)$/.exec(clause)
-    if (!m) return false
-    const [, col, op, raw] = m
-    const cell = row[col] ?? null
-    if (op === 'is') return raw === 'null' ? cell === null : String(cell) === raw
-    return cell === raw
-  })
-}
-
-function useStore(store: Store): Logs {
-  const logs: Logs = { inserts: {}, updates: [] }
-  vi.mocked(db.from).mockImplementation((table: string) => new QB(table, store, logs) as any)
-  return logs
-}
+/** The greeting fakes open with, in the real user's language (null locale → Persian). */
+const SALAM = tFor(null).chat.seedGreeting
 
 // --- data builders --------------------------------------------------------
 const OLD = '2020-01-01T00:00:00Z'
@@ -189,25 +175,29 @@ const silent = { info: () => {}, warn: () => {} }
 const mkLogger = () => ({ info: vi.fn(), warn: vi.fn() })
 const flush = () => new Promise((r) => setImmediate(r))
 
-beforeEach(() => vi.clearAllMocks())
+beforeEach(async () => {
+  vi.clearAllMocks()
+  await resetDb()
+})
+afterEach(clearFaults)
 
 // ---------------------------------------------------------------------------
 
 describe('runFakeLikerJob — config gating', () => {
   it('returns { skipped: "disabled" } and writes no run row when disabled', async () => {
     const store: Store = { fake_liker_config: [{ id: true, enabled: false, max_targets_per_run: 100 }] }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = await runFakeLikerJob('schedule', silent)
     expect(res).toEqual({ skipped: 'disabled' })
-    expect(logs.inserts.fake_liker_runs).toBeUndefined()
+    expect((await logs.inserts()).fake_liker_runs).toBeUndefined()
   })
 
   it('returns { skipped: "disabled" } when the config row is missing', async () => {
     const store: Store = { fake_liker_config: [] }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = await runFakeLikerJob('schedule', silent)
     expect(res).toEqual({ skipped: 'disabled' })
-    expect(logs.inserts.fake_liker_runs).toBeUndefined()
+    expect((await logs.inserts()).fake_liker_runs).toBeUndefined()
   })
 })
 
@@ -217,11 +207,11 @@ describe('runFakeLikerJob — fake pool', () => {
       fake_liker_config: enabledConfig(),
       users: [mkUser('t1', { created_at: OLD })], // real user, no fakes
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = await runFakeLikerJob('schedule', silent)
     expect(res).toMatchObject({ likesSent: 0, matchesCreated: 0, salamsSent: 0 })
-    expect(logs.inserts.fake_liker_runs).toHaveLength(1)
-    expect(logs.inserts.fake_liker_runs[0]).toMatchObject({ likes_sent: 0, matches_created: 0 })
+    expect((await logs.inserts()).fake_liker_runs).toHaveLength(1)
+    expect((await logs.inserts()).fake_liker_runs[0]).toMatchObject({ likes_sent: 0, matches_created: 0 })
   })
 })
 
@@ -239,11 +229,11 @@ describe('runFakeLikerJob — target selection', () => {
       ],
       swipes: [{ swiper_id: 'someone', swiped_id: 'liked', direction: 'like' }],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     // only 'ok' should be liked
     expect(res.likesSent).toBe(1)
-    expect(logs.inserts.swipes.map((s: any) => s.swiped_id)).toEqual(['ok'])
+    expect((await logs.inserts()).swipes.map((s: any) => s.swiped_id)).toEqual(['ok'])
   })
 })
 
@@ -259,10 +249,10 @@ describe('runFakeLikerJob — same language', () => {
         mkUser('ar', { created_at: '2020-01-01T00:00:00Z', gender: 'man', looking_for: 'both', locale: 'ar' }),
       ],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.likesSent).toBe(2)
-    expect(logs.inserts.swipes.map((s: any) => s.swiped_id).sort()).toEqual(['fa', 'unset'])
+    expect((await logs.inserts()).swipes.map((s: any) => s.swiped_id).sort()).toEqual(['fa', 'unset'])
   })
 
   it('does not like back a non-Persian user who liked an Iranian fake', async () => {
@@ -274,12 +264,12 @@ describe('runFakeLikerJob — same language', () => {
       ],
       swipes: [{ swiper_id: 'en', swiped_id: 'f1', direction: 'like' }],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.likesSent).toBe(0)
     expect(res.matchesCreated).toBe(0)
-    expect(logs.inserts.swipes).toBeUndefined()
-    expect(logs.inserts.messages).toBeUndefined()
+    expect((await logs.inserts()).swipes).toBeUndefined()
+    expect((await logs.inserts()).messages).toBeUndefined()
   })
 
   it('does not open a chat with a non-Persian user on an existing match', async () => {
@@ -291,10 +281,10 @@ describe('runFakeLikerJob — same language', () => {
       ],
       matches: [{ id: 'm1', user1_id: 'en', user2_id: 'f1', created_at: OLD }],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.salamsSent).toBe(0)
-    expect(logs.inserts.messages).toBeUndefined()
+    expect((await logs.inserts()).messages).toBeUndefined()
   })
 
   it('an English fake messages English users and skips Persian ones', async () => {
@@ -306,10 +296,10 @@ describe('runFakeLikerJob — same language', () => {
         mkUser('en', { created_at: '2020-01-01T00:00:00Z', gender: 'man', looking_for: 'both', locale: 'en' }),
       ],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.likesSent).toBe(1)
-    expect(logs.inserts.swipes).toEqual([{ swiper_id: 'enBot', swiped_id: 'en', direction: 'like' }])
+    expect((await logs.inserts()).swipes).toEqual([{ swiper_id: 'enBot', swiped_id: 'en', direction: 'like' }])
   })
 })
 
@@ -323,10 +313,10 @@ describe('runFakeLikerJob — compatibility filter', () => {
         mkUser('woman', { gender: 'woman', looking_for: 'both', created_at: OLD }),
       ],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.likesSent).toBe(1)
-    expect(logs.inserts.swipes.map((s: any) => s.swiped_id)).toEqual(['man'])
+    expect((await logs.inserts()).swipes.map((s: any) => s.swiped_id)).toEqual(['man'])
   })
 })
 
@@ -341,9 +331,9 @@ describe('runFakeLikerJob — load balancing', () => {
         mkUser('t2', { location: 'NYC', created_at: '2020-01-01T00:00:00Z', gender: 'man', looking_for: 'both' }),
       ],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     await runFakeLikerJob('schedule', silent)
-    const pairs = logs.inserts.swipes.map((s: any) => [s.swiper_id, s.swiped_id])
+    const pairs = (await logs.inserts()).swipes.map((s: any) => [s.swiper_id, s.swiped_id])
     // t1 (created later → processed first): tie on counter, B shares LA → B likes t1.
     // t2: A now has the lower counter → A likes t2.
     expect(pairs).toEqual([['B', 't1'], ['A', 't2']])
@@ -363,9 +353,9 @@ describe('runFakeLikerJob — load balancing', () => {
         { swiper_id: 'A', swiped_id: 'y', direction: 'like' },
       ],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     await runFakeLikerJob('schedule', silent)
-    expect(logs.inserts.swipes.map((s: any) => [s.swiper_id, s.swiped_id])).toEqual([['B', 't1']])
+    expect((await logs.inserts()).swipes.map((s: any) => [s.swiper_id, s.swiped_id])).toEqual([['B', 't1']])
   })
 })
 
@@ -381,7 +371,7 @@ describe('runFakeLikerJob — swipe conflict', () => {
       // selection), but re-inserting the like collides on UNIQUE(swiper_id, swiped_id).
       swipes: [{ swiper_id: 'f1', swiped_id: 't1', direction: 'pass' }],
     }
-    useStore(store)
+    await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.likesSent).toBe(0)
     expect(res.skipped).toBe(1)
@@ -400,21 +390,21 @@ describe('runFakeLikerJob — match creation', () => {
       swipes: [{ swiper_id: 't1', swiped_id: 'f1', direction: 'like' }],
       user_photos: [{ user_id: 'f1', url: 'https://p/f1.jpg', position: 0 }],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     await flush()
 
     expect(res.matchesCreated).toBe(1)
     // sorted: 'f1' < 't1'
-    expect(logs.inserts.matches[0]).toMatchObject({ user1_id: 'f1', user2_id: 't1' })
+    expect((await logs.inserts()).matches[0]).toMatchObject({ user1_id: 'f1', user2_id: 't1' })
     expect(notifyMatch).toHaveBeenCalledTimes(1)
     // The DM carries the REAL user's locale (fakes have none) and deep-links the chat.
     expect(notifyMatch).toHaveBeenCalledWith([
-      { telegramId: 555, matchName: 'Sara', matchPhoto: 'https://p/f1.jpg', locale: 'fa', matchId: 'match-1', question: null },
+      { telegramId: 555, matchName: 'Sara', matchPhoto: 'https://p/f1.jpg', locale: 'fa', matchId: id('match-1'), question: null },
     ])
     // Fake's icebreaker first, then the real user's.
     expect(seedIcebreakers).toHaveBeenCalledTimes(1)
-    expect(seedIcebreakers).toHaveBeenCalledWith('match-1', ['f1', 't1'])
+    expect(seedIcebreakers).toHaveBeenCalledWith(id('match-1'), [id('f1'), id('t1')])
   })
 
   it("asks the fake's question in the real user's language when she has an icebreaker", async () => {
@@ -426,12 +416,13 @@ describe('runFakeLikerJob — match creation', () => {
       ],
       swipes: [{ swiper_id: 't1', swiped_id: 'f1', direction: 'like' }],
     }
-    useStore(store)
+    const logs = await useStore(store)
     await runFakeLikerJob('schedule', silent)
     await flush()
+    await logs.inserts()
 
     expect(notifyMatch).toHaveBeenCalledWith([
-      expect.objectContaining({ matchId: 'match-1', question: icebreakerQuestion('جمعه ایده‌آل من…', 'en') }),
+      expect.objectContaining({ matchId: id('match-1'), question: icebreakerQuestion('جمعه ایده‌آل من…', 'en') }),
     ])
   })
 
@@ -445,7 +436,7 @@ describe('runFakeLikerJob — match creation', () => {
       swipes: [{ swiper_id: 't1', swiped_id: 'f1', direction: 'like' }],
       matches: [{ id: 'm-existing', user1_id: 'f1', user2_id: 't1' }],
     }
-    useStore(store)
+    await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.matchesCreated).toBe(0)
     expect(res.likesSent).toBe(1)
@@ -462,7 +453,7 @@ describe('runFakeLikerJob — match creation', () => {
       ],
       swipes: [{ swiper_id: 't1', swiped_id: 'f1', direction: 'like' }],
     }
-    useStore(store)
+    await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.matchesCreated).toBe(1)
     expect(notifyMatch).not.toHaveBeenCalled()
@@ -482,18 +473,18 @@ describe('runFakeLikerJob — like-back phase', () => {
       swipes: [{ swiper_id: 'r1', swiped_id: 'f2', direction: 'like' }],
       user_photos: [{ user_id: 'f2', url: 'https://p/f2.jpg', position: 0 }],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     await flush()
 
     expect(res.matchesCreated).toBe(1)
     // f2 (the liked fake) likes r1 back — never f1
-    expect(logs.inserts.swipes).toEqual([{ swiper_id: 'f2', swiped_id: 'r1', direction: 'like' }])
-    expect(logs.inserts.matches[0]).toMatchObject({ user1_id: 'f2', user2_id: 'r1' }) // 'f2' < 'r1'
+    expect((await logs.inserts()).swipes).toEqual([{ swiper_id: 'f2', swiped_id: 'r1', direction: 'like' }])
+    expect((await logs.inserts()).matches[0]).toMatchObject({ user1_id: 'f2', user2_id: 'r1' }) // 'f2' < 'r1'
     expect(notifyMatch).toHaveBeenCalledWith([
-      { telegramId: 777, matchName: 'Bea', matchPhoto: 'https://p/f2.jpg', locale: 'fa', matchId: 'match-1', question: null },
+      { telegramId: 777, matchName: 'Bea', matchPhoto: 'https://p/f2.jpg', locale: 'fa', matchId: id('match-1'), question: null },
     ])
-    expect(seedIcebreakers).toHaveBeenCalledWith('match-1', ['f2', 'r1'])
+    expect(seedIcebreakers).toHaveBeenCalledWith(id('match-1'), [id('f2'), id('r1')])
   })
 
   it('likes back even a user who already has a received like (bypasses the cold-pass exclusion)', async () => {
@@ -508,11 +499,11 @@ describe('runFakeLikerJob — like-back phase', () => {
         { swiper_id: 'other', swiped_id: 'r1', direction: 'like' }, // r1 already has a received like
       ],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
 
     expect(res.matchesCreated).toBe(1)
-    expect(logs.inserts.matches[0]).toMatchObject({ user1_id: 'f1', user2_id: 'r1' })
+    expect((await logs.inserts()).matches[0]).toMatchObject({ user1_id: 'f1', user2_id: 'r1' })
   })
 
   it('skips a pair already matched — no duplicate like-back', async () => {
@@ -528,11 +519,11 @@ describe('runFakeLikerJob — like-back phase', () => {
       ],
       matches: [{ id: 'm1', user1_id: 'f1', user2_id: 'r1' }],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
 
     expect(res.matchesCreated).toBe(0)
-    expect(logs.inserts.swipes).toBeUndefined() // no new like inserted at all
+    expect((await logs.inserts()).swipes).toBeUndefined() // no new like inserted at all
   })
 
   it('spends the shared per-run budget on warm like-backs before cold outreach', async () => {
@@ -545,12 +536,12 @@ describe('runFakeLikerJob — like-back phase', () => {
       ],
       swipes: [{ swiper_id: 'warm', swiped_id: 'f1', direction: 'like' }],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
 
     expect(res.likesSent).toBe(1)
     // budget is exhausted by the warm lead → 'cold' is never liked this run
-    expect(logs.inserts.swipes.map((s: any) => s.swiped_id)).toEqual(['warm'])
+    expect((await logs.inserts()).swipes.map((s: any) => s.swiped_id)).toEqual(['warm'])
     expect(res.matchesCreated).toBe(1)
   })
 
@@ -563,12 +554,12 @@ describe('runFakeLikerJob — like-back phase', () => {
       ],
       swipes: [{ swiper_id: 'w1', swiped_id: 'f1', direction: 'like' }],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
 
     expect(res.likesSent).toBe(0)
     expect(res.matchesCreated).toBe(0)
-    expect(logs.inserts.swipes).toBeUndefined()
+    expect((await logs.inserts()).swipes).toBeUndefined()
   })
 
   it('caps fake matches per user — a 3rd liked fake is not reciprocated once at 2 matches', async () => {
@@ -588,11 +579,11 @@ describe('runFakeLikerJob — like-back phase', () => {
         { id: 'm2', user1_id: 'f2', user2_id: 'r1' },
       ],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
 
     expect(res.matchesCreated).toBe(0) // r1 is at the cap → f3 does not like back
-    expect(logs.inserts.swipes).toBeUndefined()
+    expect((await logs.inserts()).swipes).toBeUndefined()
   })
 
   it('trickles — a user who liked 3 fakes gets only ONE new match this run', async () => {
@@ -608,12 +599,12 @@ describe('runFakeLikerJob — like-back phase', () => {
         { swiper_id: 'r1', swiped_id: 'f3', direction: 'like' },
       ],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
 
     expect(res.likesSent).toBe(1) // one fake likes back this run, not all three
     expect(res.matchesCreated).toBe(1)
-    expect(logs.inserts.swipes).toHaveLength(1)
+    expect((await logs.inserts()).swipes).toHaveLength(1)
   })
 })
 
@@ -627,7 +618,7 @@ describe('runFakeLikerJob — new-like notification', () => {
       ],
       user_photos: [{ user_id: 'f1', url: 'https://p/f1.jpg', position: 0 }],
     }
-    useStore(store)
+    await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     await flush()
 
@@ -645,7 +636,7 @@ describe('runFakeLikerJob — new-like notification', () => {
       ],
       user_photos: [{ user_id: 'f1', url: 'https://p/f1.jpg', position: 0 }],
     }
-    useStore(store)
+    await useStore(store)
     await runFakeLikerJob('schedule', silent)
     await flush()
     expect(notifyNewLike).toHaveBeenCalledWith(777, 'Sara', null)
@@ -659,7 +650,7 @@ describe('runFakeLikerJob — new-like notification', () => {
         mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both', telegram_id: -5 }),
       ],
     }
-    useStore(store)
+    await useStore(store)
     await runFakeLikerJob('schedule', silent)
     await flush()
 
@@ -675,7 +666,7 @@ describe('runFakeLikerJob — new-like notification', () => {
       ],
       user_photos: [{ user_id: 'f1', url: 'https://p/f1.jpg', position: 0 }],
     }
-    useStore(store)
+    await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     await flush()
 
@@ -694,7 +685,7 @@ describe('runFakeLikerJob — new-like notification', () => {
       swipes: [{ swiper_id: 't1', swiped_id: 'f1', direction: 'like' }],
       user_photos: [{ user_id: 'f1', url: 'https://p/f1.jpg', position: 0 }],
     }
-    useStore(store)
+    await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     await flush()
 
@@ -724,10 +715,10 @@ describe('runFakeLikerJob — salam phase', () => {
       ],
       messages: [{ match_id: 'm3', sender_id: 'r2', body: 'hey' }],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.salamsSent).toBe(1)
-    expect(logs.inserts.messages).toEqual([{ match_id: 'm1', sender_id: 'f1', body: 'salam' }])
+    expect((await logs.inserts()).messages).toEqual([{ match_id: 'm1', sender_id: 'f1', body: SALAM }])
   })
 
   it('still salams a match whose only messages are auto-posted icebreakers', async () => {
@@ -740,10 +731,10 @@ describe('runFakeLikerJob — salam phase', () => {
         { match_id: 'm1', sender_id: 'r1', type: 'icebreaker', body: 'Two truths and a lie…', icebreaker_answer: 'y' },
       ],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.salamsSent).toBe(1)
-    expect(logs.inserts.messages).toEqual([expect.objectContaining({ match_id: 'm1', sender_id: 'f1' })])
+    expect((await logs.inserts()).messages).toEqual([expect.objectContaining({ match_id: 'm1', sender_id: 'f1' })])
   })
 
   it('skips matches whose real side is deleted or banned', async () => {
@@ -759,8 +750,10 @@ describe('runFakeLikerJob — salam phase', () => {
         { id: 'm2', user1_id: 'f1', user2_id: 'rban' },
       ],
     }
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.salamsSent).toBe(0)
+    expect((await logs.inserts()).messages).toBeUndefined()
   })
 
   it('does not salam a both-fake match even if it has zero messages', async () => {
@@ -769,10 +762,10 @@ describe('runFakeLikerJob — salam phase', () => {
       users: [mkFake('f1'), mkFake('f2')],
       matches: [{ id: 'm1', user1_id: 'f1', user2_id: 'f2' }],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.salamsSent).toBe(0)
-    expect(logs.inserts.messages).toBeUndefined()
+    expect((await logs.inserts()).messages).toBeUndefined()
   })
 
   it('orders the salam match queries by created_at descending', async () => {
@@ -781,24 +774,12 @@ describe('runFakeLikerJob — salam phase', () => {
       users: [mkFake('f1'), mkUser('r1', { looking_for: 'men', created_at: OLD, last_active: RECENT })],
       matches: [{ id: 'm1', user1_id: 'f1', user2_id: 'r1', created_at: OLD }],
     }
-    useStore(store)
-    const orders: Array<{ col: string; ascending: boolean }> = []
-    const realFrom = vi.mocked(db.from).getMockImplementation()!
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      const qb = realFrom(table) as any
-      const origOrder = qb.order.bind(qb)
-      qb.order = (col: string, opts?: { ascending?: boolean }) => {
-        if (table === 'matches') orders.push({ col, ascending: opts?.ascending !== false })
-        return origOrder(col, opts)
-      }
-      return qb
-    })
+    await useStore(store)
     await runFakeLikerJob('schedule', silent)
-    // both user1_id and user2_id match queries must order created_at desc
-    expect(orders).toEqual([
-      { col: 'created_at', ascending: false },
-      { col: 'created_at', ascending: false },
-    ])
+    // both the user1_id and the user2_id match queries take the newest-first window
+    const salamQueries = queriesRun().filter((q) => q.text.startsWith('select id, user1_id, user2_id, created_at from matches'))
+    expect(salamQueries).toHaveLength(2)
+    expect(salamQueries.every((q) => / order by created_at desc/.test(q.text))).toBe(true)
   })
 
   it('salams the newest zero-message match when merged candidates exceed the cap', async () => {
@@ -813,17 +794,17 @@ describe('runFakeLikerJob — salam phase', () => {
     for (let i = 0; i < CAP + 50; i++) {
       const rid = `r${i}`
       // ascending created_at with i; the last index is the newest.
-      const created = `2020-01-01T00:00:${String(i).padStart(2, '0')}.000Z`
+      const created = new Date(Date.UTC(2020, 0, 1) + i * 1000).toISOString()
       users.push(mkUser(rid, { looking_for: 'men', created_at: OLD, last_active: RECENT }))
       matches.push({ id: `m${i}`, user1_id: 'f1', user2_id: rid, created_at: created })
       // every match EXCEPT the newest already has a message
       if (i !== CAP + 49) messages.push({ match_id: `m${i}`, sender_id: rid, body: 'hey' })
     }
     const store: Store = { fake_liker_config: enabledConfig(), users, matches, messages }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.salamsSent).toBe(1)
-    expect(logs.inserts.messages).toEqual([{ match_id: `m${CAP + 49}`, sender_id: 'f1', body: 'salam' }])
+    expect((await logs.inserts()).messages).toEqual([{ match_id: `m${CAP + 49}`, sender_id: 'f1', body: SALAM }])
   })
 })
 
@@ -840,18 +821,21 @@ describe('runFakeLikerJob — salam notification gating', () => {
       matches: [{ id: 'm1', user1_id: 'f1', user2_id: 'r1' }],
       user_photos: [{ user_id: 'f1', url: 'https://p/f1.jpg', position: 0 }],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     await runFakeLikerJob('schedule', silent)
     await flush()
     return logs
   }
 
   it('notifies an offline, eligible real user and stamps notified_offline_at', async () => {
-    const logs = await runWithReal({ last_active: STALE, notified_offline_at: null, telegram_id: 777, allows_write_to_pm: null })
-    expect(notifyNewMessage).toHaveBeenCalledWith(777, 'Sara', 'salam', 'https://p/f1.jpg')
-    const stamp = logs.updates.find((u) => u.table === 'users' && 'notified_offline_at' in u.patch)
-    expect(stamp).toBeTruthy()
-    expect(stamp!.filters).toContainEqual(['eq', 'id', 'r1'])
+    await runWithReal({ last_active: STALE, notified_offline_at: null, telegram_id: 777, allows_write_to_pm: null })
+    expect(notifyNewMessage).toHaveBeenCalledWith(777, 'Sara', SALAM, 'https://p/f1.jpg', id('m1'), null)
+    await vi.waitFor(async () => {
+      const [r1] = await sql`select notified_offline_at from users where id = ${id('r1')}`
+      expect(r1.notified_offline_at).not.toBeNull()
+    })
+    const [f1] = await sql`select notified_offline_at from users where id = ${id('f1')}`
+    expect(f1.notified_offline_at).toBeNull()
   })
 
   it('does not notify when the real user is online (<10 min)', async () => {
@@ -886,9 +870,9 @@ describe('runFakeLikerJob — run row', () => {
       swipes: [{ swiper_id: 't1', swiped_id: 'f1', direction: 'like' }], // → reverse like → match + salam
       user_photos: [{ user_id: 'f1', url: 'https://p/f1.jpg', position: 0 }],
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('manual', silent)) as any
-    const row = logs.inserts.fake_liker_runs[0]
+    const row = (await logs.inserts()).fake_liker_runs[0]
     expect(row).toMatchObject({
       trigger: 'manual',
       likes_sent: res.likesSent,
@@ -905,7 +889,7 @@ describe('runFakeLikerJob — run row', () => {
 describe('runFakeLikerJob — error handling (supabase-js resolves, never throws)', () => {
   const realOpts = { looking_for: 'men', created_at: OLD }
 
-  it('seeds counters via head-count queries, not a raw-row fetch', async () => {
+  it('seeds counters via per-fake count(*) queries, not a raw-row fetch', async () => {
     const store: Store = {
       fake_liker_config: enabledConfig(),
       users: [mkFake('A'), mkFake('B'), mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both' })],
@@ -914,23 +898,12 @@ describe('runFakeLikerJob — error handling (supabase-js resolves, never throws
         { swiper_id: 'A', swiped_id: 'y', direction: 'like' },
       ],
     }
-    const logs = useStore(store)
-    const seedSelects: Array<{ head?: boolean }> = []
-    const realFrom = vi.mocked(db.from).getMockImplementation()!
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      const qb = realFrom(table) as any
-      const origSelect = qb.select.bind(qb)
-      qb.select = (cols?: string, opts?: { count?: string; head?: boolean }) => {
-        if (table === 'swipes' && opts?.count) seedSelects.push({ head: opts.head })
-        return origSelect(cols, opts)
-      }
-      return qb
-    })
+    const logs = await useStore(store)
     await runFakeLikerJob('schedule', silent)
-    // A had 2 historical likes → B (0) wins the like; and the seeding used head counts.
-    expect(seedSelects.length).toBeGreaterThanOrEqual(2)
-    expect(seedSelects.every((s) => s.head === true)).toBe(true)
-    expect(logs.inserts.swipes.map((s: any) => [s.swiper_id, s.swiped_id])).toEqual([['B', 't1']])
+    // A had 2 historical likes → B (0) wins the like; and the seeding used counts.
+    const counts = queriesRun().filter((q) => /^select count\(\*\)::int as count from swipes where swiper_id/.test(q.text))
+    expect(counts.length).toBeGreaterThanOrEqual(2)
+    expect((await logs.inserts()).swipes.map((s: any) => [s.swiper_id, s.swiped_id])).toEqual([['B', 't1']])
   })
 
   it('zeroes a fake counter and warns when the counter head-count errors', async () => {
@@ -939,13 +912,13 @@ describe('runFakeLikerJob — error handling (supabase-js resolves, never throws
       users: [mkFake('A'), mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both' })],
       __failCount: { swipes: true },
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const logger = mkLogger()
     const res = (await runFakeLikerJob('schedule', logger)) as any
     // Counter zeroed on error → the fake still likes; a warn is logged.
     expect(res.likesSent).toBe(1)
-    expect(logs.inserts.swipes.map((s: any) => s.swiped_id)).toEqual(['t1'])
-    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ fake: 'A' }), expect.stringContaining('counter seed'))
+    expect((await logs.inserts()).swipes.map((s: any) => s.swiped_id)).toEqual(['t1'])
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ fake: id('A') }), expect.stringContaining('counter seed'))
   })
 
   it('skips a whole candidate batch (no likes) when the received-like fetch errors', async () => {
@@ -954,37 +927,32 @@ describe('runFakeLikerJob — error handling (supabase-js resolves, never throws
       users: [mkFake('f1'), mkUser('ok', { created_at: OLD, gender: 'man', looking_for: 'both' })],
       __failSelect: { swipes: true },
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.likesSent).toBe(0)
     expect(res.errors).toBeGreaterThanOrEqual(1)
-    expect(logs.inserts.swipes).toBeUndefined()
+    expect((await logs.inserts()).swipes).toBeUndefined()
   })
 
   it('pages the received-like lookup beyond one page (page-size boundary)', async () => {
     // One eligible candidate 'c1' with exactly PAGE_SIZE (1000) received likes → the
-    // first page fills to the cap, so a second `.range()` page must be requested.
+    // first page fills to the cap, so a second page must be requested, and c1 is
+    // (correctly) still excluded as already-liked.
     const users: any[] = [mkFake('f1'), mkUser('c1', { created_at: OLD, gender: 'man', looking_for: 'both' })]
     const swipes: any[] = []
     for (let i = 0; i < 1000; i++) swipes.push({ swiper_id: `s${i}`, swiped_id: 'c1', direction: 'like' })
     const store: Store = { fake_liker_config: enabledConfig(), users, swipes }
-    useStore(store)
-    const ranges: Array<[number, number]> = []
-    const realFrom = vi.mocked(db.from).getMockImplementation()!
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      const qb = realFrom(table) as any
-      const origRange = qb.range.bind(qb)
-      qb.range = (from: number, to: number) => {
-        if (table === 'swipes') ranges.push([from, to])
-        return origRange(from, to)
-      }
-      return qb
-    })
-    await runFakeLikerJob('schedule', silent)
-    // Page 1 was full (1000) so page 2 was requested.
-    expect(ranges).toContainEqual([0, 999])
-    expect(ranges).toContainEqual([1000, 1999])
-  })
+    const logs = await useStore(store)
+    const res = (await runFakeLikerJob('schedule', silent)) as any
+    const pages = queriesRun()
+      .filter((q) => q.text.startsWith('select swiped_id from swipes'))
+      .map((q) => q.values.slice(-2))
+    // Page 1 was full (1000) so page 2 (offset 1000) was requested.
+    expect(pages).toContainEqual([1000, 0])
+    expect(pages).toContainEqual([1000, 1000])
+    expect(res.likesSent).toBe(0)
+    expect((await logs.inserts()).swipes).toBeUndefined()
+  }, 30_000)
 
   it('sends no salam (and counts errors) when every message-count query errors', async () => {
     const store: Store = {
@@ -993,11 +961,11 @@ describe('runFakeLikerJob — error handling (supabase-js resolves, never throws
       matches: [{ id: 'm1', user1_id: 'f1', user2_id: 'r1' }],
       __failCount: { messages: true },
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.salamsSent).toBe(0)
     expect(res.errors).toBeGreaterThanOrEqual(1)
-    expect(logs.inserts.messages).toBeUndefined()
+    expect((await logs.inserts()).messages).toBeUndefined()
   })
 
   it('a per-match message-count error skips only that match', async () => {
@@ -1014,11 +982,11 @@ describe('runFakeLikerJob — error handling (supabase-js resolves, never throws
       ],
       __failCountMatch: new Set(['m2']),
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.salamsSent).toBe(1)
     expect(res.errors).toBeGreaterThanOrEqual(1)
-    expect(logs.inserts.messages).toEqual([{ match_id: 'm1', sender_id: 'f1', body: 'salam' }])
+    expect((await logs.inserts()).messages).toEqual([{ match_id: 'm1', sender_id: 'f1', body: SALAM }])
   })
 
   it('warns when the run-row insert errors (supabase-js resolves it, not throws)', async () => {
@@ -1027,7 +995,7 @@ describe('runFakeLikerJob — error handling (supabase-js resolves, never throws
       users: [mkFake('f1')],
       __failInsert: { fake_liker_runs: true },
     }
-    useStore(store)
+    await useStore(store)
     const logger = mkLogger()
     await runFakeLikerJob('schedule', logger)
     expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ err: expect.anything() }), expect.stringContaining('run row insert failed'))
@@ -1042,12 +1010,12 @@ describe('runFakeLikerJob — error handling (supabase-js resolves, never throws
       ],
       __failSingle: { swipes: true },
     }
-    const logs = useStore(store)
+    const logs = await useStore(store)
     const res = (await runFakeLikerJob('schedule', silent)) as any
     expect(res.likesSent).toBe(1)
     expect(res.matchesCreated).toBe(0)
     expect(res.errors).toBeGreaterThanOrEqual(1)
-    expect(logs.inserts.matches).toBeUndefined()
+    expect((await logs.inserts()).matches).toBeUndefined()
   })
 })
 
@@ -1057,11 +1025,18 @@ describe('runFakeLikerJob — concurrency guard', () => {
       fake_liker_config: enabledConfig(),
       users: [mkFake('f1'), mkUser('t1', { created_at: OLD, gender: 'man', looking_for: 'both' })],
     }
-    useStore(store)
+    await useStore(store)
     const p1 = runFakeLikerJob('schedule', silent)
     const p2 = runFakeLikerJob('manual', silent)
     const [r1, r2] = await Promise.all([p1, p2])
     expect(r2).toEqual({ skipped: 'already_running' })
     expect(r1).toMatchObject({ likesSent: expect.any(Number) })
+  })
+
+  it('a disabled run releases the guard so the next enabled run proceeds', async () => {
+    await useStore({ fake_liker_config: [{ id: true, enabled: false, max_targets_per_run: 100 }], users: [mkFake('f1')] })
+    expect(await runFakeLikerJob('schedule', silent)).toEqual({ skipped: 'disabled' })
+    await sql`update fake_liker_config set enabled = true`
+    expect(await runFakeLikerJob('manual', silent)).toMatchObject({ likesSent: 0, errors: 0 })
   })
 })

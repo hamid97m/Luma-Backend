@@ -1,73 +1,57 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn(), storage: { from: vi.fn() } } }))
+// Storage still goes through supabase-js; the DB part is real Postgres.
+vi.mock('../src/db.js', async (orig) => ({ ...(await orig<object>()), db: { storage: { from: vi.fn() } } }))
 vi.mock('../src/bot.js', () => ({ fetchTelegramProfilePhoto: vi.fn(), notifyReferralQualified: vi.fn(), notifyReferralReward: vi.fn() }))
 vi.mock('../src/referrals/rewards.js', () => ({ maybeQualifyReferral: vi.fn() }))
+// Background AI photo check (another area) — not under test here.
+vi.mock('../src/moderation/photoAiCheck.js', () => ({ scheduleMainPhotoCheck: vi.fn() }))
 
+import { randomUUID } from 'node:crypto'
 import { buildApp } from '../src/server.js'
-import { verifyInitData } from '../src/auth.js'
 import { db } from '../src/db.js'
 import { fetchTelegramProfilePhoto } from '../src/bot.js'
 import { maybeQualifyReferral } from '../src/referrals/rewards.js'
+import { AUTH, authAs } from './helpers/auth.js'
+import { resetDb, createUser, createPhoto } from './helpers/db.js'
 
-const AUTH = { authorization: 'valid_init_data' }
-const USER_ID = 'user-uuid-1'
-
-function setupAuth() {
-  vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
-  vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({ eq: () => ({ single: () => ({ data: { id: USER_ID } }) }) }),
-  } as any)
+const storage = {
+  getPublicUrl: (path: string) => ({ data: { publicUrl: `https://media.test/profile-photos/${path}` } }),
+  upload: () => Promise.resolve({ error: null }),
+  remove: () => Promise.resolve({ error: null }),
+  createSignedUploadUrl: () => Promise.resolve({ data: { signedUrl: 'https://upload.test', token: 't' }, error: null }),
 }
 
 describe('referral qualification hooks', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
+  let me: Record<string, any>
+
   beforeEach(async () => {
-    vi.mocked(maybeQualifyReferral).mockClear()
+    await resetDb()
     app = await buildApp()
+    me = await createUser({ name: 'Ali' })
+    authAs(me)
+    vi.mocked(db.storage.from).mockReturnValue(storage as any)
   })
 
   it('calls maybeQualifyReferral on a successful photo confirm', async () => {
-    setupAuth()
-
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ order: () => ({ data: [{ id: 'old-photo', position: 0 }], error: null }) }) }),
-    } as any)
-
-    vi.mocked(db.from).mockReturnValueOnce({
-      insert: () => ({ data: null, error: null }),
-    } as any)
-
-    // Resume check: user was not paused, so the .not() guard yields no row.
-    vi.mocked(db.from).mockReturnValueOnce({
-      update: () => ({ eq: () => ({ not: () => ({ select: () => ({ maybeSingle: () => ({ data: null }) }) }) }) }),
-    } as any)
-
-    const PUBLIC_URL = 'https://supabase.example.com/public/profile-photos/user-uuid-1/new-uuid'
-    vi.mocked(db.storage.from).mockReturnValue({
-      getPublicUrl: () => ({ data: { publicUrl: PUBLIC_URL } }),
-    } as any)
-
+    await createPhoto(me.id, 0)
     const res = await app.inject({
       method: 'POST', url: '/profile/me/photos/confirm',
-      headers: AUTH, payload: { photoId: 'new-uuid' },
+      headers: AUTH, payload: { photoId: randomUUID() },
     })
 
     expect(res.statusCode).toBe(200)
-    expect(maybeQualifyReferral).toHaveBeenCalledWith(USER_ID)
+    expect(maybeQualifyReferral).toHaveBeenCalledWith(me.id)
   })
 
   it('does NOT call maybeQualifyReferral when photo confirm fails validation (max photos reached)', async () => {
-    setupAuth()
-
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ order: () => ({ data: new Array(6).fill({ id: 'x', position: 0 }), error: null }) }) }),
-    } as any)
+    for (let i = 0; i < 6; i++) await createPhoto(me.id, i)
 
     const res = await app.inject({
       method: 'POST', url: '/profile/me/photos/confirm',
-      headers: AUTH, payload: { photoId: 'some-uuid' },
+      headers: AUTH, payload: { photoId: randomUUID() },
     })
 
     expect(res.statusCode).toBe(400)
@@ -75,33 +59,7 @@ describe('referral qualification hooks', () => {
   })
 
   it('calls maybeQualifyReferral on a successful photo import from Telegram', async () => {
-    setupAuth()
-
-    // telegram_id lookup
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: { telegram_id: 12345 } }) }) }),
-    } as any)
-
-    // existing photos
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ order: () => ({ data: [], error: null }) }) }),
-    } as any)
-
     vi.mocked(fetchTelegramProfilePhoto).mockResolvedValueOnce({ buffer: Buffer.from(''), mime: 'image/jpeg' } as any)
-
-    vi.mocked(db.storage.from).mockReturnValue({
-      upload: () => Promise.resolve({ error: null }),
-      getPublicUrl: () => ({ data: { publicUrl: 'https://supabase.example.com/public/profile-photos/user-uuid-1/x' } }),
-    } as any)
-
-    vi.mocked(db.from).mockReturnValueOnce({
-      insert: () => ({ data: null, error: null }),
-    } as any)
-
-    // Resume check: user was not paused.
-    vi.mocked(db.from).mockReturnValueOnce({
-      update: () => ({ eq: () => ({ not: () => ({ select: () => ({ maybeSingle: () => ({ data: null }) }) }) }) }),
-    } as any)
 
     const res = await app.inject({
       method: 'POST', url: '/profile/me/photos/from-telegram',
@@ -109,20 +67,10 @@ describe('referral qualification hooks', () => {
     })
 
     expect(res.statusCode).toBe(200)
-    expect(maybeQualifyReferral).toHaveBeenCalledWith(USER_ID)
+    expect(maybeQualifyReferral).toHaveBeenCalledWith(me.id)
   })
 
   it('calls maybeQualifyReferral on a successful profile update', async () => {
-    setupAuth()
-
-    vi.mocked(db.from)
-      .mockReturnValueOnce({
-        update: () => ({ eq: () => ({ select: () => ({ single: () => ({ data: { id: USER_ID, name: 'Ali', age: 25, gender: 'man', looking_for: 'women', bio: 'سلام' }, error: null }) }) }) }),
-      } as any)
-      .mockReturnValueOnce({
-        select: () => ({ eq: () => ({ order: () => ({ data: [], error: null }) }) }),
-      } as any)
-
     const res = await app.inject({
       method: 'PUT',
       url: '/profile/me',
@@ -131,12 +79,10 @@ describe('referral qualification hooks', () => {
     })
 
     expect(res.statusCode).toBe(200)
-    expect(maybeQualifyReferral).toHaveBeenCalledWith(USER_ID)
+    expect(maybeQualifyReferral).toHaveBeenCalledWith(me.id)
   })
 
   it('does NOT call maybeQualifyReferral when profile update fails validation (invalid age)', async () => {
-    setupAuth()
-
     const res = await app.inject({
       method: 'PUT',
       url: '/profile/me',

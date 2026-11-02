@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../db.js'
+import { sql, db } from '../db.js'
 import { icebreakerIndex } from '../icebreakers/catalog.js'
 import { maybeQualifyReferral } from '../referrals/rewards.js'
 import { isLocale } from '../i18n/index.js'
@@ -7,25 +7,40 @@ import { scheduleUserGeo } from '../geo/resolveCity.js'
 import { scheduleMainPhotoCheck } from '../moderation/photoAiCheck.js'
 import { markActiveIfSignupComplete } from '../users/accountStatus.js'
 
+type Photo = { id: string; url: string; position: number }
+
+/** The user's photos in display order. A failed read counts as no photos
+ *  (supabase-js callers ignored this error). */
+async function listPhotos(userId: string): Promise<Photo[]> {
+  try {
+    return await sql<Photo[]>`
+      select id, url, position from user_photos
+      where user_id = ${userId}
+      order by position asc`
+  } catch {
+    return []
+  }
+}
+
 export async function getProfileWithPhotos(userId: string) {
-  const { data: user, error } = await db
-    .from('users')
-    .select('id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt, icebreaker_answer, is_active, paused_at, locale, account_status')
-    .eq('id', userId)
-    .single()
-  if (error || !user) return null
+  let user
+  try {
+    ;[user] = await sql`
+      select id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt,
+             icebreaker_answer, is_active, paused_at, locale, account_status
+      from users where id = ${userId}`
+  } catch {
+    return null
+  }
+  if (!user) return null
 
-  const { data: photos } = await db
-    .from('user_photos')
-    .select('id, url, position')
-    .eq('user_id', userId)
-    .order('position', { ascending: true })
+  const photos = await listPhotos(userId)
 
-  await markActiveIfSignupComplete(userId, user, (photos ?? []).length)
+  await markActiveIfSignupComplete(userId, user, photos.length)
 
   const setupComplete = user.age > 0
 
-  return { ...user, photos: photos ?? [], setupComplete, paused: Boolean(user.paused_at) }
+  return { ...user, photos, setupComplete, paused: Boolean(user.paused_at) }
 }
 
 export async function profileRoutes(app: FastifyInstance) {
@@ -109,31 +124,33 @@ export async function profileRoutes(app: FastifyInstance) {
       updates.geo_country = null
     }
 
-    const { data: user, error } = await db
-      .from('users')
-      .update({ ...updates, last_active: new Date().toISOString() })
-      .eq('id', req.userId)
-      .select('id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt, icebreaker_answer, is_active, locale, account_status')
-      .single()
+    let user
+    try {
+      ;[user] = await sql`
+        update users set ${sql({ ...updates, last_active: new Date().toISOString() })}
+        where id = ${req.userId}
+        returning id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt,
+                  icebreaker_answer, is_active, locale, account_status`
+    } catch (err) {
+      // e.g. an invalid enum value for gender/looking_for, or a null interests.
+      req.log.warn({ err }, 'profile update failed')
+      user = undefined
+    }
 
-    if (error || !user) return reply.status(500).send({ error: 'update_failed' })
+    if (!user) return reply.status(500).send({ error: 'update_failed' })
 
     if ('location' in updates) scheduleUserGeo(req.userId, user.location, req.log)
     // Onboarding uploads the first photo before gender is saved.
     if ('gender' in updates) scheduleMainPhotoCheck(req.userId, req.log)
 
-    const { data: photos } = await db
-      .from('user_photos')
-      .select('id, url, position')
-      .eq('user_id', req.userId)
-      .order('position', { ascending: true })
+    const photos = await listPhotos(req.userId)
 
-    await markActiveIfSignupComplete(req.userId, user, (photos ?? []).length)
+    await markActiveIfSignupComplete(req.userId, user, photos.length)
     await maybeQualifyReferral(req.userId)
 
     return {
       ...user,
-      photos: photos ?? [],
+      photos,
       setupComplete: user.age > 0,
     }
   })
@@ -147,8 +164,11 @@ export async function profileRoutes(app: FastifyInstance) {
     const { granted } = req.body as { granted?: boolean }
     if (typeof granted !== 'boolean') return reply.status(400).send({ error: 'invalid_granted' })
 
-    const { error } = await db.from('users').update({ allows_write_to_pm: granted }).eq('id', req.userId)
-    if (error) return reply.status(500).send({ error: 'update_failed' })
+    try {
+      await sql`update users set allows_write_to_pm = ${granted} where id = ${req.userId}`
+    } catch {
+      return reply.status(500).send({ error: 'update_failed' })
+    }
     return { ok: true }
   })
 
@@ -160,47 +180,57 @@ export async function profileRoutes(app: FastifyInstance) {
     const { locale } = (req.body ?? {}) as { locale?: unknown }
     if (!isLocale(locale)) return reply.status(400).send({ error: 'invalid_locale' })
 
-    const { error } = await db.from('users').update({ locale }).eq('id', req.userId)
-    if (error) return reply.status(500).send({ error: 'update_failed' })
+    try {
+      await sql`update users set locale = ${locale} where id = ${req.userId}`
+    } catch {
+      return reply.status(500).send({ error: 'update_failed' })
+    }
     return { ok: true, locale }
   })
 
   app.delete('/profile/me', async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
-    const { data: photos } = await db
-      .from('user_photos')
-      .select('id')
-      .eq('user_id', req.userId)
+    // A failed read was ignored (treated as no photos) — kept.
+    const photos = await sql<{ id: string }[]>`select id from user_photos where user_id = ${req.userId}`
+      .catch(() => [] as { id: string }[])
 
-    if (photos?.length) {
+    if (photos.length) {
       const { error: storageError } = await db.storage.from('profile-photos').remove(photos.map((p) => `${req.userId}/${p.id}`))
       if (storageError) {
         console.error(`Failed to remove profile photos for user ${req.userId}:`, storageError)
       }
-      const { error: deleteError } = await db.from('user_photos').delete().eq('user_id', req.userId)
-      if (deleteError) return reply.status(500).send({ error: 'delete_failed' })
+      try {
+        await sql`delete from user_photos where user_id = ${req.userId}`
+      } catch {
+        return reply.status(500).send({ error: 'delete_failed' })
+      }
     }
 
-    const { error } = await db.from('users').update({
-      name: '',
-      bio: null,
-      interests: [],
-      location: null,
-      geo_city: null,
-      geo_country: null,
-      icebreaker_prompt: null,
-      icebreaker_answer: null,
-      age: 0,
-      is_active: false,
-      account_status: 'preparing',
-      // NULL = "never chose a language": a re-signup goes through the
-      // first-open picker again instead of inheriting the old choice.
-      locale: null,
-      deleted_at: new Date().toISOString(),
-    }).eq('id', req.userId)
+    try {
+      await sql`
+        update users set ${sql({
+          name: '',
+          bio: null,
+          interests: [],
+          location: null,
+          geo_city: null,
+          geo_country: null,
+          icebreaker_prompt: null,
+          icebreaker_answer: null,
+          age: 0,
+          is_active: false,
+          account_status: 'preparing',
+          // NULL = "never chose a language": a re-signup goes through the
+          // first-open picker again instead of inheriting the old choice.
+          locale: null,
+          deleted_at: new Date().toISOString(),
+        })}
+        where id = ${req.userId}`
+    } catch {
+      return reply.status(500).send({ error: 'delete_failed' })
+    }
 
-    if (error) return reply.status(500).send({ error: 'delete_failed' })
     return { ok: true }
   })
 }

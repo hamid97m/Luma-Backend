@@ -1,127 +1,85 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn(), storage: { from: vi.fn() } } }))
+// Storage still goes through supabase-js; the DB part is real Postgres.
+vi.mock('../src/db.js', async (orig) => ({ ...(await orig<object>()), db: { storage: { from: vi.fn() } } }))
 vi.mock('../src/referrals/rewards.js', () => ({ maybeQualifyReferral: vi.fn() }))
+vi.mock('../src/moderation/photoAiCheck.js', () => ({ scheduleMainPhotoCheck: vi.fn() }))
 
 import { buildApp } from '../src/server.js'
-import { verifyInitData } from '../src/auth.js'
 import { db } from '../src/db.js'
+import { AUTH, authAs } from './helpers/auth.js'
+import { resetDb, createUser, createPhoto, sql } from './helpers/db.js'
+import { storageMock, createReport } from './helpers/profile.js'
 
-const AUTH = { authorization: 'valid_init_data' }
 const PHOTO_ID = '11111111-1111-1111-1111-111111111111'
-
-function setupAuth() {
-  vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
-  vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({ eq: () => ({ single: () => ({ data: { id: 'me-1' } }) }) }),
-  } as any)
-}
 
 describe('POST /profile/me/photos/confirm — resume', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
+  let storage: ReturnType<typeof storageMock>
   beforeEach(async () => {
-    vi.clearAllMocks()
+    await resetDb()
     app = await buildApp()
-    ;(db.storage.from as any) = vi.fn(() => ({
-      getPublicUrl: () => ({ data: { publicUrl: 'https://cdn/me-1/photo.jpg' } }),
-    }))
+    storage = storageMock(() => 'https://cdn/me-1/photo.jpg')
+    vi.mocked(db.storage.from).mockReturnValue(storage as any)
+  })
+
+  const confirm = () => app.inject({
+    method: 'POST', url: '/profile/me/photos/confirm', headers: AUTH,
+    payload: { photoId: PHOTO_ID },
   })
 
   it('clears the pause and resolves pending reports when the user was paused', async () => {
-    setupAuth()
-    const usersUpdate = vi.fn(() => ({
-      eq: () => ({ not: () => ({ select: () => ({ maybeSingle: () => ({ data: { id: 'me-1' } }) }) }) }),
-    }))
-    const reportsUpdate = vi.fn(() => ({ eq: () => ({ eq: () => ({ error: null }) }) }))
-    vi.mocked(db.from)
-      .mockReturnValueOnce({ select: () => ({ eq: () => ({ order: () => ({ data: [] }) }) }) } as any)  // existing photos count
-      .mockReturnValueOnce({ insert: () => ({ error: null }) } as any)               // insert photo
-      .mockReturnValueOnce({ update: usersUpdate } as any)                            // clear paused_at
-      .mockReturnValueOnce({ update: reportsUpdate } as any)                          // resolve reports
+    const me = await createUser({ paused_at: '2026-08-31T00:00:00Z' })
+    authAs(me)
+    const pending = await createReport(me.id)
+    const dismissed = await createReport(me.id, { status: 'dismissed' })
+    const someoneElse = await createReport((await createUser()).id)
 
-    const res = await app.inject({
-      method: 'POST', url: '/profile/me/photos/confirm', headers: AUTH,
-      payload: { photoId: PHOTO_ID },
-    })
+    const res = await confirm()
+
     expect(res.statusCode).toBe(200)
-    expect((usersUpdate.mock.calls[0][0] as any).paused_at).toBeNull()
-    expect((reportsUpdate.mock.calls[0][0] as any).status).toBe('resolved_reuploaded')
+    expect((await sql`select paused_at from users where id = ${me.id}`)[0].paused_at).toBeNull()
+    const statuses = Object.fromEntries(
+      (await sql`select id, status, resolved_at from reports`).map((r) => [r.id, r]))
+    expect(statuses[pending.id].status).toBe('resolved_reuploaded')
+    expect(statuses[pending.id].resolved_at).not.toBeNull()
+    expect(statuses[dismissed.id].status).toBe('dismissed')
+    expect(statuses[someoneElse.id].status).toBe('pending')
   })
 
   it('does not touch reports when the user was not paused', async () => {
-    setupAuth()
-    const usersUpdate = vi.fn(() => ({
-      eq: () => ({ not: () => ({ select: () => ({ maybeSingle: () => ({ data: null }) }) }) }),
-    }))
-    const reportsUpdate = vi.fn(() => ({ eq: () => ({ eq: () => ({ error: null }) }) }))
-    vi.mocked(db.from)
-      .mockReturnValueOnce({ select: () => ({ eq: () => ({ order: () => ({ data: [] }) }) }) } as any)
-      .mockReturnValueOnce({ insert: () => ({ error: null }) } as any)
-      .mockReturnValueOnce({ update: usersUpdate } as any)
-      .mockReturnValueOnce({ update: reportsUpdate } as any)
+    const me = await createUser()
+    authAs(me)
+    const report = await createReport(me.id)
 
-    const res = await app.inject({
-      method: 'POST', url: '/profile/me/photos/confirm', headers: AUTH,
-      payload: { photoId: PHOTO_ID },
-    })
+    const res = await confirm()
+
     expect(res.statusCode).toBe(200)
-    expect(reportsUpdate).not.toHaveBeenCalled()
+    expect((await sql`select status from reports where id = ${report.id}`)[0].status).toBe('pending')
   })
 
   it('evicts the oldest photo to let a paused user at the cap self-resume', async () => {
-    // The previous test's reportsUpdate mockReturnValueOnce is never consumed
-    // when `resumed` is falsy, and vi.clearAllMocks() (beforeEach) does not
-    // drain queued once-implementations — reset explicitly to start clean.
-    vi.mocked(db.from).mockReset()
-    vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
-    // Auth preHandler: user row carries a non-null paused_at, so req.isPaused === true.
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ single: () => ({ data: { id: 'me-1', paused_at: '2026-08-31T00:00:00Z' } }) }) }),
-    } as any)
+    // Auth preHandler sees a non-null paused_at, so req.isPaused === true.
+    const me = await createUser({ paused_at: '2026-08-31T00:00:00Z' })
+    authAs(me)
+    const photos = []
+    for (let i = 0; i < 6; i++) photos.push(await createPhoto(me.id, i))
+    const oldest = photos[0]
+    await createReport(me.id)
 
-    const oldest = { id: 'oldest-photo', position: 0 }
-    const existingPhotos = [
-      oldest,
-      { id: 'p2', position: 1 },
-      { id: 'p3', position: 2 },
-      { id: 'p4', position: 3 },
-      { id: 'p5', position: 4 },
-      { id: 'p6', position: 5 },
-    ]
-
-    const deleteEq = vi.fn(() => ({ error: null }))
-    const insert = vi.fn(() => ({ error: null }))
-    const usersUpdate = vi.fn(() => ({
-      eq: () => ({ not: () => ({ select: () => ({ maybeSingle: () => ({ data: { id: 'me-1' } }) }) }) }),
-    }))
-    const reportsUpdate = vi.fn(() => ({ eq: () => ({ eq: () => ({ error: null }) }) }))
-    const storageRemove = vi.fn().mockResolvedValue({ error: null })
-    ;(db.storage.from as any) = vi.fn(() => ({
-      getPublicUrl: () => ({ data: { publicUrl: 'https://cdn/me-1/photo.jpg' } }),
-      remove: storageRemove,
-    }))
-
-    vi.mocked(db.from)
-      .mockReturnValueOnce({ select: () => ({ eq: () => ({ order: () => ({ data: existingPhotos }) }) }) } as any) // existing photos, at cap
-      .mockReturnValueOnce({ delete: () => ({ eq: deleteEq }) } as any)                                            // evict oldest photo
-      .mockReturnValueOnce({ insert } as any)                                                                      // insert new photo
-      .mockReturnValueOnce({ update: usersUpdate } as any)                                                          // clear paused_at
-      .mockReturnValueOnce({ update: reportsUpdate } as any)                                                        // resolve reports
-
-    const res = await app.inject({
-      method: 'POST', url: '/profile/me/photos/confirm', headers: AUTH,
-      payload: { photoId: PHOTO_ID },
-    })
+    const res = await confirm()
 
     expect(res.statusCode).toBe(200)
-    expect(deleteEq).toHaveBeenCalledWith('id', oldest.id)
-    expect(storageRemove).toHaveBeenCalledWith([`me-1/${oldest.id}`])
-    expect(insert.mock.calls[0][0]).toMatchObject({ id: PHOTO_ID, position: oldest.position })
+    expect(storage.remove).toHaveBeenCalledWith([`${me.id}/${oldest.id}`])
     expect(res.json()).toEqual({
       photo: { id: PHOTO_ID, url: 'https://cdn/me-1/photo.jpg', position: oldest.position },
     })
-    expect((usersUpdate.mock.calls[0][0] as any).paused_at).toBeNull()
-    expect((reportsUpdate.mock.calls[0][0] as any).status).toBe('resolved_reuploaded')
+    const rows = await sql`select id, position from user_photos where user_id = ${me.id} order by position`
+    expect(rows).toHaveLength(6)
+    expect(rows[0]).toEqual({ id: PHOTO_ID, position: 0 })
+    expect(rows.some((r) => r.id === oldest.id)).toBe(false)
+    expect((await sql`select paused_at from users where id = ${me.id}`)[0].paused_at).toBeNull()
+    expect((await sql`select status from reports`)[0].status).toBe('resolved_reuploaded')
   })
 })

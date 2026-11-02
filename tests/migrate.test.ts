@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 import { migrate } from '../src/migrate.js'
 
 const TEST_PG_URL = process.env.TEST_PG_URL ?? 'postgres://postgres:luma@localhost:54329'
-const DB = `luma_migrate_${process.env.VITEST_POOL_ID ?? '0'}`
+const DB = `luma_migrate_${process.env.LUMA_TEST_RUN ?? 'local'}_${process.env.VITEST_POOL_ID ?? '0'}`
 
 describe('migrate', () => {
   let admin: postgres.Sql
@@ -21,13 +21,13 @@ describe('migrate', () => {
     dir = await mkdtemp(join(tmpdir(), 'luma-migrate-'))
     await copyFile(resolve('db/schema.sql'), join(dir, 'schema.sql'))
     await mkdir(join(dir, 'migrations'))
-  })
+  }, 60_000) // creating a database is slow while the full suite loads the server
 
   afterAll(async () => {
     await sql.end()
     await admin.unsafe(`drop database if exists "${DB}" with (force)`)
     await admin.end()
-  })
+  }, 60_000)
 
   it('loads the baseline into an empty database', async () => {
     const res = await migrate(sql as never, dir)

@@ -1,259 +1,160 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/bot.js', () => ({ notifyMatch: vi.fn() }))
 
 import { buildApp } from '../src/server.js'
-import { verifyInitData } from '../src/auth.js'
-import { db } from '../src/db.js'
+import { AUTH, authAs } from './helpers/auth.js'
+import { resetDb, createUser, createMatch, createPhoto, insertRow, sql } from './helpers/db.js'
 
-const AUTH = { authorization: 'valid_init_data' }
-const USER_ID = 'user-uuid-1'
-
-function setupAuth() {
-  vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
-  vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({ eq: () => ({ single: () => ({ data: { id: USER_ID } }) }) }),
-  } as any)
+// The viewer is a woman seeking men → exempt from the free-chat gate, so every
+// match stays premiumRequired: false (gate behaviour lives in matches-premium).
+async function viewer() {
+  return createUser({ name: 'Ali', gender: 'woman', looking_for: 'men' })
 }
 
-function mockNoBlocks() {
-  vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({ or: () => ({ data: [], error: null }) }),
-  } as any)
-}
-
-function mockMatchesRow(premiumUntil: string | null = null) {
-  vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({
-      or: () => ({
-        order: () => ({
-          data: [{
-            id: 'match-1',
-            created_at: '2026-01-01T00:00:00Z',
-            user1_id: USER_ID,
-            user2_id: 'other-user',
-            user1: { id: USER_ID, name: 'Ali', telegram_id: 1, deleted_at: null, age: 30, bio: null, icebreaker_prompt: null, icebreaker_answer: null },
-            user2: { id: 'other-user', name: 'Sara', telegram_id: 99, deleted_at: null, age: 24, bio: 'Coffee person', icebreaker_prompt: 'My perfect Sunday', icebreaker_answer: 'Hiking then pancakes', premium_until: premiumUntil },
-          }],
-          error: null,
-        }),
-      }),
-    }),
-  } as any)
-}
-
-function mockPhotos() {
-  vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({
-      eq: () => ({ order: () => ({ data: [{ url: 'https://img', position: 0 }], error: null }) }),
-    }),
-  } as any)
-}
-
-function mockLastMessage(row: { body: string; created_at: string; sender_id: string; type?: string } | null) {
-  const select = vi.fn(() => ({
-    eq: () => ({
-      order: () => ({
-        limit: () => ({ data: row ? [row] : [], error: null }),
-      }),
-    }),
-  }))
-  vi.mocked(db.from).mockReturnValueOnce({ select } as any)
-  return select
-}
-
-function mockUnreadCount(count: number) {
-  vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({
-      eq: () => ({
-        neq: () => ({
-          is: () => ({ count, error: null }),
-        }),
-      }),
-    }),
-  } as any)
-}
-
-// GET /matches reads the viewer's cohort for the free-chat gate. A woman
-// seeking only men short-circuits as exempt (no premium_config / messages
-// reads), so every match stays premiumRequired: false — matching these tests' expectations.
-function mockChatGateExempt() {
-  vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({ eq: () => ({ single: () => ({ data: { gender: 'woman', looking_for: 'men', premium_until: null }, error: null }) }) }),
-  } as any)
+/** Insert a message; the trigger bumps matches.last_message_at for real. */
+function message(match_id: string, sender_id: string, row: Record<string, unknown> = {}) {
+  return insertRow('messages', { match_id, sender_id, body: 'hi', ...row })
 }
 
 describe('GET /matches', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
-  beforeEach(async () => { app = await buildApp() })
+  let me: Record<string, any>
+  let sara: Record<string, any>
+
+  beforeEach(async () => {
+    await resetDb()
+    app = await buildApp()
+    me = await viewer()
+    sara = await createUser({
+      name: 'Sara', gender: 'woman', looking_for: 'men', age: 24, bio: 'Coffee person',
+      icebreaker_prompt: 'My perfect Sunday', icebreaker_answer: 'Hiking then pancakes',
+    })
+    authAs(me)
+  })
+
+  const get = () => app.inject({ method: 'GET', url: '/matches', headers: AUTH })
+
+  it('returns 401 when unauthenticated', async () => {
+    const res = await app.inject({ method: 'GET', url: '/matches' })
+    expect(res.statusCode).toBe(401)
+  })
 
   it('returns list of matches with other user info, last message, and unread count', async () => {
-    setupAuth()
-    mockNoBlocks()
-    mockMatchesRow()
-    mockChatGateExempt()
-    mockPhotos()
-    const lastMessageSelect = mockLastMessage({ body: 'hey there', created_at: '2026-01-02T00:00:00Z', sender_id: 'other-user', type: 'text' })
-    mockUnreadCount(2)
+    const m = await createMatch(me.id, sara.id, { created_at: '2026-01-01T00:00:00Z' })
+    await createPhoto(sara.id, 1, { url: 'https://img/1' })
+    await createPhoto(sara.id, 0, { url: 'https://img/0' })
+    await message(m.id, sara.id, { body: 'first', created_at: '2026-01-01T12:00:00Z' })
+    await message(m.id, me.id, { body: 'mine', created_at: '2026-01-01T13:00:00Z', read_at: null })
+    await message(m.id, sara.id, { body: 'hey there', created_at: '2026-01-02T00:00:00Z' })
+    await message(m.id, sara.id, { body: 'already read', created_at: '2026-01-01T11:00:00Z', read_at: '2026-01-01T11:30:00Z' })
 
-    const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
+    const res = await get()
 
     expect(res.statusCode).toBe(200)
-    expect((lastMessageSelect.mock.calls[0] as unknown[])[0]).toContain('type')
     const body = res.json()
     expect(body.matches).toHaveLength(1)
-    expect(body.matches[0].user.name).toBe('Sara')
-    expect(body.matches[0].user.premium).toBe(false)
-    expect(body.matches[0].user.telegramId).toBe(99)
-    expect(body.matches[0].user.age).toBe(24)
-    expect(body.matches[0].user.bio).toBe('Coffee person')
-    expect(body.matches[0].user.icebreakerPrompt).toBe('My perfect Sunday')
-    expect(body.matches[0].user.icebreakerAnswer).toBe('Hiking then pancakes')
-    expect(body.matches[0].lastMessage).toEqual({
-      body: 'hey there', createdAt: '2026-01-02T00:00:00Z', senderId: 'other-user', type: 'text',
+    const [row] = body.matches
+    expect(row.id).toBe(m.id)
+    expect(row.matchedAt).toBe('2026-01-01T00:00:00.000Z')
+    expect(row.user).toEqual({
+      id: sara.id, name: 'Sara', telegramId: sara.telegram_id, username: null, age: 24, bio: 'Coffee person',
+      icebreakerPrompt: 'My perfect Sunday', icebreakerAnswer: 'Hiking then pancakes',
+      photos: ['https://img/0', 'https://img/1'], premium: false,
     })
-    expect(body.matches[0].unreadCount).toBe(2)
+    expect(row.lastMessage).toEqual({
+      body: 'hey there', createdAt: '2026-01-02T00:00:00.000Z', senderId: sara.id, type: 'text',
+    })
+    // Two unread from Sara; her read one and my own don't count.
+    expect(row.unreadCount).toBe(2)
+    expect(row.premiumRequired).toBe(false)
   })
 
   it("returns the last message's type so an auto-posted icebreaker can be labelled", async () => {
-    setupAuth()
-    mockNoBlocks()
-    mockMatchesRow()
-    mockChatGateExempt()
-    mockPhotos()
-    mockLastMessage({ body: 'My weirdest skill…', created_at: '2026-01-02T00:00:00Z', sender_id: 'other-user', type: 'icebreaker' })
-    mockUnreadCount(1)
-
-    const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
+    const m = await createMatch(me.id, sara.id)
+    await message(m.id, sara.id, { body: 'My weirdest skill…', type: 'icebreaker' })
+    const res = await get()
     expect(res.json().matches[0].lastMessage.type).toBe('icebreaker')
   })
 
-  it("defaults lastMessage.type to 'text' when the row has none", async () => {
-    setupAuth()
-    mockNoBlocks()
-    mockMatchesRow()
-    mockChatGateExempt()
-    mockPhotos()
-    mockLastMessage({ body: 'hey', created_at: '2026-01-02T00:00:00Z', sender_id: 'other-user' })
-    mockUnreadCount(0)
-
-    const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
+  it("reports lastMessage.type 'text' for a plain message (the column default)", async () => {
+    const m = await createMatch(me.id, sara.id)
+    await message(m.id, sara.id, { body: 'hey' })
+    const res = await get()
     expect(res.json().matches[0].lastMessage.type).toBe('text')
   })
 
   it('marks the other user premium only while premium_until is still in the future', async () => {
-    setupAuth()
-    mockNoBlocks()
-    mockMatchesRow('2099-01-01T00:00:00.000Z')
-    mockChatGateExempt()
-    mockPhotos()
-    mockLastMessage(null)
-    mockUnreadCount(0)
+    const future = await createUser({ name: 'P', premium_until: '2099-01-01T00:00:00.000Z' })
+    const past = await createUser({ name: 'X', premium_until: '2020-01-01T00:00:00.000Z' })
+    await createMatch(me.id, future.id, { created_at: '2026-01-02T00:00:00Z' })
+    await createMatch(past.id, me.id, { created_at: '2026-01-01T00:00:00Z' })
 
-    const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
-    expect(res.json().matches[0].user.premium).toBe(true)
+    const res = await get()
+    const byName = Object.fromEntries(res.json().matches.map((m: any) => [m.user.name, m.user.premium]))
+    expect(byName).toEqual({ P: true, X: false })
   })
 
-  it('returns null lastMessage and 0 unreadCount when there are no messages yet', async () => {
-    setupAuth()
-    mockNoBlocks()
-    mockMatchesRow()
-    mockChatGateExempt()
-    mockPhotos()
-    mockLastMessage(null)
-    mockUnreadCount(0)
-
-    const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
-
-    const body = res.json()
-    expect(body.matches[0].lastMessage).toBeNull()
-    expect(body.matches[0].unreadCount).toBe(0)
+  it('returns null lastMessage, 0 unreadCount and no photos when there are no messages yet', async () => {
+    await createMatch(sara.id, me.id) // viewer as user2 works too
+    const res = await get()
+    const [row] = res.json().matches
+    expect(row.user.id).toBe(sara.id)
+    expect(row.lastMessage).toBeNull()
+    expect(row.unreadCount).toBe(0)
+    expect(row.user.photos).toEqual([])
   })
 
   it('orders chats by last-message time, newest first, falling back to match time', async () => {
-    setupAuth()
-    mockNoBlocks()
-
+    const nika = await createUser({ name: 'Nika' })
     // match-old was created first but has the most recent message; match-new
     // is a newer match with no messages yet. Activity order beats match order.
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({
-        or: () => ({
-          order: () => ({
-            data: [
-              {
-                id: 'match-new',
-                created_at: '2026-01-05T00:00:00Z',
-                user1_id: USER_ID,
-                user2_id: 'other-a',
-                user1: { id: USER_ID, name: 'Ali', telegram_id: 1, deleted_at: null },
-                user2: { id: 'other-a', name: 'Sara', telegram_id: 99, deleted_at: null },
-              },
-              {
-                id: 'match-old',
-                created_at: '2026-01-01T00:00:00Z',
-                user1_id: USER_ID,
-                user2_id: 'other-b',
-                user1: { id: USER_ID, name: 'Ali', telegram_id: 1, deleted_at: null },
-                user2: { id: 'other-b', name: 'Nika', telegram_id: 98, deleted_at: null },
-              },
-            ],
-            error: null,
-          }),
-        }),
-      }),
-    } as any)
-    mockChatGateExempt()
-    // Promise.all interleaves the per-match reads: photos×2, lastMessage×2, unread×2.
-    mockPhotos()
-    mockPhotos()
-    mockLastMessage(null)
-    mockLastMessage({ body: 'salam', created_at: '2026-01-10T00:00:00Z', sender_id: 'other-b' })
-    mockUnreadCount(0)
-    mockUnreadCount(0)
+    const matchNew = await createMatch(me.id, sara.id, { created_at: '2026-01-05T00:00:00Z' })
+    const matchOld = await createMatch(me.id, nika.id, {
+      created_at: '2026-01-01T00:00:00Z', last_message_at: '2026-01-01T00:00:00Z',
+    })
+    await message(matchOld.id, nika.id, { body: 'salam', created_at: '2026-01-10T00:00:00Z' })
 
-    const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
+    const res = await get()
 
     expect(res.statusCode).toBe(200)
-    expect(res.json().matches.map((m: any) => m.id)).toEqual(['match-old', 'match-new'])
+    expect(res.json().matches.map((m: any) => m.id)).toEqual([matchOld.id, matchNew.id])
+    // The messages trigger keeps last_message_at in step for real now (it only moves forward).
+    const [row] = await sql`select last_message_at from matches where id = ${matchOld.id}`
+    expect(row.last_message_at).toBe('2026-01-10T00:00:00.000Z')
   })
 
   it('excludes a match whose counterpart has deleted their account', async () => {
-    setupAuth()
-    mockNoBlocks()
+    const gone = await createUser({ name: '', deleted_at: '2026-07-30T00:00:00Z' })
+    await createMatch(me.id, gone.id)
 
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({
-        or: () => ({
-          order: () => ({
-            data: [{
-              id: 'match-1',
-              created_at: '2026-01-01T00:00:00Z',
-              user1_id: USER_ID,
-              user2_id: 'deleted-user',
-              user1: { id: USER_ID, name: 'Ali', telegram_id: 1, deleted_at: null },
-              user2: { id: 'deleted-user', name: '', telegram_id: 99, deleted_at: '2026-07-30T00:00:00Z' },
-            }],
-            error: null,
-          }),
-        }),
-      }),
-    } as any)
-    // activeRows is empty (counterpart deleted), so the route skips the chat-gate
-    // read entirely — no mockChatGateExempt() needed here.
-
-    const res = await app.inject({ method: 'GET', url: '/matches', headers: AUTH })
+    const res = await get()
 
     expect(res.statusCode).toBe(200)
     expect(res.json().matches).toHaveLength(0)
+  })
+
+  it('does not list other people\'s matches', async () => {
+    const a = await createUser()
+    await createMatch(a.id, sara.id)
+    expect((await get()).json().matches).toEqual([])
   })
 })
 
 describe('GET /matches/unread-count', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
-  beforeEach(async () => { app = await buildApp() })
+  let me: Record<string, any>
+  let other: Record<string, any>
+
+  beforeEach(async () => {
+    await resetDb()
+    app = await buildApp()
+    me = await viewer()
+    other = await createUser({ name: 'Sara' })
+  })
+
+  const get = () => app.inject({ method: 'GET', url: '/matches/unread-count', headers: AUTH })
 
   it('returns 401 when unauthenticated', async () => {
     const res = await app.inject({ method: 'GET', url: '/matches/unread-count' })
@@ -261,95 +162,53 @@ describe('GET /matches/unread-count', () => {
   })
 
   it('returns the aggregate unread count across active matches', async () => {
-    setupAuth()
-    mockNoBlocks()
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({
-        or: () => ({
-          data: [{
-            id: 'match-1', user1_id: USER_ID, user2_id: 'other-user',
-            user1: { deleted_at: null }, user2: { deleted_at: null },
-          }],
-          error: null,
-        }),
-      }),
-    } as any)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ in: () => ({ neq: () => ({ is: () => ({ count: 3, error: null }) }) }) }),
-    } as any)
+    const third = await createUser()
+    const m1 = await createMatch(me.id, other.id)
+    const m2 = await createMatch(third.id, me.id)
+    await message(m1.id, other.id)
+    await message(m1.id, other.id)
+    await message(m2.id, third.id)
+    await message(m2.id, third.id, { read_at: new Date().toISOString() }) // read
+    await message(m1.id, me.id) // my own
 
-    const res = await app.inject({ method: 'GET', url: '/matches/unread-count', headers: AUTH })
+    authAs(me)
+    const res = await get()
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ count: 3 })
   })
 
-  it('excludes deleted-counterpart matches from the count query', async () => {
-    setupAuth()
-    mockNoBlocks()
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({
-        or: () => ({
-          data: [
-            { id: 'match-1', user1_id: USER_ID, user2_id: 'other-1', user1: { deleted_at: null }, user2: { deleted_at: null } },
-            { id: 'match-2', user1_id: USER_ID, user2_id: 'other-2', user1: { deleted_at: null }, user2: { deleted_at: '2026-07-30T00:00:00Z' } },
-          ],
-          error: null,
-        }),
-      }),
-    } as any)
+  it('excludes deleted-counterpart matches from the count', async () => {
+    const gone = await createUser({ deleted_at: '2026-07-30T00:00:00Z' })
+    const m1 = await createMatch(me.id, other.id)
+    const m2 = await createMatch(me.id, gone.id)
+    await message(m1.id, other.id)
+    await message(m2.id, gone.id)
+    await message(m2.id, gone.id)
 
-    const inSpy = vi.fn(() => ({ neq: () => ({ is: () => ({ count: 1, error: null }) }) }))
-    vi.mocked(db.from).mockReturnValueOnce({ select: () => ({ in: inSpy }) } as any)
-
-    const res = await app.inject({ method: 'GET', url: '/matches/unread-count', headers: AUTH })
-
-    expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ count: 1 })
-    expect(inSpy).toHaveBeenCalledWith('match_id', ['match-1'])
+    authAs(me)
+    expect((await get()).json()).toEqual({ count: 1 })
   })
 
-  it('excludes matches whose counterpart is blocked from the count query', async () => {
-    setupAuth()
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({
-        or: () => ({
-          data: [{ blocker_id: USER_ID, blocked_id: 'blocked-user' }],
-          error: null,
-        }),
-      }),
-    } as any)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({
-        or: () => ({
-          data: [
-            { id: 'match-1', user1_id: USER_ID, user2_id: 'other-1', user1: { deleted_at: null }, user2: { deleted_at: null } },
-            { id: 'match-2', user1_id: USER_ID, user2_id: 'blocked-user', user1: { deleted_at: null }, user2: { deleted_at: null } },
-          ],
-          error: null,
-        }),
-      }),
-    } as any)
+  it('excludes matches whose counterpart is blocked (either direction) from the count', async () => {
+    const blockedByMe = await createUser()
+    const blockedMe = await createUser()
+    const m1 = await createMatch(me.id, other.id)
+    const m2 = await createMatch(me.id, blockedByMe.id)
+    const m3 = await createMatch(blockedMe.id, me.id)
+    await insertRow('blocks', { blocker_id: me.id, blocked_id: blockedByMe.id })
+    await insertRow('blocks', { blocker_id: blockedMe.id, blocked_id: me.id })
+    for (let i = 0; i < 5; i++) await message(m1.id, other.id)
+    await message(m2.id, blockedByMe.id)
+    await message(m3.id, blockedMe.id)
 
-    const inSpy = vi.fn(() => ({ neq: () => ({ is: () => ({ count: 5, error: null }) }) }))
-    vi.mocked(db.from).mockReturnValueOnce({ select: () => ({ in: inSpy }) } as any)
-
-    const res = await app.inject({ method: 'GET', url: '/matches/unread-count', headers: AUTH })
-
-    expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ count: 5 })
-    expect(inSpy).toHaveBeenCalledWith('match_id', ['match-1'])
+    authAs(me)
+    expect((await get()).json()).toEqual({ count: 5 })
   })
 
-  it('returns 0 without querying messages when there are no active matches', async () => {
-    setupAuth()
-    mockNoBlocks()
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ or: () => ({ data: [], error: null }) }),
-    } as any)
-
-    const res = await app.inject({ method: 'GET', url: '/matches/unread-count', headers: AUTH })
-
+  it('returns 0 when there are no active matches', async () => {
+    authAs(me)
+    const res = await get()
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ count: 0 })
   })

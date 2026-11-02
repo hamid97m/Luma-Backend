@@ -1,10 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
-
-import { db } from '../src/db.js'
 import { cityKey, parseGeo, askDeepSeek, resolveCity, updateUserGeo, scheduleUserGeo } from '../src/geo/resolveCity.js'
-import { chainable } from './admin-helpers.js'
+import { resetDb, createUser, insertRow, sql } from './helpers/db.js'
+import { withFailingWrites, withMissingTable } from './helpers/profile.js'
 
 function deepSeekReply(content: string, status = 200) {
   return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status })
@@ -96,7 +94,9 @@ describe('askDeepSeek', () => {
 
 describe('resolveCity', () => {
   const fetchMock = vi.fn()
-  beforeEach(() => {
+  beforeEach(async () => {
+    await resetDb()
+    fetchMock.mockReset()
     vi.stubGlobal('fetch', fetchMock)
     vi.stubEnv('DEEPSEEK_API_KEY', 'sk-test')
   })
@@ -106,73 +106,106 @@ describe('resolveCity', () => {
   })
 
   it('returns a cached spelling without calling DeepSeek', async () => {
-    const log: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: { city: 'Tehran', country: 'IR' }, error: null }, log))
+    await insertRow('city_lookups', { key: 'tehran', city: 'Tehran', country: 'IR' })
 
     await expect(resolveCity('  TEHRAN ')).resolves.toEqual({ city: 'Tehran', country: 'IR' })
-    expect(log).toContainEqual({ method: 'eq', args: ['key', 'tehran'] })
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('asks DeepSeek on a cache miss and caches the answer, including "not a place"', async () => {
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: null, error: null }))
-    const upsert = vi.fn().mockResolvedValue({ error: null })
-    vi.mocked(db.from).mockReturnValueOnce({ upsert } as any)
     fetchMock.mockResolvedValueOnce(deepSeekReply('{"city":null,"country":null}'))
 
     await expect(resolveCity('asdfgh')).resolves.toEqual({ city: null, country: null })
-    expect(upsert).toHaveBeenCalledWith({ key: 'asdfgh', city: null, country: null })
+    expect(await sql`select key, city, country from city_lookups`).toEqual([
+      { key: 'asdfgh', city: null, country: null },
+    ])
+    // Second lookup is a cache hit.
+    await expect(resolveCity('ASDFGH')).resolves.toEqual({ city: null, country: null })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('does not cache when DeepSeek fails', async () => {
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: null, error: null }))
     fetchMock.mockRejectedValueOnce(new Error('network down'))
 
     await expect(resolveCity('Tehran')).rejects.toThrow('network down')
-    expect(db.from).toHaveBeenCalledTimes(1)
+    expect((await sql`select count(*)::int as n from city_lookups`)[0].n).toBe(0)
+  })
+
+  it('treats a failed cache read as a miss and ignores a failed cache write', async () => {
+    fetchMock.mockResolvedValueOnce(deepSeekReply('{"city":"Tehran","country":"IR"}'))
+    await withMissingTable('city_lookups', () =>
+      expect(resolveCity('Tehran')).resolves.toEqual({ city: 'Tehran', country: 'IR' }))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })
 
 describe('updateUserGeo', () => {
+  const fetchMock = vi.fn()
+  beforeEach(async () => {
+    await resetDb()
+    vi.stubGlobal('fetch', fetchMock)
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
   it('writes geo only while the user still has the same typed location', async () => {
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: { city: 'Tehran', country: 'IR' }, error: null }))
-    const log: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ error: null }, log))
+    await insertRow('city_lookups', { key: 'تهران', city: 'Tehran', country: 'IR' })
+    const same = await createUser({ location: 'تهران' })
+    const moved = await createUser({ location: 'مشهد' })
 
-    await updateUserGeo('u1', 'تهران')
+    await expect(updateUserGeo(same.id, 'تهران')).resolves.toEqual({ city: 'Tehran', country: 'IR' })
+    await updateUserGeo(moved.id, 'تهران')
 
-    expect(log).toEqual([
-      { method: 'update', args: [{ geo_city: 'Tehran', geo_country: 'IR' }] },
-      { method: 'eq', args: ['id', 'u1'] },
-      { method: 'eq', args: ['location', 'تهران'] },
-    ])
+    const rows = await sql`select id, geo_city, geo_country from users order by created_at`
+    expect(rows.find((r) => r.id === same.id)).toMatchObject({ geo_city: 'Tehran', geo_country: 'IR' })
+    expect(rows.find((r) => r.id === moved.id)).toMatchObject({ geo_city: null, geo_country: null })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('throws geo_update_failed when the write fails', async () => {
+    await insertRow('city_lookups', { key: 'tehran', city: 'Tehran', country: 'IR' })
+    const u = await createUser({ location: 'Tehran' })
+    await withFailingWrites('users', 'update', () =>
+      expect(updateUserGeo(u.id, 'Tehran')).rejects.toThrow('geo_update_failed'))
   })
 })
 
 describe('scheduleUserGeo', () => {
   const log = { warn: vi.fn() } as any
-  afterEach(() => vi.unstubAllEnvs())
-
-  it('is a no-op without DEEPSEEK_API_KEY', () => {
-    vi.stubEnv('DEEPSEEK_API_KEY', '')
-    scheduleUserGeo('u1', 'Tehran', log)
-    expect(db.from).not.toHaveBeenCalled()
+  const fetchMock = vi.fn()
+  beforeEach(async () => {
+    await resetDb()
+    fetchMock.mockReset()
+    vi.stubGlobal('fetch', fetchMock)
+  })
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
   })
 
-  it('is a no-op for an empty location', () => {
+  it('is a no-op without DEEPSEEK_API_KEY', async () => {
+    vi.stubEnv('DEEPSEEK_API_KEY', '')
+    const u = await createUser({ location: 'Tehran' })
+    scheduleUserGeo(u.id, 'Tehran', log)
+    await new Promise((r) => setTimeout(r, 30))
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect((await sql`select count(*)::int as n from city_lookups`)[0].n).toBe(0)
+  })
+
+  it('is a no-op for an empty location', async () => {
     vi.stubEnv('DEEPSEEK_API_KEY', 'sk-test')
     scheduleUserGeo('u1', '  ', log)
     scheduleUserGeo('u1', null, log)
-    expect(db.from).not.toHaveBeenCalled()
+    await new Promise((r) => setTimeout(r, 30))
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(log.warn).not.toHaveBeenCalled()
   })
 
   it('logs instead of throwing when resolution fails', async () => {
     vi.stubEnv('DEEPSEEK_API_KEY', 'sk-test')
-    vi.mocked(db.from).mockReturnValueOnce(chainable({ data: null, error: null }))
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')))
+    fetchMock.mockRejectedValue(new Error('network down'))
+    const u = await createUser({ location: 'Tehran' })
 
-    scheduleUserGeo('u1', 'Tehran', log)
+    scheduleUserGeo(u.id, 'Tehran', log)
     await vi.waitFor(() => expect(log.warn).toHaveBeenCalled())
-    vi.unstubAllGlobals()
   })
 })

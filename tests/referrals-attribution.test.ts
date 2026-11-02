@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
-import { db } from '../src/db.js'
+// Wrap randomBytes so collision tests can force a known code; defaults to the real one.
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:crypto')>()
+  return { ...actual, randomBytes: vi.fn(actual.randomBytes) }
+})
+import { randomBytes } from 'node:crypto'
 import {
   generateReferralCode,
   parseRefCode,
@@ -8,7 +12,8 @@ import {
   stashReferralClaim,
   captureReferralAttribution,
 } from '../src/referrals/attribution.js'
-import { chainable } from './admin-helpers.js'
+import { resetDb, createUser, sql } from './helpers/db.js'
+import { failWritesTo } from './helpers/gifts-referrals.js'
 
 const CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789'
 
@@ -61,297 +66,148 @@ describe('parseRefCode', () => {
   })
 })
 
+// generateReferralCode maps each byte to CODE_ALPHABET[b % 31]; all-zero bytes → 'aaaaaaaa'.
+const forceCode = () => vi.mocked(randomBytes).mockReturnValueOnce(Buffer.alloc(8) as any)
+
+const userRow = async (id: string) => (await sql`select referral_code, referred_by from users where id = ${id}`)[0]
+
 describe('ensureReferralCode', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => resetDb())
 
   it('returns the existing code without updating when present', async () => {
-    const updateSpy = vi.fn()
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') {
-        return {
-          select: () => chainable({ data: { referral_code: 'existingcode' }, error: null }),
-          update: updateSpy,
-        } as any
-      }
-      return chainable({ data: null })
-    })
-    const code = await ensureReferralCode('user-1')
-    expect(code).toEqual('existingcode')
-    expect(updateSpy).not.toHaveBeenCalled()
+    const u = await createUser({ referral_code: 'existingcode' })
+    expect(await ensureReferralCode(u.id)).toEqual('existingcode')
+    expect(randomBytes).not.toHaveBeenCalled()
   })
 
   it('generates and persists a new code when none is present', async () => {
-    const updates: any[] = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') {
-        return {
-          select: () => chainable({ data: { referral_code: null }, error: null }),
-          update: (p: any) => {
-            updates.push(p)
-            return chainable({ error: null })
-          },
-        } as any
-      }
-      return chainable({ data: null })
-    })
-    const code = await ensureReferralCode('user-1')
-    expect(code).not.toBeNull()
+    const u = await createUser()
+    const code = await ensureReferralCode(u.id)
     expect(code).toHaveLength(8)
-    expect(updates[0]).toEqual({ referral_code: code })
+    expect((await userRow(u.id)).referral_code).toEqual(code)
   })
 
   it('retries once when the first update hits a unique collision, then succeeds', async () => {
-    let calls = 0
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') {
-        return {
-          select: () => chainable({ data: { referral_code: null }, error: null }),
-          update: () => {
-            calls++
-            return chainable({ error: calls === 1 ? { message: 'duplicate key' } : null })
-          },
-        } as any
-      }
-      return chainable({ data: null })
-    })
-    const code = await ensureReferralCode('user-1')
-    expect(code).not.toBeNull()
+    await createUser({ referral_code: 'aaaaaaaa' })
+    const u = await createUser()
+    forceCode()
+    const code = await ensureReferralCode(u.id)
     expect(code).toHaveLength(8)
-    expect(calls).toBe(2)
+    expect(code).not.toEqual('aaaaaaaa')
+    expect((await userRow(u.id)).referral_code).toEqual(code)
+    expect(randomBytes).toHaveBeenCalledTimes(2)
   })
 
   it('returns null after exhausting all 3 attempts on repeated collisions', async () => {
-    let calls = 0
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') {
-        return {
-          select: () => chainable({ data: { referral_code: null }, error: null }),
-          update: () => {
-            calls++
-            return chainable({ error: { message: 'duplicate key' } })
-          },
-        } as any
-      }
-      return chainable({ data: null })
-    })
-    const code = await ensureReferralCode('user-1')
-    expect(code).toBeNull()
-    expect(calls).toBe(3)
+    await createUser({ referral_code: 'aaaaaaaa' })
+    const u = await createUser()
+    forceCode(); forceCode(); forceCode()
+    expect(await ensureReferralCode(u.id)).toBeNull()
+    expect(randomBytes).toHaveBeenCalledTimes(3)
+    expect((await userRow(u.id)).referral_code).toBeNull()
   })
 
-  it('returns null when the select errors', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') {
-        return { select: () => chainable({ data: null, error: { message: 'db down' } }) } as any
-      }
-      return chainable({ data: null })
-    })
-    const code = await ensureReferralCode('user-1')
-    expect(code).toBeNull()
+  it('returns null when the user does not exist', async () => {
+    expect(await ensureReferralCode('00000000-0000-0000-0000-000000000000')).toBeNull()
   })
 
-  it('never throws — returns null even if the client throws', async () => {
-    vi.mocked(db.from).mockImplementation(() => {
-      throw new Error('boom')
-    })
-    await expect(ensureReferralCode('user-1')).resolves.toBeNull()
+  it('never throws — returns null even if the query errors', async () => {
+    await expect(ensureReferralCode('not-a-uuid')).resolves.toBeNull()
   })
 })
 
 describe('stashReferralClaim', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => resetDb())
 
-  it('upserts telegram_id + code into referral_claims', async () => {
-    const upsertSpy = vi.fn(() => chainable({ error: null }))
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'referral_claims') {
-        return { upsert: upsertSpy } as any
-      }
-      return chainable({ data: null })
-    })
+  it('upserts telegram_id + code into referral_claims (latest code wins)', async () => {
     await stashReferralClaim(123, 'abc123')
-    expect(upsertSpy).toHaveBeenCalledTimes(1)
-    const [payload, options] = upsertSpy.mock.calls[0]
-    expect(payload).toMatchObject({ telegram_id: 123, code: 'abc123' })
-    expect(options).toEqual({ onConflict: 'telegram_id' })
+    await stashReferralClaim(123, 'def456')
+    expect(await sql`select telegram_id, code from referral_claims`).toEqual([{ telegram_id: 123, code: 'def456' }])
   })
 
-  it('never throws — resolves even if the client throws', async () => {
-    vi.mocked(db.from).mockImplementation(() => {
-      throw new Error('boom')
-    })
-    await expect(stashReferralClaim(123, 'abc123')).resolves.toBeUndefined()
+  it('never throws — resolves even if the write errors', async () => {
+    const cleanup = await failWritesTo('referral_claims')
+    try {
+      await expect(stashReferralClaim(123, 'abc123')).resolves.toBeUndefined()
+    } finally {
+      await cleanup()
+    }
   })
 })
 
 describe('captureReferralAttribution', () => {
-  beforeEach(() => vi.clearAllMocks())
+  let referrer: Record<string, any>
+  let newUser: Record<string, any>
 
-  it('with a ref_<code> startParam: looks up the referrer, updates referred_by, inserts referrals', async () => {
-    const userUpdates: any[] = []
-    const referralInserts: any[] = []
-    const claimSelect = vi.fn()
-    const claimDelete = vi.fn()
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') {
-        return {
-          select: () => chainable({ data: { id: 'referrer-1' }, error: null }),
-          update: (p: any) => {
-            userUpdates.push(p)
-            return chainable({ error: null })
-          },
-        } as any
-      }
-      if (table === 'referrals') {
-        return {
-          insert: (p: any) => {
-            referralInserts.push(p)
-            return chainable({ error: null })
-          },
-        } as any
-      }
-      if (table === 'referral_claims') {
-        return { select: claimSelect, delete: claimDelete } as any
-      }
-      return chainable({ data: null })
-    })
+  beforeEach(async () => {
+    await resetDb()
+    referrer = await createUser({ referral_code: 'abc123' })
+    newUser = await createUser({ telegram_id: 999 })
+  })
 
-    await captureReferralAttribution('new-user-1', 999, 'ref_abc123')
+  const referrals = () => sql`select referrer_id, referred_id from referrals`
 
-    expect(claimSelect).not.toHaveBeenCalled()
-    expect(userUpdates).toEqual([{ referred_by: 'referrer-1' }])
-    expect(referralInserts).toEqual([{ referrer_id: 'referrer-1', referred_id: 'new-user-1' }])
-    expect(claimDelete).not.toHaveBeenCalled()
+  it('with a ref_<code> startParam: sets referred_by and inserts referrals; ignores any stashed claim', async () => {
+    await createUser({ referral_code: 'other1' })
+    await sql`insert into referral_claims (telegram_id, code) values (999, 'other1')`
+
+    await captureReferralAttribution(newUser.id, 999, 'ref_abc123')
+
+    expect((await userRow(newUser.id)).referred_by).toBe(referrer.id)
+    expect(await referrals()).toEqual([{ referrer_id: referrer.id, referred_id: newUser.id }])
+    // The claim was not used, so it is not deleted.
+    expect(await sql`select code from referral_claims`).toEqual([{ code: 'other1' }])
   })
 
   it('with no startParam but a pending claim: same outcome, and deletes the claim', async () => {
-    const userUpdates: any[] = []
-    const referralInserts: any[] = []
-    const claimDelete = vi.fn(() => chainable({ error: null }))
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') {
-        return {
-          select: () => chainable({ data: { id: 'referrer-1' }, error: null }),
-          update: (p: any) => {
-            userUpdates.push(p)
-            return chainable({ error: null })
-          },
-        } as any
-      }
-      if (table === 'referrals') {
-        return {
-          insert: (p: any) => {
-            referralInserts.push(p)
-            return chainable({ error: null })
-          },
-        } as any
-      }
-      if (table === 'referral_claims') {
-        return {
-          select: () => chainable({ data: { code: 'abc123' }, error: null }),
-          delete: claimDelete,
-        } as any
-      }
-      return chainable({ data: null })
-    })
+    await sql`insert into referral_claims (telegram_id, code) values (999, 'abc123')`
+    await captureReferralAttribution(newUser.id, 999, null)
 
-    await captureReferralAttribution('new-user-1', 999, null)
-
-    expect(userUpdates).toEqual([{ referred_by: 'referrer-1' }])
-    expect(referralInserts).toEqual([{ referrer_id: 'referrer-1', referred_id: 'new-user-1' }])
-    expect(claimDelete).toHaveBeenCalledTimes(1)
+    expect((await userRow(newUser.id)).referred_by).toBe(referrer.id)
+    expect(await referrals()).toEqual([{ referrer_id: referrer.id, referred_id: newUser.id }])
+    expect(await sql`select code from referral_claims`).toEqual([])
   })
 
   it('does nothing when the code is unknown (no referrer found)', async () => {
-    const userUpdate = vi.fn()
-    const referralInsert = vi.fn()
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') {
-        return {
-          select: () => chainable({ data: null, error: null }),
-          update: userUpdate,
-        } as any
-      }
-      if (table === 'referrals') {
-        return { insert: referralInsert } as any
-      }
-      return chainable({ data: null })
-    })
-
-    await expect(
-      captureReferralAttribution('new-user-1', 999, 'ref_unknown1')
-    ).resolves.toBeUndefined()
-    expect(userUpdate).not.toHaveBeenCalled()
-    expect(referralInsert).not.toHaveBeenCalled()
+    await expect(captureReferralAttribution(newUser.id, 999, 'ref_unknown1')).resolves.toBeUndefined()
+    expect((await userRow(newUser.id)).referred_by).toBeNull()
+    expect(await referrals()).toEqual([])
   })
 
   it('does nothing when the referrer id equals the new user id (self-referral)', async () => {
-    const userUpdate = vi.fn()
-    const referralInsert = vi.fn()
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') {
-        return {
-          select: () => chainable({ data: { id: 'same-user' }, error: null }),
-          update: userUpdate,
-        } as any
-      }
-      if (table === 'referrals') {
-        return { insert: referralInsert } as any
-      }
-      return chainable({ data: null })
-    })
-
-    await captureReferralAttribution('same-user', 999, 'ref_abc123')
-    expect(userUpdate).not.toHaveBeenCalled()
-    expect(referralInsert).not.toHaveBeenCalled()
+    await captureReferralAttribution(referrer.id, 999, 'ref_abc123')
+    expect((await userRow(referrer.id)).referred_by).toBeNull()
+    expect(await referrals()).toEqual([])
   })
 
   it('does nothing when there is no startParam and no pending claim', async () => {
-    const userUpdate = vi.fn()
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'referral_claims') {
-        return { select: () => chainable({ data: null, error: null }) } as any
-      }
-      if (table === 'users') {
-        return { select: () => chainable({ data: null }), update: userUpdate } as any
-      }
-      return chainable({ data: null })
-    })
-
-    await expect(captureReferralAttribution('new-user-1', 999, null)).resolves.toBeUndefined()
-    expect(userUpdate).not.toHaveBeenCalled()
+    await expect(captureReferralAttribution(newUser.id, 999, null)).resolves.toBeUndefined()
+    expect((await userRow(newUser.id)).referred_by).toBeNull()
   })
 
-  it('never throws — resolves even if the client throws', async () => {
-    vi.mocked(db.from).mockImplementation(() => {
-      throw new Error('boom')
-    })
-    await expect(
-      captureReferralAttribution('new-user-1', 999, 'ref_abc123')
-    ).resolves.toBeUndefined()
+  it('never throws — resolves even if the queries error', async () => {
+    await expect(captureReferralAttribution('not-a-uuid', 999, 'ref_abc123')).resolves.toBeUndefined()
   })
 
-  it('a non-throwing error result on the users.update does not short-circuit the referrals insert', async () => {
-    const referralInserts: any[] = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') {
-        return {
-          select: () => chainable({ data: { id: 'referrer-1' }, error: null }),
-          update: () => chainable({ error: { message: 'update failed' } }),
-        } as any
-      }
-      if (table === 'referrals') {
-        return {
-          insert: (p: any) => {
-            referralInserts.push(p)
-            return chainable({ error: null })
-          },
-        } as any
-      }
-      return chainable({ data: null })
-    })
+  it('a failed users.update does not short-circuit the referrals insert', async () => {
+    const cleanup = await failWritesTo('users', 'UPDATE')
+    try {
+      await captureReferralAttribution(newUser.id, 999, 'ref_abc123')
+    } finally {
+      await cleanup()
+    }
+    expect((await userRow(newUser.id)).referred_by).toBeNull()
+    expect(await referrals()).toEqual([{ referrer_id: referrer.id, referred_id: newUser.id }])
+  })
 
-    await captureReferralAttribution('new-user-1', 999, 'ref_abc123')
-    expect(referralInserts).toEqual([{ referrer_id: 'referrer-1', referred_id: 'new-user-1' }])
+  it('a failed referrals insert (already referred) still clears the used claim', async () => {
+    const earlier = await createUser({ referral_code: 'first1' })
+    await sql`insert into referrals (referrer_id, referred_id) values (${earlier.id}, ${newUser.id})`
+    await sql`insert into referral_claims (telegram_id, code) values (999, 'abc123')`
+
+    await expect(captureReferralAttribution(newUser.id, 999, null)).resolves.toBeUndefined()
+
+    expect(await referrals()).toEqual([{ referrer_id: earlier.id, referred_id: newUser.id }])
+    expect(await sql`select code from referral_claims`).toEqual([])
   })
 })

@@ -1,98 +1,73 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
-import { db } from '../src/db.js'
-import { getFakeLikerConfig, updateFakeLikerConfig } from '../src/jobs/fakeLikerConfig.js'
-import { chainable } from './admin-helpers.js'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { getFakeLikerConfig, updateFakeLikerConfig, getLastFakeLikerRunAt } from '../src/jobs/fakeLikerConfig.js'
+import { resetDb, insertRow, sql } from './helpers/db.js'
+import { failOn, failReadsOf, clearFailures } from './helpers/bot-support.js'
+
+beforeEach(resetDb)
+afterEach(clearFailures)
 
 describe('getFakeLikerConfig', () => {
-  beforeEach(() => vi.clearAllMocks())
-
   it('returns the camelCase config when the row exists', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) =>
-      table === 'fake_liker_config'
-        ? chainable({ data: { enabled: true, max_targets_per_run: 50 }, error: null })
-        : chainable({ data: null }))
-    const cfg = await getFakeLikerConfig()
-    expect(cfg).toEqual({ enabled: true, maxTargetsPerRun: 50 })
+    await sql`update fake_liker_config set enabled = true, max_targets_per_run = 50`
+    expect(await getFakeLikerConfig()).toEqual({ enabled: true, maxTargetsPerRun: 50 })
   })
 
-  it('returns null when the query errors', async () => {
-    vi.mocked(db.from).mockImplementation(() =>
-      chainable({ data: null, error: { message: 'relation does not exist' } }))
-    const cfg = await getFakeLikerConfig()
-    expect(cfg).toBeNull()
+  it('returns the fresh-install defaults', async () => {
+    expect(await getFakeLikerConfig()).toEqual({ enabled: false, maxTargetsPerRun: 100 })
   })
 
   it('returns null when no row is found', async () => {
-    vi.mocked(db.from).mockImplementation(() => chainable({ data: null, error: null }))
-    const cfg = await getFakeLikerConfig()
-    expect(cfg).toBeNull()
+    await sql`delete from fake_liker_config`
+    expect(await getFakeLikerConfig()).toBeNull()
   })
 
-  it('never throws — returns null even if the client throws', async () => {
-    vi.mocked(db.from).mockImplementation(() => {
-      throw new Error('boom')
-    })
+  it('never throws — returns null when the query errors', async () => {
+    await failReadsOf('fake_liker_config')
     await expect(getFakeLikerConfig()).resolves.toBeNull()
   })
 })
 
 describe('updateFakeLikerConfig', () => {
-  beforeEach(() => vi.clearAllMocks())
-
   it('updates only the provided fields and stamps updated_at', async () => {
-    const updates: any[] = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'fake_liker_config') {
-        return {
-          update: (p: any) => {
-            updates.push(p)
-            return chainable({ data: { enabled: true, max_targets_per_run: 100 }, error: null })
-          },
-        } as any
-      }
-      return chainable({ data: null })
-    })
+    await sql`update fake_liker_config set max_targets_per_run = 77, updated_at = '2020-01-01T00:00:00Z'`
     const cfg = await updateFakeLikerConfig({ enabled: true })
-    expect(cfg).toEqual({ enabled: true, maxTargetsPerRun: 100 })
-    expect(updates[0]).toMatchObject({ enabled: true })
-    expect(updates[0]).toHaveProperty('updated_at')
-    expect(updates[0]).not.toHaveProperty('max_targets_per_run')
+    expect(cfg).toEqual({ enabled: true, maxTargetsPerRun: 77 })
+    const [row] = await sql`select updated_at from fake_liker_config`
+    expect(Date.now() - new Date(row.updated_at).getTime()).toBeLessThan(10_000)
   })
 
   it('maps maxTargetsPerRun to the snake_case column', async () => {
-    const updates: any[] = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'fake_liker_config') {
-        return {
-          update: (p: any) => {
-            updates.push(p)
-            return chainable({ data: { enabled: false, max_targets_per_run: 200 }, error: null })
-          },
-        } as any
-      }
-      return chainable({ data: null })
-    })
     const cfg = await updateFakeLikerConfig({ maxTargetsPerRun: 200 })
     expect(cfg).toEqual({ enabled: false, maxTargetsPerRun: 200 })
-    expect(updates[0]).toMatchObject({ max_targets_per_run: 200 })
+    const [row] = await sql`select max_targets_per_run from fake_liker_config`
+    expect(row.max_targets_per_run).toBe(200)
   })
 
-  it('returns null when the update errors', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'fake_liker_config') {
-        return { update: () => chainable({ data: null, error: { message: 'db down' } }) } as any
-      }
-      return chainable({ data: null })
-    })
-    const cfg = await updateFakeLikerConfig({ enabled: true })
-    expect(cfg).toBeNull()
+  it('returns null when the row is missing', async () => {
+    await sql`delete from fake_liker_config`
+    expect(await updateFakeLikerConfig({ enabled: true })).toBeNull()
   })
 
-  it('never throws — returns null even if the client throws', async () => {
-    vi.mocked(db.from).mockImplementation(() => {
-      throw new Error('boom')
-    })
+  it('never throws — returns null when the update errors', async () => {
+    await failOn('fake_liker_config', 'update')
     await expect(updateFakeLikerConfig({ enabled: true })).resolves.toBeNull()
+  })
+})
+
+describe('getLastFakeLikerRunAt', () => {
+  const run = (started_at: string) =>
+    insertRow('fake_liker_runs', { trigger: 'schedule', started_at, finished_at: started_at })
+
+  it('returns the newest run start, or null when there are none', async () => {
+    expect(await getLastFakeLikerRunAt()).toBeNull()
+    await run('2026-09-01T00:00:00.000Z')
+    await run('2026-09-03T00:00:00.000Z')
+    await run('2026-09-02T00:00:00.000Z')
+    expect(await getLastFakeLikerRunAt()).toBe('2026-09-03T00:00:00.000Z')
+  })
+
+  it('returns null when the query errors', async () => {
+    await failReadsOf('fake_liker_runs')
+    expect(await getLastFakeLikerRunAt()).toBeNull()
   })
 })

@@ -2,10 +2,6 @@ import { describe, it, expect, beforeAll, vi } from 'vitest'
 import Fastify from 'fastify'
 import { Bot } from 'grammy'
 
-// bot.js pulls in db.js (which constructs a Supabase client at import time) and
-// the service modules — none of which this test exercises. Mock them out.
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
-
 // A real BOT_TOKEN must exist before importing bot.ts derives the path/secret.
 process.env.BOT_TOKEN = 'test-token'
 

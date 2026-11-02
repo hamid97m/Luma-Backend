@@ -1,4 +1,4 @@
-import { db } from '../db.js'
+import { sql } from '../db.js'
 import { isPremiumEnabled, isPremiumActive } from './service.js'
 import { swipeLimitApplies } from './swipeLimit.js'
 
@@ -42,12 +42,16 @@ export function matchPremiumRequired(
   return ctx.chattedMatchIds.size >= limit
 }
 
-const COHORT_COLUMNS = 'gender, looking_for, premium_until'
-
 /** Cheap cohort/premium check; db-error and every exempt case fail open. */
 async function isGated(userId: string, nowMs: number): Promise<boolean> {
-  const { data: me, error } = await db.from('users').select(COHORT_COLUMNS).eq('id', userId).single()
-  if (error || !me) return false
+  let me: { gender: string | null; looking_for: string | null; premium_until: string | null } | undefined
+  try {
+    ;[me] = await sql<{ gender: string | null; looking_for: string | null; premium_until: string | null }[]>`
+      select gender, looking_for, premium_until from users where id = ${userId}`
+  } catch {
+    return false
+  }
+  if (!me) return false
   if (!chatLimitApplies(me.gender ?? null, me.looking_for ?? null)) return false
   if (!(await isPremiumEnabled())) return false
   if (isPremiumActive(me.premium_until ?? null, nowMs)) return false
@@ -57,8 +61,13 @@ async function isGated(userId: string, nowMs: number): Promise<boolean> {
 /** Distinct match ids the user has sent a message in (deduped in memory).
  * Auto-posted icebreakers don't count — the owner hasn't started a chat. */
 async function distinctChattedMatchIds(userId: string): Promise<Set<string>> {
-  const { data } = await db.from('messages').select('match_id').eq('sender_id', userId).neq('type', 'icebreaker')
-  return new Set((data ?? []).map((r: { match_id: string }) => r.match_id))
+  try {
+    const rows = await sql<{ match_id: string }[]>`
+      select distinct match_id from messages where sender_id = ${userId} and type <> 'icebreaker'`
+    return new Set(rows.map((r) => r.match_id))
+  } catch {
+    return new Set() // read error counted as "no chats" before
+  }
 }
 
 /**

@@ -7,7 +7,6 @@ vi.mock('grammy', () => ({
   InlineKeyboard: vi.fn().mockImplementation(() => ({ webApp() { return this } })),
   Context: class {},
 }))
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 
 import { notifyNewLike } from '../src/bot.js'
 import { fa } from '../src/i18n/fa.js'

@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify'
-import { db } from '../db.js'
+import { sql } from '../db.js'
 import { getReferralConfig } from '../referrals/config.js'
 import { ensureReferralCode } from '../referrals/attribution.js'
 import { MILESTONES, evaluateReferralRewards } from '../referrals/rewards.js'
@@ -16,12 +16,15 @@ export async function referralRoutes(app: FastifyInstance) {
 
     const [code, totals, rewards] = await Promise.all([
       ensureReferralCode(req.userId),
-      db.from('referrals').select('qualified_at').eq('referrer_id', req.userId).limit(1000),
-      db.from('referral_rewards').select('milestone').eq('referrer_id', req.userId),
+      // A failed read rendered as empty before (supabase-js never threw).
+      sql<{ qualified_at: string | null }[]>`
+        select qualified_at from referrals where referrer_id = ${req.userId} limit 1000`.catch(() => []),
+      sql<{ milestone: number }[]>`
+        select milestone from referral_rewards where referrer_id = ${req.userId}`.catch(() => []),
     ])
-    const rows = totals.data ?? []
+    const rows = totals
     const qualifiedCount = rows.filter((r) => r.qualified_at !== null).length
-    const granted = new Set((rewards.data ?? []).map((r) => r.milestone))
+    const granted = new Set(rewards.map((r) => r.milestone))
     const username = getBotUsername()
 
     return {

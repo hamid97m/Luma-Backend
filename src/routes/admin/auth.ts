@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest } from 'fastify'
 import type { errorResponseBuilderContext } from '@fastify/rate-limit'
-import { db } from '../../db.js'
+import { sql } from '../../db.js'
 import { signAdminToken, verifyPassword } from './auth-utils.js'
 
 // Precomputed bcrypt hash of an arbitrary password — used in place of a real
@@ -36,23 +36,24 @@ export async function adminAuthRoutes(app: FastifyInstance) {
     const { username, password } = (req.body ?? {}) as { username?: string; password?: string }
     if (!username || !password) return reply.status(400).send({ error: 'missing_credentials' })
 
-    const { data: admin } = await db
-      .from('admins')
-      .select('id, username, password_hash')
-      .eq('username', username)
-      .single()
+    // A lookup failure answers like an unknown username (supabase-js returned
+    // `data: null` on error). String() mirrors PostgREST's query-string coercion
+    // for a non-string username.
+    let admin: { id: string; username: string; password_hash: string } | undefined
+    try {
+      ;[admin] = await sql<{ id: string; username: string; password_hash: string }[]>`
+        select id, username, password_hash from admins where username = ${String(username)}`
+    } catch (err) {
+      req.log.error({ err }, 'admin lookup failed')
+    }
 
     const passwordOk = await verifyPassword(password, admin?.password_hash ?? DUMMY_HASH)
     if (!admin || !passwordOk) {
       return reply.status(401).send({ error: 'invalid_credentials' })
     }
 
-    db.from('admins')
-      .update({ last_login_at: new Date().toISOString() })
-      .eq('id', admin.id)
-      .then(({ error }) => {
-        if (error) req.log.warn({ err: error }, 'failed to update last_login_at')
-      })
+    sql`update admins set last_login_at = ${new Date().toISOString()} where id = ${admin.id}`
+      .then(() => {}, (err) => req.log.warn({ err }, 'failed to update last_login_at'))
 
     return { token: signAdminToken({ adminId: admin.id, username: admin.username }) }
   })

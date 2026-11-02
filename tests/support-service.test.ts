@@ -1,10 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
-
-import { db } from '../src/db.js'
 import { createTicket, shouldCaptureSupport, SUPPORT_CAPTURE_WINDOW_MS } from '../src/support/service.js'
-import { chainable } from './admin-helpers.js'
+import { resetDb, createUser, insertRow, sql } from './helpers/db.js'
+import { failOn, failReadsOf, clearFailures } from './helpers/bot-support.js'
 
 describe('shouldCaptureSupport', () => {
   const now = 1_000_000_000_000
@@ -26,68 +24,63 @@ describe('shouldCaptureSupport', () => {
 })
 
 describe('createTicket', () => {
-  beforeEach(() => vi.clearAllMocks())
+  let user: Record<string, any>
+  beforeEach(async () => {
+    await resetDb()
+    user = await createUser()
+  })
+  afterEach(clearFailures)
 
   it('rejects an empty body', async () => {
-    const res = await createTicket('u1', '   ')
+    const res = await createTicket(user.id, '   ')
     expect(res).toEqual({ ok: false, error: 'empty_body' })
   })
 
   it('rejects a body over the cap', async () => {
-    const res = await createTicket('u1', 'x'.repeat(2001))
+    const res = await createTicket(user.id, 'x'.repeat(2001))
     expect(res).toEqual({ ok: false, error: 'body_too_long' })
   })
 
   it('rejects when the user already has 5 open tickets', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'support_tickets') return chainable({ count: 5, error: null })
-      return chainable({ error: null })
-    })
-    const res = await createTicket('u1', 'help me')
+    for (let i = 0; i < 5; i++) await insertRow('support_tickets', { user_id: user.id, status: 'open' })
+    const res = await createTicket(user.id, 'help me')
     expect(res).toEqual({ ok: false, error: 'too_many_open_tickets' })
   })
 
+  it('closed tickets do not count toward the open-ticket cap', async () => {
+    for (let i = 0; i < 5; i++) await insertRow('support_tickets', { user_id: user.id, status: 'closed' })
+    const res = await createTicket(user.id, 'help me')
+    expect(res.ok).toBe(true)
+  })
+
   it('creates a ticket and its first message', async () => {
-    const ticketInsert = vi.fn(() => chainable({ data: { id: 't1', created_at: 'now' }, error: null }))
-    const msgInsert = vi.fn(() => chainable({ error: null }))
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'support_tickets') {
-        return { select: () => chainable({ count: 0, error: null }), insert: ticketInsert } as any
-      }
-      if (table === 'support_messages') return { insert: msgInsert } as any
-      return chainable({ error: null })
-    })
-    const res = await createTicket('u1', '  hello  ')
-    expect(res).toEqual({ ok: true, ticketId: 't1', createdAt: 'now' })
-    expect((ticketInsert.mock.calls[0][0] as any)).toMatchObject({ user_id: 'u1', status: 'open', last_sender: 'user' })
-    expect((msgInsert.mock.calls[0][0] as any)).toMatchObject({ ticket_id: 't1', sender: 'user', body: 'hello' })
+    const res = await createTicket(user.id, '  hello  ')
+    expect(res).toMatchObject({ ok: true })
+    if (!res.ok) throw new Error('unreachable')
+    const [ticket] = await sql`select * from support_tickets`
+    expect(ticket).toMatchObject({ id: res.ticketId, user_id: user.id, status: 'open', last_sender: 'user' })
+    expect(res.createdAt).toBe(ticket.created_at)
+    const msgs = await sql`select ticket_id, sender, body from support_messages`
+    expect(msgs).toEqual([{ ticket_id: res.ticketId, sender: 'user', body: 'hello' }])
   })
 
   it('returns create_failed when ticket insert fails', async () => {
-    const ticketInsert = vi.fn(() => chainable({ data: null, error: { message: 'boom' } }))
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'support_tickets') {
-        return { select: () => chainable({ count: 0, error: null }), insert: ticketInsert } as any
-      }
-      return chainable({ error: null })
-    })
-    const res = await createTicket('u1', 'help me')
+    await failOn('support_tickets', 'insert')
+    const res = await createTicket(user.id, 'help me')
     expect(res).toEqual({ ok: false, error: 'create_failed' })
   })
 
-  it('returns create_failed and cleans up ticket when message insert fails', async () => {
-    const ticketInsert = vi.fn(() => chainable({ data: { id: 't1', created_at: 'now' }, error: null }))
-    const deleteSpy = vi.fn(() => chainable({ error: null }))
-    const msgInsert = vi.fn(() => chainable({ error: { message: 'boom' } }))
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'support_tickets') {
-        return { select: () => chainable({ count: 0, error: null }), insert: ticketInsert, delete: deleteSpy } as any
-      }
-      if (table === 'support_messages') return { insert: msgInsert } as any
-      return chainable({ error: null })
-    })
-    const res = await createTicket('u1', 'help me')
+  it('returns create_failed and leaves no ticket when message insert fails', async () => {
+    await failOn('support_messages', 'insert')
+    const res = await createTicket(user.id, 'help me')
     expect(res).toEqual({ ok: false, error: 'create_failed' })
-    expect(deleteSpy).toHaveBeenCalled()
+    expect(await sql`select id from support_tickets`).toHaveLength(0)
+  })
+
+  it('treats a failed open-ticket count as zero (old swallowed-error behaviour)', async () => {
+    // Reads of support_tickets fail → count reads as 0; the insert then fails too → create_failed, not a throw.
+    await failReadsOf('support_tickets')
+    const res = await createTicket(user.id, 'help me')
+    expect(res).toEqual({ ok: false, error: 'create_failed' })
   })
 })

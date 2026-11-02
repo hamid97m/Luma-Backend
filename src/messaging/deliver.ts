@@ -1,4 +1,4 @@
-import { db } from '../db.js'
+import { sql } from '../db.js'
 import { notifyNewMessage } from '../bot.js'
 import { shouldNotifyOffline, type NotifyRecipient } from './notifyGate.js'
 import type { Locale } from '../i18n/index.js'
@@ -23,13 +23,8 @@ export async function deliverMessageNotification(
   try {
     if (!shouldNotifyOffline(recipient, Date.now())) return
 
-    const { data: senderPhoto } = await db
-      .from('user_photos')
-      .select('url')
-      .eq('user_id', senderId)
-      .order('position', { ascending: true })
-      .limit(1)
-      .maybeSingle()
+    const [senderPhoto] = await sql<{ url: string }[]>`
+      select url from user_photos where user_id = ${senderId} order by position asc limit 1`
 
     // Stamp notified_offline_at only after the send resolves — a blocked bot
     // shouldn't consume this offline stretch's one-notification allowance.
@@ -37,7 +32,7 @@ export async function deliverMessageNotification(
       recipient.telegram_id as number, senderName, body, senderPhoto?.url ?? null, matchId,
       (recipient.locale as Locale | null) ?? null,
     )
-    await db.from('users').update({ notified_offline_at: new Date().toISOString() }).eq('id', recipient.id)
+    await sql`update users set notified_offline_at = ${new Date().toISOString()} where id = ${recipient.id}`
   } catch (err) {
     log?.warn({ err }, 'failed to send offline notification')
   }

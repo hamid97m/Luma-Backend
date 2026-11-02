@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../db.js'
+import { sql, isUuid } from '../db.js'
 import { checkAndCountDirectChat } from '../premium/directChatLimit.js'
 import { seedIcebreakers } from '../icebreakers/seed.js'
 
@@ -7,21 +7,32 @@ import { seedIcebreakers } from '../icebreakers/seed.js'
 // Mirrors the acceptIntro pattern: normalized pair, 23505 = already matched.
 async function ensureMatch(a: string, b: string): Promise<{ matchId: string; created: boolean } | null> {
   const [u1, u2] = [a, b].sort()
-  const { data: created, error: insErr } = await db
-    .from('matches').insert({ user1_id: u1, user2_id: u2 }).select('id').maybeSingle()
-  if (created) return { matchId: created.id, created: true }
-  if (insErr?.code === '23505') {
-    const { data: existing } = await db
-      .from('matches').select('id').eq('user1_id', u1).eq('user2_id', u2).single()
+  try {
+    const [created] = await sql<{ id: string }[]>`
+      insert into matches (user1_id, user2_id) values (${u1}, ${u2}) returning id`
+    if (created) return { matchId: created.id, created: true }
+    return null
+  } catch (err) {
+    if ((err as { code?: string })?.code !== '23505') return null
+  }
+  try {
+    const [existing] = await sql<{ id: string }[]>`
+      select id from matches where user1_id = ${u1} and user2_id = ${u2}`
     if (existing) return { matchId: existing.id, created: false }
+  } catch {
+    // fall through → match_failed, as before
   }
   return null
 }
 
 async function findExistingMatch(a: string, b: string): Promise<string | null> {
   const [u1, u2] = [a, b].sort()
-  const { data } = await db.from('matches').select('id').eq('user1_id', u1).eq('user2_id', u2).maybeSingle()
-  return data?.id ?? null
+  try {
+    const [row] = await sql<{ id: string }[]>`select id from matches where user1_id = ${u1} and user2_id = ${u2}`
+    return row?.id ?? null
+  } catch {
+    return null // read error was treated as "no match" before
+  }
 }
 
 export async function directChatRoutes(app: FastifyInstance) {
@@ -34,18 +45,35 @@ export async function directChatRoutes(app: FastifyInstance) {
     const { targetUserId } = req.body as { targetUserId?: string }
     if (!targetUserId || targetUserId === req.userId) return reply.status(400).send({ error: 'invalid_target' })
 
-    const { data: target } = await db
-      .from('users').select('id, name, telegram_id, username, deleted_at').eq('id', targetUserId).single()
+    // Malformed id or failed read → "not found", as PostgREST answered.
+    let target: { id: string; name: string; telegram_id: number; username: string | null; deleted_at: string | null } | undefined
+    if (isUuid(targetUserId)) {
+      try {
+        ;[target] = await sql<NonNullable<typeof target>[]>`
+          select id, name, telegram_id, username, deleted_at from users where id = ${targetUserId}`
+      } catch {
+        target = undefined
+      }
+    }
     if (!target || target.deleted_at) return reply.status(404).send({ error: 'user_not_found' })
+    const found = target
 
-    const { data: blocks } = await db
-      .from('blocks').select('id')
-      .or(`and(blocker_id.eq.${req.userId},blocked_id.eq.${targetUserId}),and(blocker_id.eq.${targetUserId},blocked_id.eq.${req.userId})`)
-    if (blocks && blocks.length > 0) return reply.status(403).send({ error: 'blocked' })
+    // Block in either direction. A failed read was ignored before (no rows).
+    let blocked = false
+    try {
+      const blocks = await sql`
+        select id from blocks
+        where (blocker_id = ${req.userId} and blocked_id = ${targetUserId})
+           or (blocker_id = ${targetUserId} and blocked_id = ${req.userId})`
+      blocked = blocks.length > 0
+    } catch {
+      blocked = false
+    }
+    if (blocked) return reply.status(403).send({ error: 'blocked' })
 
     const buildResponse = (matchId: string, created: boolean) => ({
       created,
-      match: { id: matchId, user: { id: target.id, name: target.name, telegramId: target.telegram_id, username: target.username } },
+      match: { id: matchId, user: { id: found.id, name: found.name, telegramId: found.telegram_id, username: found.username } },
     })
 
     // Already matched → open the existing chat; no gate, no quota consumed.

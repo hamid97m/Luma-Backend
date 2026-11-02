@@ -1,28 +1,29 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/premium/service.js', () => ({
   getPremiumStatus: vi.fn(), createPremiumCheckout: vi.fn(), getPremiumTransactionStatus: vi.fn(),
   changeTonPaysCard: vi.fn(), submitTonPaysRefundCard: vi.fn(),
 }))
 
 import { buildApp } from '../src/server.js'
-import { verifyInitData } from '../src/auth.js'
-import { db } from '../src/db.js'
+import { authAs } from './helpers/auth.js'
+import { resetDb, createUser } from './helpers/db.js'
 import {
   getPremiumStatus, createPremiumCheckout, getPremiumTransactionStatus,
   changeTonPaysCard, submitTonPaysRefundCard,
 } from '../src/premium/service.js'
 
-function auth() {
-  vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
-  vi.mocked(db.from).mockReturnValueOnce({ select: () => ({ eq: () => ({ single: () => ({ data: { id: 'u1' } }) }) }) } as any)
-}
-
 describe('premium routes', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
-  beforeEach(async () => { vi.clearAllMocks(); app = await buildApp() })
+  let me: Record<string, any>
+  const auth = () => authAs(me)
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    await resetDb()
+    me = await createUser({ name: 'Ali' })
+    app = await buildApp()
+  })
 
   it('401s without auth', async () => {
     const res = await app.inject({ method: 'GET', url: '/premium/status' })
@@ -35,7 +36,7 @@ describe('premium routes', () => {
     const res = await app.inject({ method: 'GET', url: '/premium/status', headers: { authorization: 'x' } })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ enabled: true, premiumUntil: null, plans: [] })
-    expect(getPremiumStatus).toHaveBeenCalledWith('u1')
+    expect(getPremiumStatus).toHaveBeenCalledWith(me.id)
   })
 
   it('checkout requires planId', async () => {
@@ -75,8 +76,7 @@ describe('premium routes', () => {
     // The TonPays payment step polls this route every 5s for up to 10 minutes
     // (120 requests per attempt). Under the global limiter that would eat 40%
     // of the user's hourly budget and 429 the rest of the app mid-payment.
-    vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
-    vi.mocked(db.from).mockReturnValue({ select: () => ({ eq: () => ({ single: () => ({ data: { id: 'u1' } }) }) }) } as any)
+    auth()
     vi.mocked(getPremiumTransactionStatus).mockResolvedValue({ status: 'pending_payment', provider: 'tonpays' })
 
     const headers = { authorization: 'same-user-token' }
@@ -96,7 +96,7 @@ describe('premium routes', () => {
     const ok = await app.inject({ method: 'POST', url: '/premium/transactions/tx1/change-card', headers: { authorization: 'x' } })
     expect(ok.statusCode).toBe(200)
     expect(ok.json()).toEqual({ cardNumber: '6037-2222', cardHolder: 'New Holder' })
-    expect(changeTonPaysCard).toHaveBeenCalledWith('tx1', 'u1')
+    expect(changeTonPaysCard).toHaveBeenCalledWith('tx1', me.id)
 
     auth()
     vi.mocked(changeTonPaysCard).mockResolvedValue({ ok: false, code: 'cooldown' })
@@ -130,7 +130,7 @@ describe('premium routes', () => {
     })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ ok: true })
-    expect(submitTonPaysRefundCard).toHaveBeenCalledWith('tx1', 'u1', '6037 9911 2233 4455', 'Ali')
+    expect(submitTonPaysRefundCard).toHaveBeenCalledWith('tx1', me.id, '6037 9911 2233 4455', 'Ali')
   })
 
   it('refund-card maps invalid_card to 400', async () => {

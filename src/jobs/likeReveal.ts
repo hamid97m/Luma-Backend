@@ -1,29 +1,21 @@
-import { db } from '../db.js'
+import { sql } from '../db.js'
 import { ensureDailyReveal } from '../likes/reveal.js'
 
-const PAGE = 1000
-
 export async function runLikeRevealJob(now = new Date()): Promise<{ considered: number }> {
-  const ids = new Set<string>()
-  let from = 0
-  for (;;) {
-    const { data, error } = await db
-      .from('swipes')
-      .select('swiped_id, swiped:users!swipes_swiped_id_fkey(gender, is_seed, deleted_at, banned_at)')
-      .eq('direction', 'like')
-      .order('swiper_id', { ascending: true })
-      .order('swiped_id', { ascending: true })
-      .range(from, from + PAGE - 1)
-    if (error) throw error
-    const rows = (data as any[] | null) ?? []
-    for (const row of rows) {
-      const u = row.swiped
-      if (!u || u.gender !== 'woman' || u.is_seed || u.deleted_at || u.banned_at) continue
-      ids.add(row.swiped_id)
-    }
-    if (rows.length < PAGE) break
-    from += PAGE
-  }
+  // Every live, real woman with at least one incoming like, in the order the old
+  // paged (swiper_id, swiped_id) scan first met them. Read errors throw, as before.
+  const rows = await sql<{ swiped_id: string }[]>`
+    select s.swiped_id
+    from swipes s
+    join users u on u.id = s.swiped_id
+    where s.direction = 'like'
+      and u.gender = 'woman'
+      and not u.is_seed
+      and u.deleted_at is null
+      and u.banned_at is null
+    group by s.swiped_id
+    order by min(s.swiper_id::text), s.swiped_id`
+  const ids = rows.map((r) => r.swiped_id)
   for (const id of ids) {
     try {
       await ensureDailyReveal(id, now)
@@ -31,5 +23,5 @@ export async function runLikeRevealJob(now = new Date()): Promise<{ considered: 
       console.error('like-reveal: ensureDailyReveal failed', { id, err })
     }
   }
-  return { considered: ids.size }
+  return { considered: ids.length }
 }

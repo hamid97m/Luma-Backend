@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../db.js'
+import { sql, isUuid } from '../db.js'
 import { createTicket, MAX_TICKET_BODY } from '../support/service.js'
 
 function mapMessage(m: any) {
@@ -11,32 +11,34 @@ export async function supportRoutes(app: FastifyInstance) {
   app.get('/support/tickets', async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
-    const { data: tickets, error } = await db
-      .from('support_tickets')
-      .select('id, status, last_sender, last_message_at, created_at')
-      .eq('user_id', req.userId)
-      .order('last_message_at', { ascending: false })
-    if (error) return reply.status(500).send({ error: 'tickets_fetch_failed' })
+    let tickets: any[]
+    try {
+      tickets = await sql`
+        select id, status, last_sender, last_message_at, created_at
+        from support_tickets
+        where user_id = ${req.userId}
+        order by last_message_at desc`
+    } catch {
+      return reply.status(500).send({ error: 'tickets_fetch_failed' })
+    }
 
     const ids = (tickets ?? []).map((t: any) => t.id)
     const previews: Record<string, string> = {}
     const unread = new Set<string>()
     if (ids.length) {
       // Opening message per ticket (earliest) → preview.
-      const { data: firsts } = await db
-        .from('support_messages')
-        .select('ticket_id, body, created_at')
-        .in('ticket_id', ids)
-        .order('created_at', { ascending: true })
-      for (const m of firsts ?? []) if (!(m.ticket_id in previews)) previews[m.ticket_id] = m.body
+      // Previews/unread are best-effort: a failed lookup just leaves them blank.
+      const firsts = await sql`
+        select ticket_id, body, created_at from support_messages
+        where ticket_id = any(${ids}::uuid[])
+        order by created_at asc`.catch(() => [])
+      for (const m of firsts) if (!(m.ticket_id in previews)) previews[m.ticket_id] = m.body
       // Tickets with an unread admin message.
-      const { data: unreadRows } = await db
-        .from('support_messages')
-        .select('ticket_id')
-        .in('ticket_id', ids)
-        .eq('sender', 'admin')
-        .is('read_by_user_at', null)
-      for (const m of unreadRows ?? []) unread.add(m.ticket_id)
+      const unreadRows = await sql`
+        select ticket_id from support_messages
+        where ticket_id = any(${ids}::uuid[]) and sender = 'admin' and read_by_user_at is null`
+        .catch(() => [])
+      for (const m of unreadRows) unread.add(m.ticket_id)
     }
 
     return {
@@ -57,27 +59,29 @@ export async function supportRoutes(app: FastifyInstance) {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
     const { id } = req.params as { id: string }
 
-    const { data: ticket } = await db
-      .from('support_tickets')
-      .select('id, status, created_at')
-      .eq('id', id)
-      .eq('user_id', req.userId)
-      .maybeSingle()
+    // Malformed id can't be a ticket — 404 instead of a Postgres cast error.
+    const [ticket] = isUuid(id)
+      ? await sql`
+          select id, status, created_at from support_tickets
+          where id = ${id} and user_id = ${req.userId}`.catch(() => [])
+      : []
     if (!ticket) return reply.status(404).send({ error: 'ticket_not_found' })
 
-    const { data: messages, error } = await db
-      .from('support_messages')
-      .select('id, sender, body, created_at')
-      .eq('ticket_id', id)
-      .order('created_at', { ascending: true })
-    if (error) return reply.status(500).send({ error: 'messages_fetch_failed' })
+    let messages: any[]
+    try {
+      messages = await sql`
+        select id, sender, body, created_at from support_messages
+        where ticket_id = ${id}
+        order by created_at asc`
+    } catch {
+      return reply.status(500).send({ error: 'messages_fetch_failed' })
+    }
 
-    await db
-      .from('support_messages')
-      .update({ read_by_user_at: new Date().toISOString() })
-      .eq('ticket_id', id)
-      .eq('sender', 'admin')
-      .is('read_by_user_at', null)
+    // Read-receipt side effect is best-effort (its error was ignored before).
+    await sql`
+      update support_messages set read_by_user_at = ${new Date().toISOString()}
+      where ticket_id = ${id} and sender = 'admin' and read_by_user_at is null`
+      .catch((err) => req.log.warn({ err }, 'support read-receipt update failed'))
 
     return {
       ticket: { id: ticket.id, status: ticket.status, createdAt: ticket.created_at },
@@ -107,27 +111,30 @@ export async function supportRoutes(app: FastifyInstance) {
     if (!text) return reply.status(400).send({ error: 'empty_body' })
     if (text.length > MAX_TICKET_BODY) return reply.status(400).send({ error: 'body_too_long' })
 
-    const { data: ticket } = await db
-      .from('support_tickets')
-      .select('id')
-      .eq('id', id)
-      .eq('user_id', req.userId)
-      .maybeSingle()
+    const [ticket] = isUuid(id)
+      ? await sql`select id from support_tickets where id = ${id} and user_id = ${req.userId}`.catch(() => [])
+      : []
     if (!ticket) return reply.status(404).send({ error: 'ticket_not_found' })
 
-    const { data: message, error } = await db
-      .from('support_messages')
-      .insert({ ticket_id: id, sender: 'user', body: text })
-      .select('id, sender, body, created_at')
-      .single()
-    if (error || !message) return reply.status(500).send({ error: 'send_failed' })
+    let message: any
+    try {
+      ;[message] = await sql`
+        insert into support_messages (ticket_id, sender, body) values (${id}, 'user', ${text})
+        returning id, sender, body, created_at`
+    } catch {
+      return reply.status(500).send({ error: 'send_failed' })
+    }
+    if (!message) return reply.status(500).send({ error: 'send_failed' })
 
     // A user reply reopens a closed ticket and flips the queue back to us.
-    const { error: reopenErr } = await db
-      .from('support_tickets')
-      .update({ status: 'open', last_sender: 'user', last_message_at: new Date().toISOString() })
-      .eq('id', id)
-    if (reopenErr) return reply.status(500).send({ error: 'reopen_failed' })
+    try {
+      await sql`
+        update support_tickets
+        set status = 'open', last_sender = 'user', last_message_at = ${new Date().toISOString()}
+        where id = ${id}`
+    } catch {
+      return reply.status(500).send({ error: 'reopen_failed' })
+    }
 
     return { message: mapMessage(message) }
   })

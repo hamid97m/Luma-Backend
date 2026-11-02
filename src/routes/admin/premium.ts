@@ -1,8 +1,16 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../../db.js'
+import { sql, isUuid } from '../../db.js'
 import { extendPremiumUntil, type PlanTranslations } from '../../premium/service.js'
 
-const PLAN_SELECT = 'id, title, description, translations, price_stars, discount_percent, discount_ends_at, duration_days, is_active, sort_order, created_at'
+const PLAN_COLS = [
+  'id', 'title', 'description', 'translations', 'price_stars', 'discount_percent',
+  'discount_ends_at', 'duration_days', 'is_active', 'sort_order', 'created_at',
+]
+
+/** Plan row for `sql(row)`: jsonb `translations` must be passed as json explicitly. */
+function planRowForSql(row: Record<string, unknown>): Record<string, any> {
+  return row.translations === undefined ? row : { ...row, translations: sql.json(row.translations as any) }
+}
 const PAGE_SIZE = 25
 const TX_STATUSES = ['pending_payment', 'paid', 'refunded', 'canceled', 'paid_grant_failed']
 const TX_SOURCES = ['purchase', 'admin_grant', 'referral']
@@ -110,8 +118,9 @@ function parsePlanBody(body: Record<string, unknown>, partial: boolean): { error
 
 export async function adminPremiumRoutes(app: FastifyInstance) {
   app.get('/premium/config', async (_req, reply) => {
-    const { data, error } = await db.from('premium_config').select('premium_enabled, toman_per_star').eq('id', true).single()
-    if (error || !data) return reply.status(500).send({ error: 'config_fetch_failed' })
+    const [data] = await sql`select premium_enabled, toman_per_star from premium_config where id = true`
+      .catch(() => [])
+    if (!data) return reply.status(500).send({ error: 'config_fetch_failed' })
     return { premiumEnabled: data.premium_enabled, tomanPerStar: data.toman_per_star }
   })
 
@@ -129,27 +138,29 @@ export async function adminPremiumRoutes(app: FastifyInstance) {
       if (!isPositiveInt(tomanPerStar)) return reply.status(400).send({ error: 'invalid_toman_per_star' })
       update.toman_per_star = tomanPerStar
     }
-    const { data, error } = await db
-      .from('premium_config')
-      .update(update)
-      .eq('id', true).select('premium_enabled, toman_per_star').single()
-    if (error || !data) return reply.status(500).send({ error: 'config_update_failed' })
+    const [data] = await sql`
+      update premium_config set ${sql(update)} where id = true
+      returning premium_enabled, toman_per_star`.catch(() => [])
+    if (!data) return reply.status(500).send({ error: 'config_update_failed' })
     return { premiumEnabled: data.premium_enabled, tomanPerStar: data.toman_per_star }
   })
 
   app.get('/premium/plans', async (_req, reply) => {
-    const { data, error } = await db
-      .from('premium_plans').select(PLAN_SELECT)
-      .order('sort_order', { ascending: true }).order('created_at', { ascending: true })
-    if (error) return reply.status(500).send({ error: 'plans_fetch_failed' })
-    return { plans: (data ?? []).map(planToJson) }
+    let data: any[]
+    try {
+      data = await sql`select ${sql(PLAN_COLS)} from premium_plans order by sort_order asc, created_at asc`
+    } catch {
+      return reply.status(500).send({ error: 'plans_fetch_failed' })
+    }
+    return { plans: data.map(planToJson) }
   })
 
   app.post('/premium/plans', async (req, reply) => {
     const parsed = parsePlanBody((req.body ?? {}) as Record<string, unknown>, false)
     if ('error' in parsed) return reply.status(400).send({ error: parsed.error })
-    const { data, error } = await db.from('premium_plans').insert(parsed.row).select(PLAN_SELECT).single()
-    if (error || !data) return reply.status(500).send({ error: 'plan_create_failed' })
+    const [data] = await sql`
+      insert into premium_plans ${sql(planRowForSql(parsed.row))} returning ${sql(PLAN_COLS)}`.catch(() => [])
+    if (!data) return reply.status(500).send({ error: 'plan_create_failed' })
     return reply.status(201).send(planToJson(data))
   })
 
@@ -159,21 +170,32 @@ export async function adminPremiumRoutes(app: FastifyInstance) {
     if ('error' in parsed) return reply.status(400).send({ error: parsed.error })
     if (Object.keys(parsed.row).length === 0) return reply.status(400).send({ error: 'empty_update' })
     parsed.row.updated_at = new Date().toISOString()
-    const { data, error } = await db
-      .from('premium_plans').update(parsed.row).eq('id', id).select(PLAN_SELECT).maybeSingle()
-    if (error) return reply.status(500).send({ error: 'plan_update_failed' })
+    // Malformed id can't be a plan → 404 rather than a uuid cast error.
+    if (!isUuid(id)) return reply.status(404).send({ error: 'plan_not_found' })
+    let data: any
+    try {
+      ;[data] = await sql`
+        update premium_plans set ${sql(planRowForSql(parsed.row))} where id = ${id}
+        returning ${sql(PLAN_COLS)}`
+    } catch {
+      return reply.status(500).send({ error: 'plan_update_failed' })
+    }
     if (!data) return reply.status(404).send({ error: 'plan_not_found' })
     return planToJson(data)
   })
 
   app.delete('/premium/plans/:id', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const { count, error: countErr } = await db
-      .from('premium_transactions').select('id', { count: 'exact', head: true }).eq('plan_id', id)
-    if (countErr) return reply.status(500).send({ error: 'plan_delete_failed' })
-    if ((count ?? 0) > 0) return reply.status(409).send({ error: 'plan_has_transactions' })
-    const { data, error } = await db.from('premium_plans').delete().eq('id', id).select('id').maybeSingle()
-    if (error) return reply.status(500).send({ error: 'plan_delete_failed' })
+    if (!isUuid(id)) return reply.status(404).send({ error: 'plan_not_found' })
+    let data: any
+    try {
+      const [{ count }] = await sql<{ count: number }[]>`
+        select count(*)::int as count from premium_transactions where plan_id = ${id}`
+      if (count > 0) return reply.status(409).send({ error: 'plan_has_transactions' })
+      ;[data] = await sql`delete from premium_plans where id = ${id} returning id`
+    } catch {
+      return reply.status(500).send({ error: 'plan_delete_failed' })
+    }
     if (!data) return reply.status(404).send({ error: 'plan_not_found' })
     return { ok: true }
   })
@@ -183,24 +205,32 @@ export async function adminPremiumRoutes(app: FastifyInstance) {
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const from = (pageNum - 1) * PAGE_SIZE
 
-    let q = db
-      .from('premium_transactions')
-      .select(
-        'id, plan_title, price_stars, duration_days, status, source, created_at, paid_at, ' +
-        'provider, price_toman, tonpays_status, ' +
-        'user:users!premium_transactions_user_id_fkey(name, username)',
-        { count: 'exact' },
-      )
-    if (status && TX_STATUSES.includes(status)) q = q.eq('status', status)
-    if (source && TX_SOURCES.includes(source)) q = q.eq('source', source)
-    if (provider && TX_PROVIDERS.includes(provider)) q = q.eq('provider', provider)
+    const where = sql`
+      where true
+      ${status && TX_STATUSES.includes(status) ? sql`and t.status = ${status}` : sql``}
+      ${source && TX_SOURCES.includes(source) ? sql`and t.source = ${source}` : sql``}
+      ${provider && TX_PROVIDERS.includes(provider) ? sql`and t.provider = ${provider}` : sql``}`
 
-    const { data, count, error } = await q
-      .order('created_at', { ascending: false })
-      .range(from, from + PAGE_SIZE - 1)
-    if (error) return reply.status(500).send({ error: 'transactions_fetch_failed' })
+    let data: any[]
+    let total: number
+    try {
+      ;[data, [{ count: total }]] = await Promise.all([
+        sql`
+          select t.id, t.plan_title, t.price_stars, t.duration_days, t.status, t.source, t.created_at,
+            t.paid_at, t.provider, t.price_toman, t.tonpays_status,
+            case when u.id is null then null
+              else json_build_object('name', u.name, 'username', u.username) end as user
+          from premium_transactions t
+          left join users u on u.id = t.user_id
+          ${where}
+          order by t.created_at desc
+          limit ${PAGE_SIZE} offset ${from}`,
+        sql<{ count: number }[]>`select count(*)::int as count from premium_transactions t ${where}`,
+      ])
+    } catch {
+      return reply.status(500).send({ error: 'transactions_fetch_failed' })
+    }
 
-    const total = count ?? 0
     return {
       items: (data ?? []).map((r: any) => ({
         id: r.id,
@@ -226,27 +256,41 @@ export async function adminPremiumRoutes(app: FastifyInstance) {
     const { days } = (req.body ?? {}) as { days?: unknown }
     if (!isPositiveInt(days) || days > 3650) return reply.status(400).send({ error: 'invalid_days' })
 
-    const { data: user } = await db.from('users').select('id, premium_until').eq('id', id).maybeSingle()
+    const [user] = isUuid(id)
+      ? await sql<{ id: string; premium_until: string | null }[]>`
+          select id, premium_until from users where id = ${id}`.catch(() => [])
+      : []
     if (!user) return reply.status(404).send({ error: 'user_not_found' })
 
     const premiumUntil = extendPremiumUntil(user.premium_until ?? null, days)
-    const { error: updErr } = await db.from('users').update({ premium_until: premiumUntil }).eq('id', id)
-    if (updErr) return reply.status(500).send({ error: 'grant_failed' })
+    try {
+      await sql`update users set premium_until = ${premiumUntil} where id = ${id}`
+    } catch {
+      return reply.status(500).send({ error: 'grant_failed' })
+    }
 
-    const { error: txErr } = await db.from('premium_transactions').insert({
-      user_id: id, plan_id: null, plan_title: 'Admin grant', price_stars: 0,
-      duration_days: days, status: 'paid', source: 'admin_grant', paid_at: new Date().toISOString(),
-    })
-    if (txErr) req.log.warn({ err: txErr }, 'failed to record admin grant tx')
+    // The grant already happened; a failed audit row is only logged.
+    try {
+      await sql`
+        insert into premium_transactions
+          (user_id, plan_id, plan_title, price_stars, duration_days, status, source, paid_at)
+        values (${id}, null, 'Admin grant', 0, ${days}, 'paid', 'admin_grant', ${new Date().toISOString()})`
+    } catch (txErr) {
+      req.log.warn({ err: txErr }, 'failed to record admin grant tx')
+    }
 
     return { premiumUntil }
   })
 
   app.post('/users/:id/premium/revoke', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const { data, error } = await db
-      .from('users').update({ premium_until: null }).eq('id', id).select('id').maybeSingle()
-    if (error) return reply.status(500).send({ error: 'revoke_failed' })
+    if (!isUuid(id)) return reply.status(404).send({ error: 'user_not_found' })
+    let data: any
+    try {
+      ;[data] = await sql`update users set premium_until = null where id = ${id} returning id`
+    } catch {
+      return reply.status(500).send({ error: 'revoke_failed' })
+    }
     if (!data) return reply.status(404).send({ error: 'user_not_found' })
     return { ok: true }
   })

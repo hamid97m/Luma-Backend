@@ -1,5 +1,5 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
-import { db } from '../../db.js'
+import { sql } from '../../db.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -13,12 +13,10 @@ function startOfTodayIso(): string {
   return d.toISOString()
 }
 
-async function count(table: string, refine?: (q: any) => any): Promise<number> {
-  let q: any = db.from(table).select('id', { count: 'exact', head: true })
-  if (refine) q = refine(q)
-  const { count: n, error } = await q
-  if (error) throw new Error(`stats count failed: ${table}`)
-  return n ?? 0
+// `where` is a trusted fragment (``sql`where …` ``); values inside it are bind parameters.
+async function count(table: string, where = sql``): Promise<number> {
+  const [{ n }] = await sql<{ n: number }[]>`select count(*)::int as n from ${sql(table)} ${where}`
+  return n
 }
 
 function bucketPerDay(rows: { created_at: string }[], days: number): { date: string; count: number }[] {
@@ -48,33 +46,32 @@ export async function adminStatsRoutes(app: FastifyInstance) {
         signupRows, matchRows,
         premiumActive, premiumRevenueRows, premiumPaidRows,
       ] = await Promise.all([
-        count('users', (q) => q.is('deleted_at', null)),
-        count('users', (q) => q.not('banned_at', 'is', null)),
-        count('users', (q) => q.not('deleted_at', 'is', null)),
-        count('users', (q) => q.eq('is_seed', true)),
-        count('users', (q) => q.gte('created_at', today)),
-        count('users', (q) => q.gte('created_at', daysAgoIso(7))),
-        count('users', (q) => q.is('deleted_at', null).gte('last_active', daysAgoIso(1))),
-        count('users', (q) => q.is('deleted_at', null).gte('last_active', daysAgoIso(7))),
-        count('users', (q) => q.is('deleted_at', null).eq('gender', 'man')),
-        count('users', (q) => q.is('deleted_at', null).eq('gender', 'woman')),
-        count('users', (q) => q.is('deleted_at', null).eq('gender', 'nonbinary')),
+        count('users', sql`where deleted_at is null`),
+        count('users', sql`where banned_at is not null`),
+        count('users', sql`where deleted_at is not null`),
+        count('users', sql`where is_seed = true`),
+        count('users', sql`where created_at >= ${today}`),
+        count('users', sql`where created_at >= ${daysAgoIso(7)}`),
+        count('users', sql`where deleted_at is null and last_active >= ${daysAgoIso(1)}`),
+        count('users', sql`where deleted_at is null and last_active >= ${daysAgoIso(7)}`),
+        count('users', sql`where deleted_at is null and gender = 'man'`),
+        count('users', sql`where deleted_at is null and gender = 'woman'`),
+        count('users', sql`where deleted_at is null and gender = 'nonbinary'`),
         count('matches'),
-        count('matches', (q) => q.gte('created_at', today)),
-        count('messages', (q) => q.neq('type', 'icebreaker')),
-        count('messages', (q) => q.neq('type', 'icebreaker').gte('created_at', today)),
+        count('matches', sql`where created_at >= ${today}`),
+        count('messages', sql`where type <> 'icebreaker'`),
+        count('messages', sql`where type <> 'icebreaker' and created_at >= ${today}`),
         count('swipes'),
-        count('swipes', (q) => q.eq('direction', 'like')),
-        db.from('users').select('created_at').gte('created_at', monthAgo)
-          .then(({ data, error }: any) => { if (error) throw new Error('stats rows failed'); return data ?? [] }),
-        db.from('matches').select('created_at').gte('created_at', monthAgo)
-          .then(({ data, error }: any) => { if (error) throw new Error('stats rows failed'); return data ?? [] }),
-        count('users', (q) => q.gt('premium_until', new Date().toISOString())),
-        db.from('premium_transactions').select('price_stars').eq('status', 'paid').eq('source', 'purchase')
-          .then(({ data, error }: any) => { if (error) throw new Error('stats rows failed'); return data ?? [] }),
-        db.from('premium_transactions').select('user_id, paid_at').eq('status', 'paid').not('paid_at', 'is', null)
-          .order('paid_at', { ascending: true })
-          .then(({ data, error }: any) => { if (error) throw new Error('stats rows failed'); return data ?? [] }),
+        count('swipes', sql`where direction = 'like'`),
+        sql<{ created_at: string }[]>`select created_at from users where created_at >= ${monthAgo}`,
+        sql<{ created_at: string }[]>`select created_at from matches where created_at >= ${monthAgo}`,
+        count('users', sql`where premium_until > ${new Date().toISOString()}`),
+        sql<{ price_stars: number }[]>`
+          select price_stars from premium_transactions where status = 'paid' and source = 'purchase'`,
+        sql<{ user_id: string; paid_at: string }[]>`
+          select user_id, paid_at from premium_transactions
+          where status = 'paid' and paid_at is not null
+          order by paid_at asc`,
       ])
 
       // First paid tx per user = the day they became premium for the first time.

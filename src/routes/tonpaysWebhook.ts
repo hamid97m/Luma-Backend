@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { verifyTonPaysSignature } from '../payments/tonpays.js'
 import { handleTonPaysPaid } from '../premium/service.js'
-import { db } from '../db.js'
+import { sql } from '../db.js'
 
 /**
  * TonPays (card-to-card gateway) webhook. Registered as its own plugin so the
@@ -64,8 +64,14 @@ export async function tonpaysWebhookRoutes(app: FastifyInstance) {
       // Any other event (status transitions, cancellations, mismatches): keep
       // tonpays_status in sync for admin visibility. A no-op when the invoice
       // isn't ours (0 rows matched) — never surfaced as an error.
+      // Best-effort, as before (supabase-js never threw): a failed sync is
+      // logged and still acked — tonpays_status is informational only.
       if (typeof body?.status === 'string') {
-        await db.from('premium_transactions').update({ tonpays_status: body.status }).eq('tonpays_invoice_id', invoiceId)
+        try {
+          await sql`update premium_transactions set tonpays_status = ${body.status} where tonpays_invoice_id = ${String(invoiceId)}`
+        } catch (err) {
+          console.error(`[tonpays] webhook status sync for ${invoiceId} failed: ${(err as Error)?.message}`)
+        }
       }
       return reply.status(200).send({ ok: true })
     },

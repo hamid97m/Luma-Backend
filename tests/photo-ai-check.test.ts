@@ -1,19 +1,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn(), storage: { from: vi.fn() } } }))
+// Storage still goes through supabase-js; the DB part is real Postgres.
+vi.mock('../src/db.js', async (orig) => ({ ...(await orig<object>()), db: { storage: { from: vi.fn() } } }))
 vi.mock('../src/bot.js', () => ({ notifyPaused: vi.fn(), notifyFakePhotoWarning: vi.fn() }))
 
 import { db } from '../src/db.js'
 import { notifyPaused } from '../src/bot.js'
 import { parsePhotoVerdict, askDeepSeekPhoto, checkMainPhoto, scheduleMainPhotoCheck } from '../src/moderation/photoAiCheck.js'
-import { chainable } from './admin-helpers.js'
+import { randomUUID } from 'node:crypto'
+import { resetDb, createUser, createPhoto, insertRow, sql } from './helpers/db.js'
+import { storageMock, withMissingTable } from './helpers/profile.js'
 
-const MAN = { gender: 'man', age: 27, is_seed: false, paused_at: null, banned_at: null, deleted_at: null }
+const MAN = { gender: 'man', looking_for: 'women', age: 27, is_seed: false, telegram_id: 100, allows_write_to_pm: true, locale: 'fa' }
 const MAIN = { id: 'photo-1', url: 'https://cdn.example/user-1/photo-1' }
-const PAUSE_ROW = { telegram_id: 100, allows_write_to_pm: true, locale: 'fa' }
 
-let userSeq = 0
-const nextUser = () => `user-${++userSeq}`
+// askDeepSeekPhoto only uses the id for its per-user budget.
+const nextUser = () => randomUUID()
 
 function deepSeekReply(content: string, status = 200) {
   return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status })
@@ -105,36 +107,22 @@ describe('askDeepSeekPhoto', () => {
   })
 })
 
-/** Routes db.from by table; `users` and `user_photos` answers are consumed in call order. */
-function mockDb({ users, mains, checked = null }: { users: unknown[]; mains: unknown[]; checked?: unknown }) {
-  let usersCalls = 0
-  let photoCalls = 0
-  const upsert = vi.fn().mockResolvedValue({ error: null })
-  const remove = vi.fn().mockResolvedValue({ error: null })
-  const blob = new Blob(['img'], { type: 'image/jpeg' })
-  const download = vi.fn().mockResolvedValue({ data: blob, error: null })
-  const upload = vi.fn().mockResolvedValue({ error: null })
-  vi.mocked(db.storage.from).mockImplementation((bucket: string) => ({ remove, download, upload, bucket } as any))
-  vi.mocked(db.from).mockImplementation((table: string) => {
-    if (table === 'users') return chainable({ data: users[Math.min(usersCalls++, users.length - 1)], error: null })
-    if (table === 'user_photos') {
-      // mainPhoto lookups first; the pause's deleteAllPhotosForUser reads the list after.
-      const data = photoCalls < mains.length ? mains[photoCalls] : [{ id: MAIN.id }]
-      photoCalls++
-      return chainable({ data, error: null })
-    }
-    if (table === 'photo_ai_checks') {
-      const chain = chainable({ data: checked, error: null })
-      return new Proxy(chain, { get: (t, p) => (p === 'upsert' ? upsert : t[p]) })
-    }
-    return chainable({ data: null, error: null })
-  })
-  return { upsert, remove, download, upload, blob }
+/** A checkable man (unless overridden) with one main photo; storage mocked. */
+async function setup(user: Record<string, unknown> = {}) {
+  const storage = storageMock()
+  vi.mocked(db.storage.from).mockImplementation(() => storage as any)
+  const u = await createUser({ ...MAN, ...user })
+  const main = await createPhoto(u.id, 0)
+  return { u, main, storage }
 }
+
+const checks = () => sql`select photo_id, user_id, approved, reason, photo_url, evidence_path, prompt_tokens, completion_tokens from photo_ai_checks`
+const pausedAt = async (id: string) => (await sql`select paused_at from users where id = ${id}`)[0].paused_at
 
 describe('checkMainPhoto', () => {
   const fetchMock = vi.fn()
-  beforeEach(() => {
+  beforeEach(async () => {
+    await resetDb()
     vi.clearAllMocks()
     vi.stubGlobal('fetch', fetchMock)
     vi.stubEnv('DEEPSEEK_API_KEY', 'sk-test')
@@ -147,144 +135,183 @@ describe('checkMainPhoto', () => {
 
   it('skips women, unfinished sign-ups, seeds and paused users without calling DeepSeek', async () => {
     const skipped = [
-      { ...MAN, gender: 'woman' },
-      { ...MAN, gender: 'nonbinary' },
+      { gender: 'woman', looking_for: 'men' },
+      { gender: 'nonbinary' },
       // every account is created as 'man' with age 0 before onboarding saves
-      { ...MAN, age: 0 },
-      { ...MAN, is_seed: true },
-      { ...MAN, paused_at: '2026-01-01' },
-      null,
+      { age: 0 },
+      { is_seed: true },
+      { paused_at: '2026-01-01T00:00:00Z' },
+      { banned_at: '2026-01-01T00:00:00Z' },
+      { deleted_at: '2026-01-01T00:00:00Z' },
     ]
-    for (const user of skipped) {
-      mockDb({ users: [user], mains: [MAIN] })
-      expect(await checkMainPhoto(nextUser())).toBeNull()
+    for (const [i, user] of skipped.entries()) {
+      const { u } = await setup({ telegram_id: 200 + i, ...user })
+      expect(await checkMainPhoto(u.id), JSON.stringify(user)).toBeNull()
     }
+    // No such user.
+    expect(await checkMainPhoto(randomUUID())).toBeNull()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('skips a man without photos', async () => {
+    const u = await createUser(MAN)
+    expect(await checkMainPhoto(u.id)).toBeNull()
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('skips a main photo that was already approved', async () => {
-    mockDb({ users: [MAN], mains: [MAIN], checked: { approved: true, reason: null } })
-    expect(await checkMainPhoto(nextUser())).toBeNull()
+    const { u, main } = await setup()
+    await insertRow('photo_ai_checks', { photo_id: main.id, user_id: u.id, approved: true })
+    expect(await checkMainPhoto(u.id)).toBeNull()
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('pauses on a cached rejection without calling DeepSeek again', async () => {
-    mockDb({ users: [MAN, MAN, PAUSE_ROW], mains: [MAIN, MAIN], checked: { approved: false, reason: 'nudity' } })
-    expect(await checkMainPhoto(nextUser())).toEqual({ approved: false, reason: 'nudity' })
+    const { u, main } = await setup()
+    await insertRow('photo_ai_checks', { photo_id: main.id, user_id: u.id, approved: false, reason: 'nudity' })
+    expect(await checkMainPhoto(u.id)).toEqual({ approved: false, reason: 'nudity' })
     expect(fetchMock).not.toHaveBeenCalled()
     expect(notifyPaused).toHaveBeenCalledWith(100, 'fa')
+    expect(await pausedAt(u.id)).not.toBeNull()
   })
 
   it('records an approval and does not pause', async () => {
-    const user = nextUser()
-    const { upsert } = mockDb({ users: [MAN], mains: [MAIN] })
+    const { u, main } = await setup()
     fetchMock.mockResolvedValueOnce(deepSeekReply('{"approved":true,"reason":null}'))
 
-    expect(await checkMainPhoto(user)).toEqual({ approved: true, reason: null })
-    expect(upsert).toHaveBeenCalledWith(
-      {
-        photo_id: MAIN.id, user_id: user, approved: true, reason: null,
-        photo_url: MAIN.url, evidence_path: null, prompt_tokens: null, completion_tokens: null,
-      },
-      { onConflict: 'photo_id', ignoreDuplicates: true },
-    )
+    expect(await checkMainPhoto(u.id)).toEqual({ approved: true, reason: null })
+    expect(await checks()).toEqual([{
+      photo_id: main.id, user_id: u.id, approved: true, reason: null,
+      photo_url: main.url, evidence_path: null, prompt_tokens: null, completion_tokens: null,
+    }])
     expect(notifyPaused).not.toHaveBeenCalled()
+    expect(await pausedAt(u.id)).toBeNull()
   })
 
   it('keeps a private copy, then pauses, deletes photos and DMs on a rejection', async () => {
-    const user = nextUser()
-    const { upsert, remove, download, upload, blob } = mockDb({ users: [MAN, MAN, PAUSE_ROW], mains: [MAIN, MAIN] })
-    fetchMock.mockResolvedValueOnce(deepSeekReply('{"approved":false,"reason":"celebrity_or_stock"}'))
+    const { u, main, storage } = await setup()
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: '{"approved":false,"reason":"celebrity_or_stock"}' } }],
+      usage: { prompt_tokens: 600, completion_tokens: 12 },
+    })))
 
-    expect(await checkMainPhoto(user)).toEqual({ approved: false, reason: 'celebrity_or_stock' })
-    const path = `${user}/${MAIN.id}`
-    expect(download).toHaveBeenCalledWith(path)
-    expect(upload).toHaveBeenCalledWith(path, blob, { contentType: 'image/jpeg', upsert: true })
+    expect(await checkMainPhoto(u.id)).toEqual({ approved: false, reason: 'celebrity_or_stock' })
+    const path = `${u.id}/${main.id}`
+    expect(storage.download).toHaveBeenCalledWith(path)
+    const blob = await storage.download.mock.results[0].value.then((r: any) => r.data)
+    expect(storage.upload).toHaveBeenCalledWith(path, blob, { contentType: 'image/jpeg', upsert: true })
     expect(vi.mocked(db.storage.from).mock.calls.map((c) => c[0])).toContain('photo-ai-evidence')
-    expect(upsert).toHaveBeenCalledWith(
-      expect.objectContaining({ approved: false, reason: 'celebrity_or_stock', evidence_path: path }),
-      expect.anything(),
-    )
+    expect(await checks()).toEqual([expect.objectContaining({
+      approved: false, reason: 'celebrity_or_stock', evidence_path: path, prompt_tokens: 600, completion_tokens: 12,
+    })])
     // the copy must exist before the pause deletes the original
-    expect(upload.mock.invocationCallOrder[0]).toBeLessThan(remove.mock.invocationCallOrder[0])
-    expect(remove).toHaveBeenCalledWith([path])
+    expect(storage.upload.mock.invocationCallOrder[0]).toBeLessThan(storage.remove.mock.invocationCallOrder[0])
+    expect(storage.remove).toHaveBeenCalledWith([path])
+    expect((await sql`select count(*)::int as n from user_photos`)[0].n).toBe(0)
+    expect(await pausedAt(u.id)).not.toBeNull()
     expect(notifyPaused).toHaveBeenCalledWith(100, 'fa')
   })
 
   it('still pauses when the evidence copy fails', async () => {
-    const { upsert, download } = mockDb({ users: [MAN, MAN, PAUSE_ROW], mains: [MAIN, MAIN] })
-    download.mockResolvedValueOnce({ data: null, error: { message: 'not found' } })
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { u, storage } = await setup()
+    storage.download.mockResolvedValueOnce({ data: null, error: { message: 'not found' } })
     fetchMock.mockResolvedValueOnce(deepSeekReply('{"approved":false,"reason":"no_face"}'))
 
-    await checkMainPhoto(nextUser())
-    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ evidence_path: null }), expect.anything())
+    await checkMainPhoto(u.id)
+    expect(await checks()).toEqual([expect.objectContaining({ evidence_path: null })])
     expect(notifyPaused).toHaveBeenCalled()
+    errorSpy.mockRestore()
   })
 
   it('does not pause when the main photo changed while DeepSeek was answering', async () => {
-    mockDb({ users: [MAN, MAN, PAUSE_ROW], mains: [MAIN, { id: 'photo-2', url: 'x' }] })
-    fetchMock.mockResolvedValueOnce(deepSeekReply('{"approved":false,"reason":"no_face"}'))
+    const { u, main } = await setup()
+    fetchMock.mockImplementationOnce(async () => {
+      // He swaps his main photo mid-review.
+      await sql`update user_photos set position = 1 where id = ${main.id}`
+      await createPhoto(u.id, 0)
+      return deepSeekReply('{"approved":false,"reason":"no_face"}')
+    })
 
-    expect(await checkMainPhoto(nextUser())).toEqual({ approved: false, reason: 'no_face' })
+    expect(await checkMainPhoto(u.id)).toEqual({ approved: false, reason: 'no_face' })
     expect(notifyPaused).not.toHaveBeenCalled()
+    expect(await pausedAt(u.id)).toBeNull()
   })
 
   it('does not pause when he switched gender while DeepSeek was answering', async () => {
-    mockDb({ users: [MAN, { ...MAN, gender: 'woman' }, PAUSE_ROW], mains: [MAIN, MAIN] })
-    fetchMock.mockResolvedValueOnce(deepSeekReply('{"approved":false,"reason":"no_face"}'))
+    const { u } = await setup()
+    fetchMock.mockImplementationOnce(async () => {
+      await sql`update users set gender = 'woman' where id = ${u.id}`
+      return deepSeekReply('{"approved":false,"reason":"no_face"}')
+    })
 
-    await checkMainPhoto(nextUser())
+    await checkMainPhoto(u.id)
     expect(notifyPaused).not.toHaveBeenCalled()
+    expect(await pausedAt(u.id)).toBeNull()
   })
 
   it('makes one DeepSeek call for concurrent triggers on the same photo', async () => {
-    const user = nextUser()
-    mockDb({ users: [MAN], mains: [MAIN, MAIN] })
+    const { u } = await setup()
     fetchMock.mockImplementation(async () => deepSeekReply('{"approved":true,"reason":null}'))
 
-    await Promise.all([checkMainPhoto(user), checkMainPhoto(user)])
+    await Promise.all([checkMainPhoto(u.id), checkMainPhoto(u.id)])
     expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(await checks()).toHaveLength(1)
+  })
+
+  it('ignores a duplicate check row (on conflict do nothing)', async () => {
+    const { u, main } = await setup()
+    fetchMock.mockImplementationOnce(async () => {
+      // Another process recorded this photo while we waited.
+      await insertRow('photo_ai_checks', { photo_id: main.id, user_id: u.id, approved: true })
+      return deepSeekReply('{"approved":true,"reason":null}')
+    })
+    await expect(checkMainPhoto(u.id)).resolves.toEqual({ approved: true, reason: null })
+    expect(await checks()).toHaveLength(1)
   })
 
   it('records and pauses nothing when DeepSeek fails', async () => {
-    const { upsert } = mockDb({ users: [MAN], mains: [MAIN] })
+    const { u } = await setup()
     fetchMock.mockRejectedValueOnce(new Error('network down'))
 
-    await expect(checkMainPhoto(nextUser())).rejects.toThrow('network down')
-    expect(upsert).not.toHaveBeenCalled()
+    await expect(checkMainPhoto(u.id)).rejects.toThrow('network down')
+    expect(await checks()).toEqual([])
     expect(notifyPaused).not.toHaveBeenCalled()
   })
 
   it('does not call DeepSeek when the review lookup errors', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'users') return chainable({ data: MAN, error: null })
-      if (table === 'user_photos') return chainable({ data: MAIN, error: null })
-      return chainable({ data: null, error: { message: 'relation "photo_ai_checks" does not exist' } })
-    })
+    const { u } = await setup()
 
-    await expect(checkMainPhoto(nextUser())).rejects.toThrow('photo_check_lookup_failed')
+    await withMissingTable('photo_ai_checks', () =>
+      expect(checkMainPhoto(u.id)).rejects.toThrow('photo_check_lookup_failed'))
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('throws photo_check_user_failed when the user read errors', async () => {
+    await expect(checkMainPhoto('user-1')).rejects.toThrow('photo_check_user_failed')
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
 
 describe('scheduleMainPhotoCheck', () => {
   const log = { warn: vi.fn(), info: vi.fn() } as any
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(async () => { await resetDb(); vi.clearAllMocks() })
   afterEach(() => vi.unstubAllEnvs())
 
-  it('is a no-op without DEEPSEEK_API_KEY or when switched off', () => {
+  it('is a no-op without DEEPSEEK_API_KEY or when switched off', async () => {
+    // A malformed id would make any DB read fail and log.warn — so silence proves no work ran.
     vi.stubEnv('DEEPSEEK_API_KEY', '')
-    scheduleMainPhotoCheck(nextUser(), log)
+    scheduleMainPhotoCheck('user-1', log)
     vi.stubEnv('DEEPSEEK_API_KEY', 'sk-test')
     vi.stubEnv('PHOTO_AI_CHECK', 'off')
-    scheduleMainPhotoCheck(nextUser(), log)
-    expect(db.from).not.toHaveBeenCalled()
+    scheduleMainPhotoCheck('user-2', log)
+    await new Promise((r) => setTimeout(r, 50))
+    expect(log.warn).not.toHaveBeenCalled()
   })
 
   it('logs instead of throwing when the check fails', async () => {
     vi.stubEnv('DEEPSEEK_API_KEY', 'sk-test')
-    vi.mocked(db.from).mockImplementation(() => { throw new Error('boom') })
-    scheduleMainPhotoCheck(nextUser(), log)
+    scheduleMainPhotoCheck('user-1', log) // malformed id → Postgres throws → logged
     await vi.waitFor(() => expect(log.warn).toHaveBeenCalled())
   })
 })

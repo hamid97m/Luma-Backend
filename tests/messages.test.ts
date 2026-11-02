@@ -1,564 +1,388 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/bot.js', () => ({ notifyMatch: vi.fn(), notifyNewMessage: vi.fn().mockResolvedValue(undefined) }))
 
 import { buildApp } from '../src/server.js'
-import { verifyInitData } from '../src/auth.js'
-import { db } from '../src/db.js'
 import { notifyNewMessage } from '../src/bot.js'
+import { AUTH, authAs } from './helpers/auth.js'
+import { resetDb, createUser, createMatch, createPhoto, insertRow, sql } from './helpers/db.js'
 
-const AUTH = { authorization: 'valid_init_data' }
-const USER_ID = 'user-uuid-1'
-const OTHER_ID = 'user-uuid-2'
 const OTHER_TELEGRAM_ID = 999
-const MATCH_ID = 'match-uuid-1'
-const RECENT = new Date().toISOString()
-const STALE = new Date(Date.now() - 20 * 60 * 1000).toISOString() // 20 minutes ago
+const MISSING_UUID = '00000000-0000-0000-0000-000000000000'
+const RECENT = () => new Date().toISOString()
+const STALE = () => new Date(Date.now() - 20 * 60 * 1000).toISOString() // 20 minutes ago
 
-function setupAuth() {
-  vi.mocked(verifyInitData).mockReturnValue({ id: 1, first_name: 'Ali' } as any)
-  vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({ eq: () => ({ single: () => ({ data: { id: USER_ID } }) }) }),
-  } as any)
+let app: Awaited<ReturnType<typeof buildApp>>
+let me: Record<string, any>
+let other: Record<string, any>
+let match: Record<string, any>
+
+/** Ali (sender, exempt from the free-chat gate: a woman seeking men) matched with Sara. */
+async function setup(otherOverrides: Record<string, unknown> = {}) {
+  await resetDb()
+  app = await buildApp()
+  me = await createUser({ name: 'Ali', gender: 'woman', looking_for: 'men', locale: 'fa', last_active: RECENT() })
+  other = await createUser({
+    name: 'Sara', telegram_id: OTHER_TELEGRAM_ID, locale: 'en', last_active: RECENT(), ...otherOverrides,
+  })
+  match = await createMatch(me.id, other.id)
+  authAs(me)
 }
 
-function mockMatchLookup(overrides: Partial<{
-  user1_id: string
-  user2_id: string
-  otherDeletedAt: string | null
-  otherLastActive: string | null
-  otherNotifiedOfflineAt: string | null
-  otherLocale: string | null
-  blocked: boolean
-}> = {}) {
-  const {
-    user1_id = USER_ID,
-    user2_id = OTHER_ID,
-    otherDeletedAt = null,
-    otherLastActive = RECENT,
-    otherNotifiedOfflineAt = null,
-    otherLocale = 'en',
-    blocked = false,
-  } = overrides
-  vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({
-      eq: () => ({
-        single: () => ({
-          data: {
-            id: MATCH_ID,
-            user1_id,
-            user2_id,
-            user1: {
-              id: user1_id, name: 'Ali', telegram_id: 1,
-              deleted_at: user1_id === USER_ID ? null : otherDeletedAt,
-              last_active: user1_id === USER_ID ? RECENT : otherLastActive,
-              notified_offline_at: user1_id === USER_ID ? null : otherNotifiedOfflineAt,
-              locale: user1_id === USER_ID ? 'fa' : otherLocale,
-            },
-            user2: {
-              id: user2_id, name: 'Sara', telegram_id: OTHER_TELEGRAM_ID,
-              deleted_at: user2_id === OTHER_ID ? otherDeletedAt : null,
-              last_active: user2_id === OTHER_ID ? otherLastActive : RECENT,
-              notified_offline_at: user2_id === OTHER_ID ? otherNotifiedOfflineAt : null,
-              locale: user2_id === OTHER_ID ? otherLocale : 'fa',
-            },
-          },
-        }),
-      }),
-    }),
-  } as any)
-  // getUsableMatch's block lookup (either direction) runs only when the match
-  // exists, the requester participates, and the other side isn't deleted — so
-  // only enqueue its mock in those cases, or an unconsumed mock would leak into
-  // the next test (vi.clearAllMocks does not drain the mockReturnValueOnce queue).
-  const reachesBlockCheck = (user1_id === USER_ID || user2_id === USER_ID) && !otherDeletedAt
-  if (reachesBlockCheck) {
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ or: () => ({ limit: () => ({ maybeSingle: () => ({ data: blocked ? { id: 'blk-1' } : null, error: null }) }) }) }),
-    } as any)
-  }
+const url = (matchId = match.id) => `/matches/${matchId}/messages`
+
+function message(row: Record<string, unknown>) {
+  return insertRow('messages', { match_id: match.id, sender_id: me.id, body: 'hi', ...row })
 }
 
-// POST reads the sender's cohort for the free-chat gate. A woman seeking only
-// men short-circuits as exempt (no premium_config / messages reads), so sending
-// is always allowed.
-function mockChatGateExempt() {
-  vi.mocked(db.from).mockReturnValueOnce({
-    select: () => ({ eq: () => ({ single: () => ({ data: { gender: 'woman', looking_for: 'men', premium_until: null }, error: null }) }) }),
-  } as any)
-}
+/** Let the fire-and-forget notification chain settle. */
+const settle = () => new Promise((r) => setTimeout(r, 100))
 
 describe('GET /matches/:matchId/messages', () => {
-  let app: Awaited<ReturnType<typeof buildApp>>
-  beforeEach(async () => { app = await buildApp() })
+  beforeEach(() => setup())
 
   it('returns 401 when unauthenticated', async () => {
-    const res = await app.inject({ method: 'GET', url: `/matches/${MATCH_ID}/messages` })
+    const res = await app.inject({ method: 'GET', url: url() })
     expect(res.statusCode).toBe(401)
   })
 
   it('returns 404 when the requester is not a participant in the match', async () => {
-    setupAuth()
-    mockMatchLookup({ user1_id: 'someone-else', user2_id: OTHER_ID })
+    const a = await createUser()
+    const theirs = await createMatch(a.id, other.id)
+    const res = await app.inject({ method: 'GET', url: url(theirs.id), headers: AUTH })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'match_not_found' })
+  })
 
-    const res = await app.inject({ method: 'GET', url: `/matches/${MATCH_ID}/messages`, headers: AUTH })
+  it('returns 404 when the match does not exist', async () => {
+    const res = await app.inject({ method: 'GET', url: url(MISSING_UUID), headers: AUTH })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'match_not_found' })
+  })
+
+  it('returns 404 (not 500) for a malformed match id', async () => {
+    const res = await app.inject({ method: 'GET', url: url('not-a-uuid'), headers: AUTH })
     expect(res.statusCode).toBe(404)
     expect(res.json()).toEqual({ error: 'match_not_found' })
   })
 
   it('returns 404 when the other participant has deleted their account', async () => {
-    setupAuth()
-    mockMatchLookup({ otherDeletedAt: '2026-07-30T00:00:00Z' })
-
-    const res = await app.inject({ method: 'GET', url: `/matches/${MATCH_ID}/messages`, headers: AUTH })
+    await sql`update users set deleted_at = '2026-07-30T00:00:00Z' where id = ${other.id}`
+    const res = await app.inject({ method: 'GET', url: url(), headers: AUTH })
     expect(res.statusCode).toBe(404)
   })
 
   it('returns 404 when one of the two users has blocked the other', async () => {
-    setupAuth()
-    mockMatchLookup({ blocked: true })
-
-    const res = await app.inject({ method: 'GET', url: `/matches/${MATCH_ID}/messages`, headers: AUTH })
+    await insertRow('blocks', { blocker_id: other.id, blocked_id: me.id })
+    const res = await app.inject({ method: 'GET', url: url(), headers: AUTH })
     expect(res.statusCode).toBe(404)
     expect(res.json()).toEqual({ error: 'match_not_found' })
   })
 
   it('returns the thread ordered oldest-first and marks the other side read', async () => {
-    setupAuth()
-    mockMatchLookup()
+    const txn = await insertRow('gift_transactions', {
+      buyer_id: other.id, recipient_id: me.id, context: 'chat', match_id: match.id,
+      gift_id: 'rose', gift_emoji: '🌹', gift_star_cost: 25, charged_stars: 30, status: 'sent',
+    })
+    // Inserted out of order on purpose — the route orders by created_at.
+    const m2 = await message({ sender_id: other.id, body: 'hi', created_at: '2026-01-01T10:01:00Z', read_at: '2026-01-01T10:05:00Z', edited_at: '2026-01-01T10:03:00Z' })
+    const m1 = await message({ sender_id: me.id, body: 'hey', created_at: '2026-01-01T10:00:00Z' })
+    await sql`update messages set reply_to_message_id = ${m1.id} where id = ${m2.id}`
+    const m0 = await message({ sender_id: other.id, body: 'My weirdest skill…', icebreaker_answer: 'Juggling', created_at: '2026-01-01T09:59:00Z', type: 'icebreaker' })
+    const m3 = await message({ sender_id: other.id, body: null, created_at: '2026-01-01T10:02:00Z', type: 'gift', gift_transaction_id: txn.id })
 
-    const messagesSelect = vi.fn(() => ({
-      eq: () => ({
-        order: () => ({
-          data: [
-            { id: 'm0', sender_id: OTHER_ID, body: 'My weirdest skill…', icebreaker_answer: 'Juggling', created_at: '2026-01-01T09:59:00Z', read_at: null, edited_at: null, reply_to_message_id: null, type: 'icebreaker', gift_transaction_id: null, gift: null },
-            { id: 'm1', sender_id: USER_ID, body: 'hey', created_at: '2026-01-01T10:00:00Z', read_at: null, edited_at: null, reply_to_message_id: null, type: 'text', gift_transaction_id: null, gift: null },
-            { id: 'm2', sender_id: OTHER_ID, body: 'hi', created_at: '2026-01-01T10:01:00Z', read_at: '2026-01-01T10:05:00Z', edited_at: '2026-01-01T10:03:00Z', reply_to_message_id: 'm1', type: 'text', gift_transaction_id: null, gift: null },
-            { id: 'm3', sender_id: OTHER_ID, body: null, created_at: '2026-01-01T10:02:00Z', read_at: null, edited_at: null, reply_to_message_id: null, type: 'gift', gift_transaction_id: 'txn-1', gift: { gift_emoji: '🌹', gift_star_cost: 25 } },
-          ],
-          error: null,
-        }),
-      }),
-    }))
-    vi.mocked(db.from).mockReturnValueOnce({ select: messagesSelect } as any)
-
-    const updateEq = vi.fn(() => ({ neq: () => ({ is: () => ({ error: null }) }) }))
-    vi.mocked(db.from).mockReturnValueOnce({
-      update: () => ({ eq: updateEq }),
-    } as any)
-
-    const res = await app.inject({ method: 'GET', url: `/matches/${MATCH_ID}/messages`, headers: AUTH })
+    const res = await app.inject({ method: 'GET', url: url(), headers: AUTH })
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({
       messages: [
-        { id: 'm0', senderId: OTHER_ID, body: 'My weirdest skill…', type: 'icebreaker', icebreakerAnswer: 'Juggling', gift: null, createdAt: '2026-01-01T09:59:00Z', readAt: null, editedAt: null, replyToMessageId: null },
-        { id: 'm1', senderId: USER_ID, body: 'hey', type: 'text', icebreakerAnswer: null, gift: null, createdAt: '2026-01-01T10:00:00Z', readAt: null, editedAt: null, replyToMessageId: null },
-        { id: 'm2', senderId: OTHER_ID, body: 'hi', type: 'text', icebreakerAnswer: null, gift: null, createdAt: '2026-01-01T10:01:00Z', readAt: '2026-01-01T10:05:00Z', editedAt: '2026-01-01T10:03:00Z', replyToMessageId: 'm1' },
-        { id: 'm3', senderId: OTHER_ID, body: null, type: 'gift', icebreakerAnswer: null, gift: { emoji: '🌹', starCost: 25 }, createdAt: '2026-01-01T10:02:00Z', readAt: null, editedAt: null, replyToMessageId: null },
+        { id: m0.id, senderId: other.id, body: 'My weirdest skill…', type: 'icebreaker', icebreakerAnswer: 'Juggling', gift: null, createdAt: '2026-01-01T09:59:00.000Z', readAt: null, editedAt: null, replyToMessageId: null },
+        { id: m1.id, senderId: me.id, body: 'hey', type: 'text', icebreakerAnswer: null, gift: null, createdAt: '2026-01-01T10:00:00.000Z', readAt: null, editedAt: null, replyToMessageId: null },
+        { id: m2.id, senderId: other.id, body: 'hi', type: 'text', icebreakerAnswer: null, gift: null, createdAt: '2026-01-01T10:01:00.000Z', readAt: '2026-01-01T10:05:00.000Z', editedAt: '2026-01-01T10:03:00.000Z', replyToMessageId: m1.id },
+        { id: m3.id, senderId: other.id, body: null, type: 'gift', icebreakerAnswer: null, gift: { emoji: '🌹', starCost: 25 }, createdAt: '2026-01-01T10:02:00.000Z', readAt: null, editedAt: null, replyToMessageId: null },
       ],
     })
-    expect((messagesSelect.mock.calls[0] as unknown[])[0]).toContain('icebreaker_answer')
-    const giftMessage = res.json().messages.find((m: any) => m.id === 'm3')
-    expect(giftMessage.type).toBe('gift')
-    expect(giftMessage.gift.emoji).toBe('🌹')
-    expect(updateEq).toHaveBeenCalledWith('match_id', MATCH_ID)
+
+    // Read receipt: the other side's unread rows are stamped; mine and the
+    // already-read one are untouched.
+    const rows = await sql`select id, read_at from messages`
+    const readAt = Object.fromEntries(rows.map((r) => [r.id, r.read_at]))
+    expect(readAt[m0.id]).not.toBeNull()
+    expect(readAt[m3.id]).not.toBeNull()
+    expect(readAt[m2.id]).toBe('2026-01-01T10:05:00.000Z')
+    expect(readAt[m1.id]).toBeNull()
+  })
+
+  it('returns gift: { emoji: null } when the transaction has no emoji', async () => {
+    const txn = await insertRow('gift_transactions', {
+      buyer_id: other.id, recipient_id: me.id, context: 'chat', gift_id: 'g', gift_star_cost: 15, charged_stars: 15,
+    })
+    await message({ sender_id: other.id, body: null, type: 'gift', gift_transaction_id: txn.id })
+    const res = await app.inject({ method: 'GET', url: url(), headers: AUTH })
+    expect(res.json().messages[0].gift).toEqual({ emoji: null, starCost: 15 })
   })
 })
 
 describe('POST /matches/:matchId/messages', () => {
-  let app: Awaited<ReturnType<typeof buildApp>>
-  beforeEach(async () => {
-    vi.clearAllMocks()
-    app = await buildApp()
-  })
+  const send = (payload: Record<string, unknown>, matchId?: string) =>
+    app.inject({ method: 'POST', url: url(matchId), headers: AUTH, payload })
 
-  it('returns 401 when unauthenticated', async () => {
-    const res = await app.inject({ method: 'POST', url: `/matches/${MATCH_ID}/messages`, payload: { body: 'hi' } })
-    expect(res.statusCode).toBe(401)
-  })
+  describe('validation and access', () => {
+    beforeEach(() => setup())
 
-  it('returns 400 for an empty/whitespace body', async () => {
-    setupAuth()
-    const res = await app.inject({
-      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: '   ' },
-    })
-    expect(res.statusCode).toBe(400)
-    expect(res.json()).toEqual({ error: 'empty_message' })
-  })
-
-  it('returns 400 for a body over 2000 characters', async () => {
-    setupAuth()
-    const res = await app.inject({
-      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'x'.repeat(2001) },
-    })
-    expect(res.statusCode).toBe(400)
-    expect(res.json()).toEqual({ error: 'message_too_long' })
-  })
-
-  it('returns 404 when the match is not usable', async () => {
-    setupAuth()
-    mockMatchLookup({ otherDeletedAt: '2026-07-30T00:00:00Z' })
-
-    const res = await app.inject({
-      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi' },
-    })
-    expect(res.statusCode).toBe(404)
-  })
-
-  it('returns 404 when the pair is blocked', async () => {
-    setupAuth()
-    mockMatchLookup({ blocked: true })
-
-    const res = await app.inject({
-      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi' },
-    })
-    expect(res.statusCode).toBe(404)
-    expect(res.json()).toEqual({ error: 'match_not_found' })
-  })
-
-  it('inserts and returns the trimmed message on success', async () => {
-    setupAuth()
-    mockMatchLookup()
-    mockChatGateExempt()
-
-    vi.mocked(db.from).mockReturnValueOnce({
-      insert: () => ({
-        select: () => ({
-          single: () => ({
-            data: { id: 'm3', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z', reply_to_message_id: null },
-            error: null,
-          }),
-        }),
-      }),
-    } as any)
-
-    const res = await app.inject({
-      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: '  hi  ' },
+    it('returns 401 when unauthenticated', async () => {
+      const res = await app.inject({ method: 'POST', url: url(), payload: { body: 'hi' } })
+      expect(res.statusCode).toBe(401)
     })
 
-    expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({
-      message: { id: 'm3', senderId: USER_ID, body: 'hi', createdAt: '2026-01-01T10:02:00Z', readAt: null, editedAt: null, replyToMessageId: null },
-    })
-  })
-
-  it('sends an offline notification and marks notified_offline_at when the recipient is inactive and not yet notified', async () => {
-    setupAuth()
-    mockMatchLookup({ otherLastActive: STALE, otherNotifiedOfflineAt: null })
-    mockChatGateExempt()
-
-    vi.mocked(db.from).mockReturnValueOnce({
-      insert: () => ({
-        select: () => ({
-          single: () => ({
-            data: { id: 'm4', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z', reply_to_message_id: null },
-            error: null,
-          }),
-        }),
-      }),
-    } as any)
-
-    // Sender's primary photo lookup — feeds the 4th arg of notifyNewMessage.
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ order: () => ({ limit: () => ({ maybeSingle: () => ({ data: { url: 'https://ali.jpg' } }) }) }) }) }),
-    } as any)
-
-    const markUpdateEq = vi.fn().mockResolvedValue({ error: null })
-    vi.mocked(db.from).mockReturnValueOnce({ update: () => ({ eq: markUpdateEq }) } as any)
-
-    const res = await app.inject({
-      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi' },
-    })
-    expect(res.statusCode).toBe(200)
-
-    // Flush the fire-and-forget notify chain before asserting on it.
-    await new Promise((resolve) => setImmediate(resolve))
-
-    // 5th arg is the matchId so the DM button deep-links straight to this chat;
-    // 6th is the RECIPIENT's locale (Sara's 'en', not the sender's 'fa').
-    expect(notifyNewMessage).toHaveBeenCalledWith(OTHER_TELEGRAM_ID, 'Ali', 'hi', 'https://ali.jpg', MATCH_ID, 'en')
-    expect(markUpdateEq).toHaveBeenCalledWith('id', OTHER_ID)
-  })
-
-  it('passes a null locale when the offline recipient has not picked a language yet', async () => {
-    setupAuth()
-    mockMatchLookup({ otherLastActive: STALE, otherNotifiedOfflineAt: null, otherLocale: null })
-    mockChatGateExempt()
-    vi.mocked(db.from).mockReturnValueOnce({
-      insert: () => ({ select: () => ({ single: () => ({
-        data: { id: 'm4', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z', reply_to_message_id: null }, error: null,
-      }) }) }),
-    } as any)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ order: () => ({ limit: () => ({ maybeSingle: () => ({ data: null }) }) }) }) }),
-    } as any)
-    vi.mocked(db.from).mockReturnValueOnce({ update: () => ({ eq: vi.fn().mockResolvedValue({ error: null }) }) } as any)
-
-    const res = await app.inject({ method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi' } })
-    expect(res.statusCode).toBe(200)
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(notifyNewMessage).toHaveBeenCalledWith(OTHER_TELEGRAM_ID, 'Ali', 'hi', null, MATCH_ID, null)
-  })
-
-  it('does not send an offline notification when the recipient is online', async () => {
-    setupAuth()
-    mockMatchLookup({ otherLastActive: RECENT, otherNotifiedOfflineAt: null })
-    mockChatGateExempt()
-
-    vi.mocked(db.from).mockReturnValueOnce({
-      insert: () => ({
-        select: () => ({
-          single: () => ({
-            data: { id: 'm5', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z', reply_to_message_id: null },
-            error: null,
-          }),
-        }),
-      }),
-    } as any)
-
-    const res = await app.inject({
-      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi' },
-    })
-    expect(res.statusCode).toBe(200)
-
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(notifyNewMessage).not.toHaveBeenCalled()
-  })
-
-  it('inserts a reply and returns replyToMessageId when the parent is in the same match', async () => {
-    setupAuth()
-    mockMatchLookup()
-    mockChatGateExempt()
-
-    // parent-message validation lookup: .select('id').eq().eq().maybeSingle()
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: () => ({ data: { id: 'parent-1' }, error: null }) }) }) }),
-    } as any)
-
-    vi.mocked(db.from).mockReturnValueOnce({
-      insert: () => ({
-        select: () => ({
-          single: () => ({
-            data: { id: 'm7', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z', reply_to_message_id: 'parent-1' },
-            error: null,
-          }),
-        }),
-      }),
-    } as any)
-
-    const res = await app.inject({
-      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi', replyToMessageId: 'parent-1' },
+    it('returns 400 for an empty/whitespace body', async () => {
+      const res = await send({ body: '   ' })
+      expect(res.statusCode).toBe(400)
+      expect(res.json()).toEqual({ error: 'empty_message' })
     })
 
-    expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({
-      message: { id: 'm7', senderId: USER_ID, body: 'hi', createdAt: '2026-01-01T10:02:00Z', readAt: null, editedAt: null, replyToMessageId: 'parent-1' },
+    it('returns 400 for a body over 2000 characters', async () => {
+      const res = await send({ body: 'x'.repeat(2001) })
+      expect(res.statusCode).toBe(400)
+      expect(res.json()).toEqual({ error: 'message_too_long' })
+    })
+
+    it('returns 404 when the match is not usable', async () => {
+      await sql`update users set deleted_at = '2026-07-30T00:00:00Z' where id = ${other.id}`
+      const res = await send({ body: 'hi' })
+      expect(res.statusCode).toBe(404)
+      expect(await sql`select id from messages`).toHaveLength(0)
+    })
+
+    it('returns 404 (not 500) for a malformed match id', async () => {
+      const res = await send({ body: 'hi' }, 'nope')
+      expect(res.statusCode).toBe(404)
+      expect(res.json()).toEqual({ error: 'match_not_found' })
+    })
+
+    it('returns 404 when the pair is blocked', async () => {
+      await insertRow('blocks', { blocker_id: me.id, blocked_id: other.id })
+      const res = await send({ body: 'hi' })
+      expect(res.statusCode).toBe(404)
+      expect(res.json()).toEqual({ error: 'match_not_found' })
+    })
+
+    it('inserts and returns the trimmed message on success', async () => {
+      const res = await send({ body: '  hi  ' })
+
+      expect(res.statusCode).toBe(200)
+      const [row] = await sql`select id, sender_id, body, created_at, type from messages`
+      expect(row).toMatchObject({ sender_id: me.id, body: 'hi', type: 'text' })
+      expect(res.json()).toEqual({
+        message: { id: row.id, senderId: me.id, body: 'hi', createdAt: row.created_at, readAt: null, editedAt: null, replyToMessageId: null },
+      })
+      // trg_bump_match_last_message_at moved the match's activity stamp.
+      const [m] = await sql`select last_message_at from matches where id = ${match.id}`
+      expect(m.last_message_at).toBe(row.created_at)
+    })
+
+    it('inserts a reply and returns replyToMessageId when the parent is in the same match', async () => {
+      const parent = await message({ sender_id: other.id, body: 'q' })
+      const res = await send({ body: 'hi', replyToMessageId: parent.id })
+
+      expect(res.statusCode).toBe(200)
+      expect(res.json().message).toMatchObject({ senderId: me.id, body: 'hi', replyToMessageId: parent.id })
+      const [row] = await sql`select reply_to_message_id from messages where id = ${res.json().message.id}`
+      expect(row.reply_to_message_id).toBe(parent.id)
+    })
+
+    it('returns 400 when the reply target does not belong to this match', async () => {
+      const elsewhere = await createUser()
+      const otherMatch = await createMatch(me.id, elsewhere.id)
+      const foreign = await insertRow('messages', { match_id: otherMatch.id, sender_id: elsewhere.id, body: 'x' })
+
+      for (const replyToMessageId of [foreign.id, MISSING_UUID, 'parent-x' /* malformed → same 400 */]) {
+        const res = await send({ body: 'hi', replyToMessageId })
+        expect(res.statusCode).toBe(400)
+        expect(res.json()).toEqual({ error: 'invalid_reply_target' })
+      }
+      expect(await sql`select id from messages where match_id = ${match.id}`).toHaveLength(0)
     })
   })
 
-  it('returns 400 when the reply target does not belong to this match', async () => {
-    setupAuth()
-    mockMatchLookup()
-    mockChatGateExempt()
+  describe('offline notification', () => {
+    it('sends an offline notification and marks notified_offline_at when the recipient is inactive and not yet notified', async () => {
+      await setup({ last_active: STALE(), notified_offline_at: null })
+      await createPhoto(me.id, 1, { url: 'https://ali-2.jpg' })
+      await createPhoto(me.id, 0, { url: 'https://ali.jpg' })
 
-    // parent lookup finds nothing (wrong match or nonexistent)
-    vi.mocked(db.from).mockReturnValueOnce({
-      select: () => ({ eq: () => ({ eq: () => ({ maybeSingle: () => ({ data: null, error: null }) }) }) }),
-    } as any)
+      const res = await send({ body: 'hi' })
+      expect(res.statusCode).toBe(200)
 
-    const res = await app.inject({
-      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi', replyToMessageId: 'parent-x' },
+      // 5th arg is the matchId so the DM button deep-links straight to this chat;
+      // 6th is the RECIPIENT's locale (Sara's 'en', not the sender's 'fa').
+      await vi.waitFor(() =>
+        expect(notifyNewMessage).toHaveBeenCalledWith(OTHER_TELEGRAM_ID, 'Ali', 'hi', 'https://ali.jpg', match.id, 'en'))
+      await vi.waitFor(async () => {
+        const [row] = await sql`select notified_offline_at from users where id = ${other.id}`
+        expect(row.notified_offline_at).not.toBeNull()
+      })
     })
 
-    expect(res.statusCode).toBe(400)
-    expect(res.json()).toEqual({ error: 'invalid_reply_target' })
-  })
-
-  it('does not notify again when the recipient was already notified during this offline stretch', async () => {
-    setupAuth()
-    mockMatchLookup({ otherLastActive: STALE, otherNotifiedOfflineAt: STALE })
-    mockChatGateExempt()
-
-    vi.mocked(db.from).mockReturnValueOnce({
-      insert: () => ({
-        select: () => ({
-          single: () => ({
-            data: { id: 'm6', sender_id: USER_ID, body: 'hi', created_at: '2026-01-01T10:02:00Z', reply_to_message_id: null },
-            error: null,
-          }),
-        }),
-      }),
-    } as any)
-
-    const res = await app.inject({
-      method: 'POST', url: `/matches/${MATCH_ID}/messages`, headers: AUTH, payload: { body: 'hi' },
+    it('passes a null locale and null photo when the offline recipient has no language and the sender no photo', async () => {
+      await setup({ last_active: STALE(), notified_offline_at: null, locale: null })
+      const res = await send({ body: 'hi' })
+      expect(res.statusCode).toBe(200)
+      await vi.waitFor(() =>
+        expect(notifyNewMessage).toHaveBeenCalledWith(OTHER_TELEGRAM_ID, 'Ali', 'hi', null, match.id, null))
     })
-    expect(res.statusCode).toBe(200)
 
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(notifyNewMessage).not.toHaveBeenCalled()
+    it('does not stamp notified_offline_at when the bot send fails', async () => {
+      await setup({ last_active: STALE(), notified_offline_at: null })
+      vi.mocked(notifyNewMessage).mockRejectedValueOnce(new Error('bot blocked'))
+      const res = await send({ body: 'hi' })
+      expect(res.statusCode).toBe(200)
+      await settle()
+      const [row] = await sql`select notified_offline_at from users where id = ${other.id}`
+      expect(row.notified_offline_at).toBeNull()
+    })
+
+    it('does not send an offline notification when the recipient is online', async () => {
+      await setup({ last_active: RECENT(), notified_offline_at: null })
+      const res = await send({ body: 'hi' })
+      expect(res.statusCode).toBe(200)
+      await settle()
+      expect(notifyNewMessage).not.toHaveBeenCalled()
+    })
+
+    it('does not notify again when the recipient was already notified during this offline stretch', async () => {
+      const stamp = STALE()
+      await setup({ last_active: STALE(), notified_offline_at: stamp })
+      const res = await send({ body: 'hi' })
+      expect(res.statusCode).toBe(200)
+      await settle()
+      expect(notifyNewMessage).not.toHaveBeenCalled()
+      const [row] = await sql`select notified_offline_at from users where id = ${other.id}`
+      expect(row.notified_offline_at).toBe(new Date(stamp).toISOString())
+    })
   })
 })
 
 describe('PATCH /matches/:matchId/messages/:messageId', () => {
-  const MSG_ID = 'msg-uuid-1'
-  let app: Awaited<ReturnType<typeof buildApp>>
-  beforeEach(async () => {
-    vi.clearAllMocks()
-    app = await buildApp()
-  })
+  beforeEach(() => setup())
 
-  function mockUpdateChain(result: { data: any; error: any }) {
-    const eqCalls: Array<[string, string]> = []
-    const chain: any = {
-      eq: (col: string, val: string) => { eqCalls.push([col, val]); return chain },
-      select: () => ({ maybeSingle: () => result }),
-    }
-    const update = vi.fn(() => chain)
-    vi.mocked(db.from).mockReturnValueOnce({ update } as any)
-    return { eqCalls, update }
-  }
+  const patch = (messageId: string, payload: Record<string, unknown>, headers: Record<string, string> = AUTH) =>
+    app.inject({ method: 'PATCH', url: `${url()}/${messageId}`, headers, payload })
 
   it('returns 401 when unauthenticated', async () => {
-    const res = await app.inject({
-      method: 'PATCH', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, payload: { body: 'hi' },
-    })
+    const res = await patch(MISSING_UUID, { body: 'hi' }, {})
     expect(res.statusCode).toBe(401)
   })
 
   it('returns 400 for an empty/whitespace body', async () => {
-    setupAuth()
-    const res = await app.inject({
-      method: 'PATCH', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH, payload: { body: '   ' },
-    })
+    const res = await patch(MISSING_UUID, { body: '   ' })
     expect(res.statusCode).toBe(400)
     expect(res.json()).toEqual({ error: 'empty_message' })
   })
 
   it('returns 400 for a body over 2000 characters', async () => {
-    setupAuth()
-    const res = await app.inject({
-      method: 'PATCH', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH, payload: { body: 'x'.repeat(2001) },
-    })
+    const res = await patch(MISSING_UUID, { body: 'x'.repeat(2001) })
     expect(res.statusCode).toBe(400)
     expect(res.json()).toEqual({ error: 'message_too_long' })
   })
 
   it('returns 404 when the match is not usable', async () => {
-    setupAuth()
-    mockMatchLookup({ otherDeletedAt: '2026-07-30T00:00:00Z' })
-    const res = await app.inject({
-      method: 'PATCH', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH, payload: { body: 'hi' },
-    })
+    const msg = await message({ body: 'old' })
+    await sql`update users set deleted_at = '2026-07-30T00:00:00Z' where id = ${other.id}`
+    const res = await patch(msg.id, { body: 'hi' })
     expect(res.statusCode).toBe(404)
     expect(res.json()).toEqual({ error: 'match_not_found' })
   })
 
   it('returns 404 when no row matches (missing message or not the sender)', async () => {
-    setupAuth()
-    mockMatchLookup()
-    mockUpdateChain({ data: null, error: null })
-    const res = await app.inject({
-      method: 'PATCH', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH, payload: { body: 'hi' },
-    })
-    expect(res.statusCode).toBe(404)
-    expect(res.json()).toEqual({ error: 'message_not_found' })
+    const theirs = await message({ sender_id: other.id, body: 'theirs' })
+    for (const id of [MISSING_UUID, theirs.id, 'msg-uuid-1' /* malformed */]) {
+      const res = await patch(id, { body: 'hi' })
+      expect(res.statusCode).toBe(404)
+      expect(res.json()).toEqual({ error: 'message_not_found' })
+    }
+    const [row] = await sql`select body, edited_at from messages where id = ${theirs.id}`
+    expect(row).toEqual({ body: 'theirs', edited_at: null })
   })
 
-  it('updates the body, stamps edited_at, and scopes the update to id+match+sender+text type', async () => {
-    setupAuth()
-    mockMatchLookup()
-    const { eqCalls, update } = mockUpdateChain({
-      data: {
-        id: MSG_ID, sender_id: USER_ID, body: 'fixed', created_at: '2026-01-01T10:00:00Z',
-        read_at: '2026-01-01T10:05:00Z', edited_at: '2026-01-02T09:00:00Z', reply_to_message_id: 'parent-9',
-      },
-      error: null,
+  it('returns 404 for a message in another match even when I sent it', async () => {
+    const x = await createUser()
+    const otherMatch = await createMatch(me.id, x.id)
+    const mine = await insertRow('messages', { match_id: otherMatch.id, sender_id: me.id, body: 'elsewhere' })
+    const res = await patch(mine.id, { body: 'hi' })
+    expect(res.statusCode).toBe(404)
+  })
+
+  it('updates the body, stamps edited_at, and leaves read_at alone', async () => {
+    const parent = await message({ sender_id: other.id, body: 'q' })
+    const msg = await message({
+      body: 'typo', created_at: '2026-01-01T10:00:00Z', read_at: '2026-01-01T10:05:00Z', reply_to_message_id: parent.id,
     })
 
-    const res = await app.inject({
-      method: 'PATCH', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH, payload: { body: '  fixed  ' },
-    })
+    const res = await patch(msg.id, { body: '  fixed  ' })
 
     expect(res.statusCode).toBe(200)
+    const [row] = await sql`select body, read_at, edited_at from messages where id = ${msg.id}`
+    expect(row.body).toBe('fixed')
+    expect(row.read_at).toBe('2026-01-01T10:05:00.000Z')
+    expect(row.edited_at).not.toBeNull()
     expect(res.json()).toEqual({
       message: {
-        id: MSG_ID, senderId: USER_ID, body: 'fixed', createdAt: '2026-01-01T10:00:00Z',
-        readAt: '2026-01-01T10:05:00Z', editedAt: '2026-01-02T09:00:00Z', replyToMessageId: 'parent-9',
+        id: msg.id, senderId: me.id, body: 'fixed', createdAt: '2026-01-01T10:00:00.000Z',
+        readAt: '2026-01-01T10:05:00.000Z', editedAt: row.edited_at, replyToMessageId: parent.id,
       },
     })
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({ body: 'fixed', edited_at: expect.any(String) }))
-    // read_at must never be part of the update payload
-    expect(update.mock.calls[0][0]).not.toHaveProperty('read_at')
-    expect(eqCalls).toEqual([['id', MSG_ID], ['match_id', MATCH_ID], ['sender_id', USER_ID], ['type', 'text']])
     expect(notifyNewMessage).not.toHaveBeenCalled()
   })
 
   it('returns 404 for an icebreaker (or gift) message — only text is editable', async () => {
-    setupAuth()
-    mockMatchLookup()
-    const { eqCalls } = mockUpdateChain({ data: null, error: null })
-    const res = await app.inject({
-      method: 'PATCH', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH, payload: { body: 'hi' },
-    })
+    const ice = await message({ body: 'Q?', type: 'icebreaker' })
+    const res = await patch(ice.id, { body: 'hi' })
     expect(res.statusCode).toBe(404)
     expect(res.json()).toEqual({ error: 'message_not_found' })
-    expect(eqCalls).toContainEqual(['type', 'text'])
+    const [row] = await sql`select body from messages where id = ${ice.id}`
+    expect(row.body).toBe('Q?')
   })
 })
 
 describe('DELETE /matches/:matchId/messages/:messageId', () => {
-  const MSG_ID = 'msg-uuid-1'
-  let app: Awaited<ReturnType<typeof buildApp>>
-  beforeEach(async () => {
-    vi.clearAllMocks()
-    app = await buildApp()
-  })
+  beforeEach(() => setup())
 
-  function mockDeleteChain(result: { data: any; error: any }) {
-    const eqCalls: Array<[string, string]> = []
-    const chain: any = {
-      eq: (col: string, val: string) => { eqCalls.push([col, val]); return chain },
-      select: () => result,
-    }
-    vi.mocked(db.from).mockReturnValueOnce({ delete: () => chain } as any)
-    return { eqCalls }
-  }
+  const del = (messageId: string, headers: Record<string, string> = AUTH) =>
+    app.inject({ method: 'DELETE', url: `${url()}/${messageId}`, headers })
 
   it('returns 401 when unauthenticated', async () => {
-    const res = await app.inject({ method: 'DELETE', url: `/matches/${MATCH_ID}/messages/${MSG_ID}` })
+    const res = await del(MISSING_UUID, {})
     expect(res.statusCode).toBe(401)
   })
 
   it('returns 404 when the match is not usable', async () => {
-    setupAuth()
-    mockMatchLookup({ otherDeletedAt: '2026-07-30T00:00:00Z' })
-    const res = await app.inject({ method: 'DELETE', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH })
+    const msg = await message({})
+    await sql`update users set deleted_at = '2026-07-30T00:00:00Z' where id = ${other.id}`
+    const res = await del(msg.id)
     expect(res.statusCode).toBe(404)
     expect(res.json()).toEqual({ error: 'match_not_found' })
   })
 
   it('returns 404 when nothing was deleted (missing message or not the sender)', async () => {
-    setupAuth()
-    mockMatchLookup()
-    mockDeleteChain({ data: [], error: null })
-    const res = await app.inject({ method: 'DELETE', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH })
-    expect(res.statusCode).toBe(404)
-    expect(res.json()).toEqual({ error: 'message_not_found' })
+    const theirs = await message({ sender_id: other.id })
+    for (const id of [MISSING_UUID, theirs.id, 'msg-uuid-1' /* malformed */]) {
+      const res = await del(id)
+      expect(res.statusCode).toBe(404)
+      expect(res.json()).toEqual({ error: 'message_not_found' })
+    }
+    expect(await sql`select id from messages`).toHaveLength(1)
   })
 
   it('hard-deletes the row scoped to id+match+sender and returns ok', async () => {
-    setupAuth()
-    mockMatchLookup()
-    const { eqCalls } = mockDeleteChain({ data: [{ id: MSG_ID }], error: null })
+    const mine = await message({})
+    const keep = await message({ body: 'keep' })
 
-    const res = await app.inject({ method: 'DELETE', url: `/matches/${MATCH_ID}/messages/${MSG_ID}`, headers: AUTH })
+    const res = await del(mine.id)
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ ok: true })
-    expect(eqCalls).toEqual([['id', MSG_ID], ['match_id', MATCH_ID], ['sender_id', USER_ID]])
+    expect((await sql`select id from messages`).map((r) => r.id)).toEqual([keep.id])
   })
 })

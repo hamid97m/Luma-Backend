@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../../db.js'
+import { sql } from '../../db.js'
 import { getBotStarBalance } from '../../bot.js'
 
 const PAGE_SIZE = 25
@@ -11,13 +11,15 @@ function isNonNegativeInt(n: unknown): n is number {
 }
 
 export async function adminGiftsRoutes(app: FastifyInstance) {
-  app.get('/gifts/config', async (_req, reply) => {
-    const { data, error } = await db
-      .from('gift_config')
-      .select('markup_percent, low_balance_threshold')
-      .eq('id', true)
-      .single()
-    if (error || !data) return reply.status(500).send({ error: 'config_fetch_failed' })
+  app.get('/gifts/config', async (req, reply) => {
+    let data: { markup_percent: number; low_balance_threshold: number } | undefined
+    try {
+      ;[data] = await sql<{ markup_percent: number; low_balance_threshold: number }[]>`
+        select markup_percent, low_balance_threshold from gift_config where id = true`
+    } catch (err) {
+      req.log.error({ err }, 'gift config fetch failed')
+    }
+    if (!data) return reply.status(500).send({ error: 'config_fetch_failed' })
 
     return { markupPercent: data.markup_percent, lowBalanceThreshold: data.low_balance_threshold }
   })
@@ -41,23 +43,23 @@ export async function adminGiftsRoutes(app: FastifyInstance) {
 
     update.updated_at = new Date().toISOString()
 
-    const { data, error } = await db
-      .from('gift_config')
-      .update(update)
-      .eq('id', true)
-      .select('markup_percent, low_balance_threshold')
-      .single()
-    if (error || !data) return reply.status(500).send({ error: 'config_update_failed' })
+    let data: { markup_percent: number; low_balance_threshold: number } | undefined
+    try {
+      ;[data] = await sql<{ markup_percent: number; low_balance_threshold: number }[]>`
+        update gift_config set ${sql(update)} where id = true
+        returning markup_percent, low_balance_threshold`
+    } catch (err) {
+      req.log.error({ err }, 'gift config update failed')
+    }
+    if (!data) return reply.status(500).send({ error: 'config_update_failed' })
 
     return { markupPercent: data.markup_percent, lowBalanceThreshold: data.low_balance_threshold }
   })
 
   app.get('/gifts/balance', async (req, reply) => {
-    const { data: config } = await db
-      .from('gift_config')
-      .select('low_balance_threshold')
-      .eq('id', true)
-      .single()
+    // A failed read was tolerated before (threshold falls back to 0).
+    const [config] = await sql<{ low_balance_threshold: number }[]>`
+      select low_balance_threshold from gift_config where id = true`.catch(() => [])
     const lowBalanceThreshold = config?.low_balance_threshold ?? 0
 
     try {
@@ -74,27 +76,39 @@ export async function adminGiftsRoutes(app: FastifyInstance) {
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const from = (pageNum - 1) * PAGE_SIZE
 
-    let q = db
-      .from('gift_transactions')
-      .select(
-        'id, gift_emoji, gift_star_cost, charged_stars, markup_stars, status, context, intro_status, created_at, ' +
-        'buyer:users!gift_transactions_buyer_id_fkey(name), recipient:users!gift_transactions_recipient_id_fkey(name)',
-        { count: 'exact' },
-      )
-    if (status && TX_STATUSES.includes(status)) q = q.eq('status', status)
-    if (context && TX_CONTEXTS.includes(context)) q = q.eq('context', context)
+    // Unknown filter values (incl. 'all') are ignored, not rejected.
+    const where = sql`
+      where true
+      ${status && TX_STATUSES.includes(status) ? sql`and t.status = ${status}` : sql``}
+      ${context && TX_CONTEXTS.includes(context) ? sql`and t.context = ${context}` : sql``}`
 
-    const { data, count, error } = await q
-      .order('created_at', { ascending: false })
-      .range(from, from + PAGE_SIZE - 1)
-    if (error) return reply.status(500).send({ error: 'transactions_fetch_failed' })
+    let data: Record<string, any>[]
+    let total: number
+    try {
+      const [rows, [{ count }]] = await Promise.all([
+        sql`
+          select t.id, t.gift_emoji, t.gift_star_cost, t.charged_stars, t.markup_stars, t.status,
+            t.context, t.intro_status, t.created_at, b.name as buyer_name, r.name as recipient_name
+          from gift_transactions t
+          left join users b on b.id = t.buyer_id
+          left join users r on r.id = t.recipient_id
+          ${where}
+          order by t.created_at desc
+          limit ${PAGE_SIZE} offset ${from}`,
+        sql<{ count: number }[]>`select count(*)::int as count from gift_transactions t ${where}`,
+      ])
+      data = rows
+      total = count
+    } catch (err) {
+      req.log.error({ err }, 'gift transactions fetch failed')
+      return reply.status(500).send({ error: 'transactions_fetch_failed' })
+    }
 
-    const total = count ?? 0
     return {
-      items: (data ?? []).map((r: any) => ({
+      items: data.map((r: any) => ({
         id: r.id,
-        buyerName: r.buyer?.name ?? '',
-        recipientName: r.recipient?.name ?? '',
+        buyerName: r.buyer_name ?? '',
+        recipientName: r.recipient_name ?? '',
         emoji: r.gift_emoji,
         giftStarCost: r.gift_star_cost,
         chargedStars: r.charged_stars,

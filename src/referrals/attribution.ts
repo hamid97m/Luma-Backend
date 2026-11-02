@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { db } from '../db.js'
+import { sql } from '../db.js'
 
 const CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789'
 const CODE_LENGTH = 8
@@ -20,16 +20,19 @@ export function parseRefCode(payload: string | null | undefined): string | null 
 
 export async function ensureReferralCode(userId: string): Promise<string | null> {
   try {
-    const { data: user, error } = await db
-      .from('users').select('referral_code').eq('id', userId).single()
-    if (error) return null
+    const [user] = await sql<{ referral_code: string | null }[]>`
+      select referral_code from users where id = ${userId}`
+    if (!user) return null
     if (user.referral_code) return user.referral_code
     // Retry on unique collision (astronomically rare with 31^8 codes).
     for (let attempt = 0; attempt < 3; attempt++) {
       const code = generateReferralCode()
-      const { error: updateError } = await db
-        .from('users').update({ referral_code: code }).eq('id', userId)
-      if (!updateError) return code
+      try {
+        await sql`update users set referral_code = ${code} where id = ${userId}`
+        return code
+      } catch {
+        // 23505 on users_referral_code_key (or any write error): try another code
+      }
     }
     return null
   } catch {
@@ -39,10 +42,10 @@ export async function ensureReferralCode(userId: string): Promise<string | null>
 
 export async function stashReferralClaim(telegramId: number, code: string): Promise<void> {
   try {
-    await db.from('referral_claims').upsert(
-      { telegram_id: telegramId, code, created_at: new Date().toISOString() },
-      { onConflict: 'telegram_id' }
-    )
+    await sql`
+      insert into referral_claims (telegram_id, code, created_at)
+      values (${telegramId}, ${code}, ${new Date().toISOString()})
+      on conflict (telegram_id) do update set code = excluded.code, created_at = excluded.created_at`
   } catch {
     // best-effort; a lost claim only loses attribution, never breaks /start
   }
@@ -57,18 +60,19 @@ export async function captureReferralAttribution(
     let code = parseRefCode(startParam)
     let fromClaim = false
     if (!code) {
-      const { data: claim } = await db
-        .from('referral_claims').select('code').eq('telegram_id', telegramId).maybeSingle()
+      const [claim] = await sql<{ code: string }[]>`
+        select code from referral_claims where telegram_id = ${telegramId}`
       code = claim?.code ?? null
       fromClaim = code !== null
     }
     if (!code) return
-    const { data: referrer } = await db
-      .from('users').select('id').eq('referral_code', code).maybeSingle()
+    const [referrer] = await sql<{ id: string }[]>`select id from users where referral_code = ${code}`
     if (!referrer || referrer.id === newUserId) return
-    await db.from('users').update({ referred_by: referrer.id }).eq('id', newUserId)
-    await db.from('referrals').insert({ referrer_id: referrer.id, referred_id: newUserId })
-    if (fromClaim) await db.from('referral_claims').delete().eq('telegram_id', telegramId)
+    // Each write was independent and its error ignored (supabase-js never threw): a failed
+    // step must not skip the ones after it.
+    await sql`update users set referred_by = ${referrer.id} where id = ${newUserId}`.catch(() => {})
+    await sql`insert into referrals (referrer_id, referred_id) values (${referrer.id}, ${newUserId})`.catch(() => {})
+    if (fromClaim) await sql`delete from referral_claims where telegram_id = ${telegramId}`.catch(() => {})
   } catch {
     // attribution must never break signup
   }

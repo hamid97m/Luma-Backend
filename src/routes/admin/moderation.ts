@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../../db.js'
+import { sql } from '../../db.js'
 
 function isNonNegativeInt(n: unknown): n is number {
   return typeof n === 'number' && Number.isInteger(n) && n >= 0
@@ -7,12 +7,12 @@ function isNonNegativeInt(n: unknown): n is number {
 
 export async function adminModerationRoutes(app: FastifyInstance) {
   app.get('/moderation/config', async (_req, reply) => {
-    const { data, error } = await db
-      .from('moderation_config')
-      .select('photo_report_threshold')
-      .eq('id', true)
-      .single()
-    if (error || !data) return reply.status(500).send({ error: 'config_fetch_failed' })
+    let data: { photo_report_threshold: number } | undefined
+    try {
+      ;[data] = await sql<{ photo_report_threshold: number }[]>`
+        select photo_report_threshold from moderation_config where id = true`
+    } catch { /* falls through to config_fetch_failed */ }
+    if (!data) return reply.status(500).send({ error: 'config_fetch_failed' })
     return { photoReportThreshold: data.photo_report_threshold }
   })
 
@@ -31,13 +31,13 @@ export async function adminModerationRoutes(app: FastifyInstance) {
     }
     update.updated_at = new Date().toISOString()
 
-    const { data, error } = await db
-      .from('moderation_config')
-      .update(update)
-      .eq('id', true)
-      .select('photo_report_threshold')
-      .single()
-    if (error || !data) return reply.status(500).send({ error: 'config_update_failed' })
+    let data: { photo_report_threshold: number } | undefined
+    try {
+      ;[data] = await sql<{ photo_report_threshold: number }[]>`
+        update moderation_config set ${sql(update)} where id = true
+        returning photo_report_threshold`
+    } catch { /* falls through to config_update_failed */ }
+    if (!data) return reply.status(500).send({ error: 'config_update_failed' })
     return { photoReportThreshold: data.photo_report_threshold }
   })
 }

@@ -1,66 +1,92 @@
-import { describe, it, expect } from 'vitest'
-import { chainable } from './admin-helpers.js'
-import { applyAudienceFilters } from '../src/messaging/audience.js'
+import { describe, it, expect, beforeEach } from 'vitest'
+import { countAudience, fetchAudience } from '../src/messaging/audience.js'
+import { resetDb, createUser, sql } from './helpers/db.js'
 
-const NOW = 1_000_000_000_000 // fixed clock
+const NOW = Date.parse('2026-09-01T00:00:00.000Z') // fixed clock
 const DAY = 86_400_000
+const iso = (ms: number) => new Date(ms).toISOString()
 
-function applyWithLog(filters: any) {
-  const log: Array<{ method: string; args: unknown[] }> = []
-  applyAudienceFilters(chainable(null, log), filters, NOW)
-  return log
+/** Names of the users the filters select, sorted. */
+async function audience(filters: any): Promise<string[]> {
+  const targets = await fetchAudience(filters, NOW)
+  const count = await countAudience(filters, NOW)
+  expect(count).toBe(targets.length) // preview count and send list always agree
+  if (!targets.length) return []
+  const rows = await sql<{ name: string }[]>`select name from users where id = any(${targets.map((t) => t.id)}::uuid[])`
+  return rows.map((r) => r.name).sort()
 }
 
-function has(log: Array<{ method: string; args: unknown[] }>, method: string, argMatch: (a: unknown[]) => boolean) {
-  return log.some((e) => e.method === method && argMatch(e.args))
-}
+describe('broadcast audience', () => {
+  beforeEach(resetDb)
 
-describe('applyAudienceFilters', () => {
-  it('always applies baseline guards (no seed, not banned/deleted, opted-in, real telegram id)', () => {
-    const log = applyWithLog({})
-    expect(has(log, 'eq', (a) => a[0] === 'is_seed' && a[1] === false)).toBe(true)
-    expect(has(log, 'is', (a) => a[0] === 'banned_at' && a[1] === null)).toBe(true)
-    expect(has(log, 'is', (a) => a[0] === 'deleted_at' && a[1] === null)).toBe(true)
-    expect(has(log, 'gt', (a) => a[0] === 'telegram_id' && a[1] === 0)).toBe(true)
-    // opted-in = null OR true (only explicit false is excluded)
-    expect(has(log, 'or', (a) => a[0] === 'allows_write_to_pm.is.null,allows_write_to_pm.eq.true')).toBe(true)
+  it('always applies baseline guards (no seed, not banned/deleted, opted-in, real telegram id)', async () => {
+    await createUser({ name: 'ok' })
+    await createUser({ name: 'optedInNull', allows_write_to_pm: null })
+    await createUser({ name: 'optedInTrue', allows_write_to_pm: true })
+    await createUser({ name: 'optedOut', allows_write_to_pm: false })
+    await createUser({ name: 'seed', is_seed: true })
+    await createUser({ name: 'banned', banned_at: iso(NOW) })
+    await createUser({ name: 'deleted', deleted_at: iso(NOW) })
+    await createUser({ name: 'fakeTg', telegram_id: -5 })
+    expect(await audience({})).toEqual(['ok', 'optedInNull', 'optedInTrue'])
   })
 
-  it('maps genders and lookingFor to .in()', () => {
-    const log = applyWithLog({ genders: ['female'], lookingFor: ['male', 'female'] })
-    expect(has(log, 'in', (a) => a[0] === 'gender' && Array.isArray(a[1]) && (a[1] as string[]).includes('female'))).toBe(true)
-    expect(has(log, 'in', (a) => a[0] === 'looking_for' && (a[1] as string[]).length === 2)).toBe(true)
+  it('returns id + telegram_id per target', async () => {
+    const u = await createUser({ name: 'ok' })
+    expect(await fetchAudience({}, NOW)).toEqual([{ id: u.id, telegram_id: u.telegram_id }])
   })
 
-  it('maps activeWithinDays to a lower-bound on last_active', () => {
-    const log = applyWithLog({ activity: { activeWithinDays: 7 } })
-    expect(has(log, 'gte', (a) => a[0] === 'last_active' && a[1] === new Date(NOW - 7 * DAY).toISOString())).toBe(true)
+  it('filters by genders and lookingFor', async () => {
+    await createUser({ name: 'w-men', gender: 'woman', looking_for: 'men' })
+    await createUser({ name: 'w-both', gender: 'woman', looking_for: 'both' })
+    await createUser({ name: 'm-women', gender: 'man', looking_for: 'women' })
+    expect(await audience({ genders: ['woman'] })).toEqual(['w-both', 'w-men'])
+    expect(await audience({ genders: ['woman'], lookingFor: ['men', 'women'] })).toEqual(['w-men'])
   })
 
-  it('maps inactiveOverDays to an upper-bound on last_active', () => {
-    const log = applyWithLog({ activity: { inactiveOverDays: 30 } })
-    expect(has(log, 'lt', (a) => a[0] === 'last_active' && a[1] === new Date(NOW - 30 * DAY).toISOString())).toBe(true)
+  it('an unknown enum value matches nobody instead of erroring', async () => {
+    await createUser({ name: 'm' })
+    expect(await audience({ genders: ['female'] })).toEqual([])
   })
 
-  it('premium=premium requires premium_until in the future', () => {
-    const log = applyWithLog({ premium: 'premium' })
-    expect(has(log, 'gt', (a) => a[0] === 'premium_until' && a[1] === new Date(NOW).toISOString())).toBe(true)
+  it('activeWithinDays is a lower bound on last_active; inactiveOverDays an upper bound', async () => {
+    await createUser({ name: 'fresh', last_active: iso(NOW - 1 * DAY) })
+    await createUser({ name: 'week', last_active: iso(NOW - 10 * DAY) })
+    await createUser({ name: 'stale', last_active: iso(NOW - 40 * DAY) })
+    expect(await audience({ activity: { activeWithinDays: 7 } })).toEqual(['fresh'])
+    expect(await audience({ activity: { inactiveOverDays: 30 } })).toEqual(['stale'])
   })
 
-  it('premium=free requires premium_until null or past', () => {
-    const log = applyWithLog({ premium: 'free' })
-    expect(has(log, 'or', (a) => a[0] === `premium_until.is.null,premium_until.lte.${new Date(NOW).toISOString()}`)).toBe(true)
+  it('premium=premium requires premium_until in the future; free = null or past', async () => {
+    await createUser({ name: 'premium', premium_until: iso(NOW + DAY) })
+    await createUser({ name: 'expired', premium_until: iso(NOW - DAY) })
+    await createUser({ name: 'never' })
+    expect(await audience({ premium: 'premium' })).toEqual(['premium'])
+    expect(await audience({ premium: 'free' })).toEqual(['expired', 'never'])
   })
 
-  it('maps locales to .in(locale) and omits it when absent', () => {
-    expect(has(applyWithLog({ locales: ['en', 'ar'] }), 'in', (a) => a[0] === 'locale' && JSON.stringify(a[1]) === '["en","ar"]')).toBe(true)
-    expect(has(applyWithLog({}), 'in', (a) => a[0] === 'locale')).toBe(false)
-    expect(has(applyWithLog({ locales: [] }), 'in', (a) => a[0] === 'locale')).toBe(false)
+  it('filters by locale and ignores the filter when absent/empty', async () => {
+    await createUser({ name: 'en', locale: 'en' })
+    await createUser({ name: 'ar', locale: 'ar' })
+    await createUser({ name: 'none' })
+    expect(await audience({ locales: ['en', 'ar'] })).toEqual(['ar', 'en'])
+    expect(await audience({})).toEqual(['ar', 'en', 'none'])
+    expect(await audience({ locales: [] })).toEqual(['ar', 'en', 'none'])
   })
 
-  it('drops unknown locale values but fails closed when none remain', () => {
-    expect(has(applyWithLog({ locales: ['de', 'en'] }), 'in', (a) => a[0] === 'locale' && JSON.stringify(a[1]) === '["en"]')).toBe(true)
+  it('drops unknown locale values but fails closed when none remain', async () => {
+    await createUser({ name: 'en', locale: 'en' })
+    await createUser({ name: 'fa', locale: 'fa' })
+    expect(await audience({ locales: ['de', 'en'] })).toEqual(['en'])
     // An all-invalid list must match nobody — never silently broadcast to everyone.
-    expect(has(applyWithLog({ locales: ['de'] }), 'in', (a) => a[0] === 'locale' && JSON.stringify(a[1]) === '[]')).toBe(true)
+    expect(await audience({ locales: ['de'] })).toEqual([])
+  })
+
+  it('returns more than 1000 targets in one call (no PostgREST page cap)', async () => {
+      await sql`
+      insert into users (telegram_id, name, age, gender, looking_for, account_status)
+      select 5000000 + g, 'bulk', 28, 'man', 'women', 'active' from generate_series(1, 1005) g`
+    expect(await fetchAudience({}, NOW)).toHaveLength(1005)
+    expect(await countAudience({}, NOW)).toBe(1005)
   })
 })

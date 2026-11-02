@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../db.js'
+import { sql, isUuid } from '../db.js'
 import { maybeAutoPauseForReports, maybeWarnFakePhoto } from '../moderation/autoPause.js'
 
 const REASONS = ['fake', 'inappropriate', 'harassment', 'spam', 'other'] as const
@@ -24,51 +24,60 @@ export async function reportsRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'invalid_report' })
     }
 
-    const { data: reported } = await db
-      .from('users')
-      .select('id, deleted_at')
-      .eq('id', reportedUserId)
-      .single()
+    // Malformed id or failed read → "not found", as PostgREST answered.
+    let reported: { id: string; deleted_at: string | null } | undefined
+    if (isUuid(reportedUserId)) {
+      try {
+        ;[reported] = await sql<{ id: string; deleted_at: string | null }[]>`
+          select id, deleted_at from users where id = ${reportedUserId}`
+      } catch {
+        reported = undefined
+      }
+    }
     if (!reported || reported.deleted_at) return reply.status(404).send({ error: 'user_not_found' })
 
     // Only trust matchId if the reporter actually participates in that match.
     let matchId: string | null = null
-    if (context === 'chat' && rawMatchId) {
-      const { data: match } = await db
-        .from('matches')
-        .select('user1_id, user2_id')
-        .eq('id', rawMatchId)
-        .single()
-      if (match && (match.user1_id === req.userId || match.user2_id === req.userId)) {
-        matchId = rawMatchId
+    if (context === 'chat' && rawMatchId && isUuid(rawMatchId)) {
+      try {
+        const [match] = await sql<{ user1_id: string; user2_id: string }[]>`
+          select user1_id, user2_id from matches where id = ${rawMatchId}`
+        if (match && (match.user1_id === req.userId || match.user2_id === req.userId)) {
+          matchId = rawMatchId
+        }
+      } catch {
+        // unreadable match → store null, as before
       }
     }
 
-    const { error: insertErr } = await db.from('reports').insert({
-      reporter_id: req.userId,
-      reported_id: reportedUserId,
-      context,
-      reason,
-      note,
-      match_id: matchId,
-      status: 'pending',
-    })
-    // 23505 = unique_violation on the pending index → already reported, treat as success.
-    if (insertErr && insertErr.code !== '23505') {
-      req.log.error({ err: insertErr }, 'report insert failed')
-      return reply.status(500).send({ error: 'report_failed' })
+    let duplicate = false
+    try {
+      await sql`
+        insert into reports (reporter_id, reported_id, context, reason, note, match_id, status)
+        values (${req.userId}, ${reportedUserId}, ${context}, ${reason}, ${note}, ${matchId}, 'pending')`
+    } catch (err) {
+      // 23505 = unique_violation on the pending index → already reported, treat as success.
+      if ((err as { code?: string })?.code !== '23505') {
+        req.log.error({ err }, 'report insert failed')
+        return reply.status(500).send({ error: 'report_failed' })
+      }
+      duplicate = true
     }
 
-    // Auto-hide: reporter blocks reported. Ignore duplicates.
-    await db.from('blocks').upsert(
-      { blocker_id: req.userId, blocked_id: reportedUserId },
-      { onConflict: 'blocker_id,blocked_id', ignoreDuplicates: true }
-    )
+    // Auto-hide: reporter blocks reported. Ignore duplicates; a failure here
+    // never failed the report.
+    try {
+      await sql`
+        insert into blocks (blocker_id, blocked_id) values (${req.userId}, ${reportedUserId})
+        on conflict (blocker_id, blocked_id) do nothing`
+    } catch (err) {
+      req.log.warn({ err }, 'report auto-block failed')
+    }
 
     // A new fake-photo report may be the one that crosses half the pause
     // threshold. Best-effort — never fails the report. Skipped on a duplicate
     // pending report so the warning is not sent again.
-    if (!insertErr && reason === 'fake') {
+    if (!duplicate && reason === 'fake') {
       await maybeWarnFakePhoto(reportedUserId)
     }
 

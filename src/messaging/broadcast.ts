@@ -1,3 +1,4 @@
+import { sql } from '../db.js'
 import type { BroadcastTarget } from './audience.js'
 
 export interface RunBroadcastOptions {
@@ -76,9 +77,6 @@ export async function runBroadcast(
 }
 
 /** Mark broadcasts left 'running' by a prior process restart as 'interrupted'. */
-export async function cleanupInterruptedBroadcasts(dbClient: any, nowIso = new Date().toISOString()): Promise<void> {
-  await dbClient
-    .from('broadcasts')
-    .update({ status: 'interrupted', finished_at: nowIso })
-    .eq('status', 'running')
+export async function cleanupInterruptedBroadcasts(nowIso = new Date().toISOString()): Promise<void> {
+  await sql`update broadcasts set status = 'interrupted', finished_at = ${nowIso} where status = 'running'`
 }

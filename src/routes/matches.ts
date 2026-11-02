@@ -1,95 +1,103 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../db.js'
+import { sql } from '../db.js'
 import { chatGateContext, matchPremiumRequired } from '../premium/chatLimit.js'
 import { isPremiumActive } from '../premium/service.js'
+
+interface MatchListRow {
+  id: string
+  created_at: string
+  other_id: string
+  name: string
+  telegram_id: number
+  username: string | null
+  age: number | null
+  bio: string | null
+  icebreaker_prompt: string | null
+  icebreaker_answer: string | null
+  premium_until: string | null
+  photos: string[]
+  lm_id: string | null
+  lm_body: string | null
+  lm_created_at: string | null
+  lm_sender_id: string | null
+  lm_type: string | null
+  unread_count: number
+}
 
 export async function matchesRoutes(app: FastifyInstance) {
   app.get('/matches', async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+    const me = req.userId
 
-    const { data: blockRows } = await db
-      .from('blocks')
-      .select('blocker_id, blocked_id')
-      .or(`blocker_id.eq.${req.userId},blocked_id.eq.${req.userId}`)
-    const blockedIds = new Set(
-      (blockRows ?? []).map((b: { blocker_id: string; blocked_id: string }) =>
-        b.blocker_id === req.userId ? b.blocked_id : b.blocker_id
-      )
-    )
-
-    const { data: rows } = await db
-      .from('matches')
-      .select(`
-        id, created_at, user1_id, user2_id,
-        user1:users!matches_user1_id_fkey(id, name, telegram_id, username, deleted_at, age, bio, icebreaker_prompt, icebreaker_answer, gender, premium_until),
-        user2:users!matches_user2_id_fkey(id, name, telegram_id, username, deleted_at, age, bio, icebreaker_prompt, icebreaker_answer, gender, premium_until)
-      `)
-      .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
-      .order('created_at', { ascending: false })
-
-    const activeRows = (rows ?? []).filter((row: any) => {
-      const other = row.user1_id === req.userId ? row.user2 : row.user1
-      return !other.deleted_at && !blockedIds.has(other.id)
-    })
+    // One round trip: the viewer's matches with the other participant, their
+    // photos, the latest message and the unread count. User-facing, so matches
+    // whose counterpart deleted their account or is blocked (either direction)
+    // are hidden. A read failure degrades to an empty list, as before.
+    let rows: MatchListRow[] = []
+    try {
+      rows = await sql<MatchListRow[]>`
+        select
+          m.id, m.created_at,
+          o.id as other_id, o.name, o.telegram_id, o.username, o.age, o.bio,
+          o.icebreaker_prompt, o.icebreaker_answer, o.premium_until,
+          coalesce(
+            (select array_agg(p.url order by p.position) from user_photos p where p.user_id = o.id),
+            '{}'
+          ) as photos,
+          lm.id as lm_id, lm.body as lm_body, lm.created_at as lm_created_at, lm.sender_id as lm_sender_id, lm.type as lm_type,
+          (select count(*)::int from messages u
+             where u.match_id = m.id and u.sender_id <> ${me} and u.read_at is null) as unread_count
+        from matches m
+        join users o on o.id = case when m.user1_id = ${me} then m.user2_id else m.user1_id end
+        left join lateral (
+          select x.id, x.body, x.created_at, x.sender_id, x.type
+          from messages x where x.match_id = m.id
+          order by x.created_at desc
+          limit 1
+        ) lm on true
+        where (m.user1_id = ${me} or m.user2_id = ${me})
+          and o.deleted_at is null
+          and not exists (
+            select 1 from blocks b
+            where (b.blocker_id = ${me} and b.blocked_id = o.id)
+               or (b.blocker_id = o.id and b.blocked_id = ${me})
+          )
+        order by m.created_at desc`
+    } catch (err) {
+      req.log.error({ err }, 'matches list read failed')
+      rows = []
+    }
 
     // One read backs the per-match premium flag (free men and women whose
     // preference includes women get 2 free chats). Non-gated viewers — and an empty list — get an empty context
     // → every match free, and we skip the read when there's nothing to flag.
-    const gateCtx = activeRows.length
-      ? await chatGateContext(req.userId)
+    const gateCtx = rows.length
+      ? await chatGateContext(me)
       : { gated: false, chattedMatchIds: new Set<string>() }
 
-    const matches = await Promise.all(
-      activeRows.map(async (row: any) => {
-        const other = row.user1_id === req.userId ? row.user2 : row.user1
-
-        const { data: photos } = await db
-          .from('user_photos')
-          .select('url, position')
-          .eq('user_id', other.id)
-          .order('position', { ascending: true })
-
-        const { data: lastMsgRows } = await db
-          .from('messages')
-          .select('body, created_at, sender_id, type')
-          .eq('match_id', row.id)
-          .order('created_at', { ascending: false })
-          .limit(1)
-
-        const { count: unreadCount } = await db
-          .from('messages')
-          .select('id', { count: 'exact', head: true })
-          .eq('match_id', row.id)
-          .neq('sender_id', req.userId)
-          .is('read_at', null)
-
-        const lastMsg = lastMsgRows?.[0]
-
-        return {
-          id: row.id,
-          matchedAt: row.created_at,
-          user: {
-            id: other.id,
-            name: other.name,
-            telegramId: other.telegram_id,
-            username: other.username,
-            age: other.age ?? null,
-            bio: other.bio ?? null,
-            icebreakerPrompt: other.icebreaker_prompt ?? null,
-            icebreakerAnswer: other.icebreaker_answer ?? null,
-            photos: (photos ?? []).map((p: { url: string }) => p.url),
-            premium: isPremiumActive(other.premium_until ?? null),
-          },
-          lastMessage: lastMsg
-            ? { body: lastMsg.body, createdAt: lastMsg.created_at, senderId: lastMsg.sender_id, type: lastMsg.type ?? 'text' }
-            : null,
-          unreadCount: unreadCount ?? 0,
-          // Locks the composer client-side for a 4th+ new conversation; the
-          // POST /messages 403 is the real enforcement.
-          premiumRequired: matchPremiumRequired(gateCtx, row.id),
-        }
-      })
-    )
+    const matches = rows.map((row) => ({
+      id: row.id,
+      matchedAt: row.created_at,
+      user: {
+        id: row.other_id,
+        name: row.name,
+        telegramId: row.telegram_id,
+        username: row.username,
+        age: row.age ?? null,
+        bio: row.bio ?? null,
+        icebreakerPrompt: row.icebreaker_prompt ?? null,
+        icebreakerAnswer: row.icebreaker_answer ?? null,
+        photos: row.photos ?? [],
+        premium: isPremiumActive(row.premium_until ?? null),
+      },
+      lastMessage: row.lm_id
+        ? { body: row.lm_body, createdAt: row.lm_created_at, senderId: row.lm_sender_id, type: row.lm_type ?? 'text' }
+        : null,
+      unreadCount: row.unread_count ?? 0,
+      // Locks the composer client-side for a 4th+ new conversation; the
+      // POST /messages 403 is the real enforcement.
+      premiumRequired: matchPremiumRequired(gateCtx, row.id),
+    }))
 
     // Newest activity first: a chat bumps to the top when a message lands;
     // matches with no messages yet sort by when the match was made.
@@ -104,43 +112,29 @@ export async function matchesRoutes(app: FastifyInstance) {
 
   app.get('/matches/unread-count', async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+    const me = req.userId
 
-    const { data: blockRows } = await db
-      .from('blocks')
-      .select('blocker_id, blocked_id')
-      .or(`blocker_id.eq.${req.userId},blocked_id.eq.${req.userId}`)
-    const blockedIds = new Set(
-      (blockRows ?? []).map((b: { blocker_id: string; blocked_id: string }) =>
-        b.blocker_id === req.userId ? b.blocked_id : b.blocker_id
-      )
-    )
-
-    const { data: rows } = await db
-      .from('matches')
-      .select(`
-        id, user1_id, user2_id,
-        user1:users!matches_user1_id_fkey(deleted_at),
-        user2:users!matches_user2_id_fkey(deleted_at)
-      `)
-      .or(`user1_id.eq.${req.userId},user2_id.eq.${req.userId}`)
-
-    const activeMatchIds = (rows ?? [])
-      .filter((row: any) => {
-        const other = row.user1_id === req.userId ? row.user2 : row.user1
-        const otherId = row.user1_id === req.userId ? row.user2_id : row.user1_id
-        return !other.deleted_at && !blockedIds.has(otherId)
-      })
-      .map((row: any) => row.id)
-
-    if (activeMatchIds.length === 0) return { count: 0 }
-
-    const { count } = await db
-      .from('messages')
-      .select('id', { count: 'exact', head: true })
-      .in('match_id', activeMatchIds)
-      .neq('sender_id', req.userId)
-      .is('read_at', null)
-
-    return { count: count ?? 0 }
+    // Unread messages from the other side, across matches whose counterpart is
+    // neither deleted nor blocked (either direction). Failure → 0, as before.
+    try {
+      const [{ count }] = await sql<{ count: number }[]>`
+        select count(*)::int as count
+        from messages msg
+        join matches m on m.id = msg.match_id
+        join users o on o.id = case when m.user1_id = ${me} then m.user2_id else m.user1_id end
+        where (m.user1_id = ${me} or m.user2_id = ${me})
+          and o.deleted_at is null
+          and not exists (
+            select 1 from blocks b
+            where (b.blocker_id = ${me} and b.blocked_id = o.id)
+               or (b.blocker_id = o.id and b.blocked_id = ${me})
+          )
+          and msg.sender_id <> ${me}
+          and msg.read_at is null`
+      return { count: count ?? 0 }
+    } catch (err) {
+      req.log.error({ err }, 'unread count read failed')
+      return { count: 0 }
+    }
   })
 }

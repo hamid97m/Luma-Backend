@@ -1,11 +1,50 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../db.js'
+import { sql, db, isUuid } from '../db.js'
 import { randomUUID } from 'crypto'
 import { fetchTelegramProfilePhoto } from '../bot.js'
 import { maybeQualifyReferral } from '../referrals/rewards.js'
 import { scheduleMainPhotoCheck } from '../moderation/photoAiCheck.js'
 
 const MAX_PHOTOS = 6
+
+type PhotoSlot = { id: string; position: number }
+
+/** The user's photos, lowest position first. A failed read counts as no photos
+ *  (the supabase-js code ignored this error). */
+async function photoSlots(userId: string): Promise<PhotoSlot[]> {
+  try {
+    return await sql<PhotoSlot[]>`
+      select id, position from user_photos where user_id = ${userId} order by position asc`
+  } catch {
+    return []
+  }
+}
+
+/** A fresh photo lifts a photo-review pause. The `paused_at is not null` guard
+ *  makes this a no-op for the common (non-paused) upload; when it does match,
+ *  resolve the pending reports that triggered the pause so the count resets and
+ *  the user is not immediately re-paused. Best-effort, like the original. */
+async function liftPhotoReviewPause(userId: string): Promise<void> {
+  try {
+    const [resumed] = await sql`
+      update users set paused_at = null
+      where id = ${userId} and paused_at is not null
+      returning id`
+    if (resumed) {
+      await sql`
+        update reports set status = 'resolved_reuploaded', resolved_at = ${new Date().toISOString()}
+        where reported_id = ${userId} and status = 'pending'`
+    }
+  } catch (err) {
+    console.error('[photos] lifting photo-review pause failed:', (err as Error)?.message ?? err)
+  }
+}
+
+/** Ignored-error delete (the supabase-js code never checked it). */
+async function deletePhotoRow(photoId: string): Promise<void> {
+  await sql`delete from user_photos where id = ${photoId}`.catch((err) =>
+    console.error('[photos] delete failed:', (err as Error)?.message ?? err))
+}
 
 export async function photosRoutes(app: FastifyInstance) {
   // Get a signed upload URL
@@ -16,16 +55,13 @@ export async function photosRoutes(app: FastifyInstance) {
 
     const { contentType, replacePhotoId } = req.body as { contentType: string; replacePhotoId?: string }
 
-    const { data: existing } = await db
-      .from('user_photos')
-      .select('id')
-      .eq('user_id', req.userId)
+    const existing = await photoSlots(req.userId)
 
     // A replace keeps the net photo count unchanged (the old photo is removed as
     // the new one lands), so the cap must not block it — even at MAX_PHOTOS.
-    const isReplace = !!replacePhotoId && (existing?.some((p) => p.id === replacePhotoId) ?? false)
+    const isReplace = !!replacePhotoId && existing.some((p) => p.id === replacePhotoId)
 
-    if (!req.isPaused && !isReplace && (existing?.length ?? 0) >= MAX_PHOTOS) {
+    if (!req.isPaused && !isReplace && existing.length >= MAX_PHOTOS) {
       return reply.status(400).send({ error: 'max_photos_reached' })
     }
 
@@ -49,34 +85,36 @@ export async function photosRoutes(app: FastifyInstance) {
 
     const { photoId } = req.params as { photoId: string }
 
-    const { data: photo, error } = await db
-      .from('user_photos')
-      .select('id, position')
-      .eq('id', photoId)
-      .eq('user_id', req.userId)
-      .single()
+    // A malformed id can't be a photo — 404 instead of a Postgres cast error.
+    const [photo] = isUuid(photoId)
+      ? await sql<PhotoSlot[]>`
+          select id, position from user_photos where id = ${photoId} and user_id = ${req.userId}`
+      : []
 
-    if (error || !photo) return reply.status(404).send({ error: 'photo_not_found' })
+    if (!photo) return reply.status(404).send({ error: 'photo_not_found' })
 
     // Don't allow deleting the last remaining photo — a profile must keep at least one.
-    const { count } = await db
-      .from('user_photos')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', req.userId)
+    // (A failed count read as 0 → 409, as before.)
+    const count = await sql<{ count: number }[]>`
+      select count(*)::int as count from user_photos where user_id = ${req.userId}`
+      .then(([r]) => r.count, () => 0)
 
-    if ((count ?? 0) <= 1) return reply.status(409).send({ error: 'last_photo' })
+    if (count <= 1) return reply.status(409).send({ error: 'last_photo' })
 
-    await db.from('user_photos').delete().eq('id', photoId)
+    await deletePhotoRow(photoId)
     await db.storage.from('profile-photos').remove([`${req.userId}/${photoId}`])
 
-    const { data: remaining } = await db
-      .from('user_photos')
-      .select('id, position')
-      .eq('user_id', req.userId)
-      .gt('position', photo.position)
+    // Shift the photos after the freed slot down by one, lowest first so each
+    // move lands on the slot just vacated (UNIQUE(user_id, position)). Errors
+    // were ignored before and still are.
+    const remaining = await sql<PhotoSlot[]>`
+      select id, position from user_photos
+      where user_id = ${req.userId} and position > ${photo.position}
+      order by position asc`.catch(() => [] as PhotoSlot[])
 
-    for (const p of remaining ?? []) {
-      await db.from('user_photos').update({ position: p.position - 1 }).eq('id', p.id)
+    for (const p of remaining) {
+      await sql`update user_photos set position = ${p.position - 1} where id = ${p.id}`
+        .catch((err) => console.error('[photos] compact failed:', (err as Error)?.message ?? err))
     }
 
     if (photo.position === 0) scheduleMainPhotoCheck(req.userId, req.log)
@@ -92,31 +130,22 @@ export async function photosRoutes(app: FastifyInstance) {
 
     // UNIQUE(user_id, position) means writing final positions directly can collide
     // with whatever photo currently holds that slot, so stage through negative
-    // positions first to clear all slots before assigning the real ones.
-    // A failed pass can leave a photo at a negative position, which sorts first
-    // and shows as main, so the check runs on every exit.
+    // positions first to clear all slots before assigning the real ones. Both
+    // passes run in one transaction, so a failure (e.g. a malformed id) rolls
+    // back instead of leaving a photo at a negative position. The main-photo
+    // check still runs on every exit.
     try {
-      for (let i = 0; i < order.length; i++) {
-        const { error } = await db
-          .from('user_photos')
-          .update({ position: -(i + 1) })
-          .eq('id', order[i])
-          .eq('user_id', req.userId)
-
-        if (error) return reply.status(500).send({ error: 'reorder_failed' })
-      }
-
-      for (let i = 0; i < order.length; i++) {
-        const { error } = await db
-          .from('user_photos')
-          .update({ position: i })
-          .eq('id', order[i])
-          .eq('user_id', req.userId)
-
-        if (error) return reply.status(500).send({ error: 'reorder_failed' })
-      }
-
+      await sql.begin(async (tx) => {
+        for (let i = 0; i < order.length; i++) {
+          await tx`update user_photos set position = ${-(i + 1)} where id = ${order[i]} and user_id = ${req.userId!}`
+        }
+        for (let i = 0; i < order.length; i++) {
+          await tx`update user_photos set position = ${i} where id = ${order[i]} and user_id = ${req.userId!}`
+        }
+      })
       return { ok: true }
+    } catch {
+      return reply.status(500).send({ error: 'reorder_failed' })
     } finally {
       scheduleMainPhotoCheck(req.userId, req.log)
     }
@@ -132,18 +161,14 @@ export async function photosRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'invalid_photo_id' })
     }
 
-    const { data: existing } = await db
-      .from('user_photos')
-      .select('id, position')
-      .eq('user_id', req.userId)
-      .order('position', { ascending: true })
+    const existing = await photoSlots(req.userId)
 
-    const count = existing?.length ?? 0
+    const count = existing.length
     if (count >= MAX_PHOTOS && !req.isPaused) {
       return reply.status(400).send({ error: 'max_photos_reached' })
     }
 
-    const alreadyExists = existing?.some((p) => p.id === photoId)
+    const alreadyExists = existing.some((p) => p.id === photoId)
     if (alreadyExists) {
       return reply.status(409).send({ error: 'photo_already_confirmed' })
     }
@@ -152,9 +177,9 @@ export async function photosRoutes(app: FastifyInstance) {
     // (lowest position) so the fresh photo can land — and lift the pause —
     // instead of hitting max_photos_reached. Reuse the freed slot's position.
     let nextPosition = count
-    if (count >= MAX_PHOTOS && req.isPaused && existing && existing.length > 0) {
+    if (count >= MAX_PHOTOS && req.isPaused && existing.length > 0) {
       const oldest = existing[0]
-      await db.from('user_photos').delete().eq('id', oldest.id)
+      await deletePhotoRow(oldest.id)
       await db.storage.from('profile-photos').remove([`${req.userId}/${oldest.id}`])
       nextPosition = oldest.position
     }
@@ -162,33 +187,15 @@ export async function photosRoutes(app: FastifyInstance) {
     const path = `${req.userId}/${photoId}`
     const publicUrl = db.storage.from('profile-photos').getPublicUrl(path).data.publicUrl
 
-    const { error: insertErr } = await db.from('user_photos').insert({
-      id: photoId,
-      user_id: req.userId,
-      url: publicUrl,
-      position: nextPosition,
-    })
-
-    if (insertErr) return reply.status(500).send({ error: 'photo_confirm_failed' })
-
-    // A fresh photo lifts a photo-review pause. The .not() guard makes this a
-    // no-op for the common (non-paused) upload; when it does match, resolve the
-    // pending reports that triggered the pause so the count resets and the user
-    // is not immediately re-paused.
-    const { data: resumed } = await db
-      .from('users')
-      .update({ paused_at: null })
-      .eq('id', req.userId)
-      .not('paused_at', 'is', null)
-      .select('id')
-      .maybeSingle()
-    if (resumed) {
-      await db
-        .from('reports')
-        .update({ status: 'resolved_reuploaded', resolved_at: new Date().toISOString() })
-        .eq('reported_id', req.userId)
-        .eq('status', 'pending')
+    try {
+      await sql`
+        insert into user_photos (id, user_id, url, position)
+        values (${photoId}, ${req.userId}, ${publicUrl}, ${nextPosition})`
+    } catch {
+      return reply.status(500).send({ error: 'photo_confirm_failed' })
     }
+
+    await liftPhotoReviewPause(req.userId)
 
     await maybeQualifyReferral(req.userId)
     if (nextPosition === 0) scheduleMainPhotoCheck(req.userId, req.log)
@@ -210,47 +217,32 @@ export async function photosRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'invalid_photo_id' })
     }
 
-    const { data: oldPhoto, error } = await db
-      .from('user_photos')
-      .select('id, position')
-      .eq('id', photoId)
-      .eq('user_id', req.userId)
-      .single()
+    // A malformed id can't be a photo — 404 instead of a Postgres cast error.
+    const [oldPhoto] = isUuid(photoId)
+      ? await sql<PhotoSlot[]>`
+          select id, position from user_photos where id = ${photoId} and user_id = ${req.userId}`
+      : []
 
-    if (error || !oldPhoto) return reply.status(404).send({ error: 'photo_not_found' })
+    if (!oldPhoto) return reply.status(404).send({ error: 'photo_not_found' })
 
     // Remove the old row + storage object, then insert the fresh one at the freed
     // position (mirrors the paused-eviction path in /confirm).
-    await db.from('user_photos').delete().eq('id', photoId)
+    await deletePhotoRow(photoId)
     await db.storage.from('profile-photos').remove([`${req.userId}/${photoId}`])
 
     const path = `${req.userId}/${newPhotoId}`
     const publicUrl = db.storage.from('profile-photos').getPublicUrl(path).data.publicUrl
 
-    const { error: insertErr } = await db.from('user_photos').insert({
-      id: newPhotoId,
-      user_id: req.userId,
-      url: publicUrl,
-      position: oldPhoto.position,
-    })
-
-    if (insertErr) return reply.status(500).send({ error: 'photo_replace_failed' })
+    try {
+      await sql`
+        insert into user_photos (id, user_id, url, position)
+        values (${newPhotoId}, ${req.userId}, ${publicUrl}, ${oldPhoto.position})`
+    } catch {
+      return reply.status(500).send({ error: 'photo_replace_failed' })
+    }
 
     // A fresh photo lifts a photo-review pause (same as /confirm).
-    const { data: resumed } = await db
-      .from('users')
-      .update({ paused_at: null })
-      .eq('id', req.userId)
-      .not('paused_at', 'is', null)
-      .select('id')
-      .maybeSingle()
-    if (resumed) {
-      await db
-        .from('reports')
-        .update({ status: 'resolved_reuploaded', resolved_at: new Date().toISOString() })
-        .eq('reported_id', req.userId)
-        .eq('status', 'pending')
-    }
+    await liftPhotoReviewPause(req.userId)
 
     if (oldPhoto.position === 0) scheduleMainPhotoCheck(req.userId, req.log)
 
@@ -266,23 +258,16 @@ export async function photosRoutes(app: FastifyInstance) {
   }, async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
-    const { data: u } = await db
-      .from('users')
-      .select('telegram_id')
-      .eq('id', req.userId)
-      .single()
+    const [u] = await sql<{ telegram_id: number }[]>`
+      select telegram_id from users where id = ${req.userId}`.catch(() => [])
 
     if (!u || !u.telegram_id || u.telegram_id <= 0) {
       return reply.status(409).send({ error: 'no_telegram_photo' })
     }
 
-    const { data: existing } = await db
-      .from('user_photos')
-      .select('id, position')
-      .eq('user_id', req.userId)
-      .order('position', { ascending: true })
+    const existing = await photoSlots(req.userId)
 
-    const count = existing?.length ?? 0
+    const count = existing.length
     if (count >= MAX_PHOTOS && !req.isPaused) {
       return reply.status(400).send({ error: 'max_photos_reached' })
     }
@@ -296,9 +281,9 @@ export async function photosRoutes(app: FastifyInstance) {
     // (lowest position) so the fresh photo can land — and lift the pause —
     // instead of hitting max_photos_reached. Reuse the freed slot's position.
     let nextPosition = count
-    if (count >= MAX_PHOTOS && req.isPaused && existing && existing.length > 0) {
+    if (count >= MAX_PHOTOS && req.isPaused && existing.length > 0) {
       const oldest = existing[0]
-      await db.from('user_photos').delete().eq('id', oldest.id)
+      await deletePhotoRow(oldest.id)
       await db.storage.from('profile-photos').remove([`${req.userId}/${oldest.id}`])
       nextPosition = oldest.position
     }
@@ -313,30 +298,16 @@ export async function photosRoutes(app: FastifyInstance) {
 
     const publicUrl = db.storage.from('profile-photos').getPublicUrl(path).data.publicUrl
 
-    const { error: insertErr } = await db.from('user_photos').insert({
-      id: photoId,
-      user_id: req.userId,
-      url: publicUrl,
-      position: nextPosition,
-    })
-
-    if (insertErr) return reply.status(500).send({ error: 'photo_confirm_failed' })
+    try {
+      await sql`
+        insert into user_photos (id, user_id, url, position)
+        values (${photoId}, ${req.userId}, ${publicUrl}, ${nextPosition})`
+    } catch {
+      return reply.status(500).send({ error: 'photo_confirm_failed' })
+    }
 
     // A fresh photo lifts a photo-review pause (same as /confirm).
-    const { data: resumed } = await db
-      .from('users')
-      .update({ paused_at: null })
-      .eq('id', req.userId)
-      .not('paused_at', 'is', null)
-      .select('id')
-      .maybeSingle()
-    if (resumed) {
-      await db
-        .from('reports')
-        .update({ status: 'resolved_reuploaded', resolved_at: new Date().toISOString() })
-        .eq('reported_id', req.userId)
-        .eq('status', 'pending')
-    }
+    await liftPhotoReviewPause(req.userId)
 
     await maybeQualifyReferral(req.userId)
     if (nextPosition === 0) scheduleMainPhotoCheck(req.userId, req.log)

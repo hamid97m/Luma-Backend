@@ -1,4 +1,4 @@
-import { db } from '../db.js'
+import { sql } from '../db.js'
 import { isPremiumEnabled, isPremiumActive } from './service.js'
 
 // Free men and women whose preference includes women get SWIPE_LIMIT swipes
@@ -41,12 +41,32 @@ export function evaluateSwipeWindow(startedAt: string | null, count: number, now
   return { blocked: false, resetAt, nextStartedAt: startedAt, nextCount: count + 1, remaining: SWIPE_LIMIT - (count + 1) }
 }
 
-const WINDOW_COLUMNS = 'gender, looking_for, premium_until, swipe_window_started_at, swipe_window_count, bonus_swipes'
+type WindowRow = {
+  gender: string | null
+  looking_for: string | null
+  premium_until: string | null
+  swipe_window_started_at: string | null
+  swipe_window_count: number | null
+  bonus_swipes: number | null
+}
+
+/** The limit's user row, or null when missing / unreadable (a read error —
+ *  including a malformed id — fails open, as PostgREST's error result did). */
+async function readWindowRow(userId: string): Promise<WindowRow | null> {
+  try {
+    const [row] = await sql<WindowRow[]>`
+      select gender, looking_for, premium_until, swipe_window_started_at, swipe_window_count, bonus_swipes
+      from users where id = ${userId}`
+    return row ?? null
+  } catch {
+    return null
+  }
+}
 
 async function loadLimitedUser(userId: string, nowMs: number) {
-  const { data: me, error } = await db.from('users').select(WINDOW_COLUMNS).eq('id', userId).single()
+  const me = await readWindowRow(userId)
   // Cheap cohort check first, db-error fails open.
-  if (error || !me) return null
+  if (!me) return null
   if (!swipeLimitApplies(me.gender ?? null, me.looking_for ?? null)) return null
   if (!(await isPremiumEnabled())) return null
   if (isPremiumActive(me.premium_until ?? null, nowMs)) return null
@@ -71,15 +91,16 @@ async function guardedWindowUpdate(
   expectedCount: number,
   w: SwipeWindow,
 ): Promise<'ok' | 'lost' | 'dbError'> {
-  const { data, error } = await db
-    .from('users')
-    .update({ swipe_window_started_at: w.nextStartedAt, swipe_window_count: w.nextCount })
-    .eq('id', userId)
-    .eq('swipe_window_count', expectedCount)
-    .select('id')
-  if (error) return 'dbError'
-  if (!data || data.length === 0) return 'lost'
-  return 'ok'
+  try {
+    const rows = await sql`
+      update users
+      set swipe_window_started_at = ${w.nextStartedAt!}, swipe_window_count = ${w.nextCount!}
+      where id = ${userId} and swipe_window_count = ${expectedCount}
+      returning id`
+    return rows.length === 0 ? 'lost' : 'ok'
+  } catch {
+    return 'dbError'
+  }
 }
 
 /**
@@ -88,15 +109,15 @@ async function guardedWindowUpdate(
  * `guardedWindowUpdate` above.
  */
 async function guardedBonusUpdate(userId: string, expectedBonus: number): Promise<'ok' | 'lost' | 'dbError'> {
-  const { data, error } = await db
-    .from('users')
-    .update({ bonus_swipes: expectedBonus - 1 })
-    .eq('id', userId)
-    .eq('bonus_swipes', expectedBonus)
-    .select('id')
-  if (error) return 'dbError'
-  if (!data || data.length === 0) return 'lost'
-  return 'ok'
+  try {
+    const rows = await sql`
+      update users set bonus_swipes = ${expectedBonus - 1}
+      where id = ${userId} and bonus_swipes = ${expectedBonus}
+      returning id`
+    return rows.length === 0 ? 'lost' : 'ok'
+  } catch {
+    return 'dbError'
+  }
 }
 
 /**
@@ -113,12 +134,8 @@ async function consumeBonusOrBlock(userId: string, bonusSwipes: number, resetAt:
   if (first === 'dbError') return { blocked: false, swipeLimit: null }
 
   // Lost the race — re-read once and retry against the fresh bonus count.
-  const { data: retryRow, error: retryError } = await db
-    .from('users')
-    .select('bonus_swipes')
-    .eq('id', userId)
-    .single()
-  if (retryError || !retryRow) return { blocked: false, swipeLimit: null }
+  const retryRow = await readWindowRow(userId)
+  if (!retryRow) return { blocked: false, swipeLimit: null }
 
   const retryBonus = retryRow.bonus_swipes ?? 0
   if (retryBonus <= 0) return { blocked: true, resetAt }
@@ -146,12 +163,8 @@ export async function checkAndCountSwipe(userId: string, nowMs = Date.now()): Pr
 
   // Lost the race — a concurrent request updated the count first. Re-read
   // once and re-run the window evaluation against the fresh count.
-  const { data: retryRow, error: retryError } = await db
-    .from('users')
-    .select(WINDOW_COLUMNS)
-    .eq('id', userId)
-    .single()
-  if (retryError || !retryRow) return { blocked: false, swipeLimit: null }
+  const retryRow = await readWindowRow(userId)
+  if (!retryRow) return { blocked: false, swipeLimit: null }
 
   const retryW = evaluateSwipeWindow(retryRow.swipe_window_started_at ?? null, retryRow.swipe_window_count ?? 0, nowMs)
   if (retryW.blocked) return consumeBonusOrBlock(userId, retryRow.bonus_swipes ?? 0, retryW.resetAt)

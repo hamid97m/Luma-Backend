@@ -1,46 +1,54 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn(), storage: { from: vi.fn() } } }))
+// Storage still goes through supabase-js; the DB part is real Postgres.
+vi.mock('../src/db.js', async (orig) => ({ ...(await orig<object>()), db: { storage: { from: vi.fn() } } }))
 
 import { db } from '../src/db.js'
 import { deleteAllPhotosForUser } from '../src/photos/deleteAllPhotosForUser.js'
-
-const USER_ID = 'user-1'
+import { resetDb, createUser, createPhoto, sql } from './helpers/db.js'
+import { storageMock, withMissingTable } from './helpers/profile.js'
 
 describe('deleteAllPhotosForUser', () => {
-  beforeEach(() => vi.clearAllMocks())
+  let storage: ReturnType<typeof storageMock>
+  beforeEach(async () => {
+    await resetDb()
+    storage = storageMock()
+    vi.mocked(db.storage.from).mockReturnValue(storage as any)
+  })
 
   it('removes storage objects and deletes the user_photos rows when photos exist', async () => {
-    const photos = [{ id: 'photo-a' }, { id: 'photo-b' }]
-    const select = vi.fn(() => ({ eq: () => ({ data: photos, error: null }) }))
-    const del = vi.fn(() => ({ eq: () => ({ error: null }) }))
-    vi.mocked(db.from).mockImplementation(() => ({ select, delete: del } as any))
-    const remove = vi.fn().mockResolvedValue({ error: null })
-    vi.mocked(db.storage.from).mockImplementation(() => ({ remove } as any))
+    const u = await createUser()
+    const other = await createUser()
+    const a = await createPhoto(u.id, 0)
+    const b = await createPhoto(u.id, 1)
+    await createPhoto(other.id, 0)
 
-    await deleteAllPhotosForUser(USER_ID)
+    await deleteAllPhotosForUser(u.id)
 
     expect(db.storage.from).toHaveBeenCalledWith('profile-photos')
-    expect(remove).toHaveBeenCalledWith(['user-1/photo-a', 'user-1/photo-b'])
-    expect(del).toHaveBeenCalled()
+    expect(storage.remove).toHaveBeenCalledTimes(1)
+    expect([...storage.remove.mock.calls[0][0]].sort()).toEqual([`${u.id}/${a.id}`, `${u.id}/${b.id}`].sort())
+    expect((await sql`select count(*)::int as n from user_photos where user_id = ${u.id}`)[0].n).toBe(0)
+    // Other users' photos are untouched.
+    expect((await sql`select count(*)::int as n from user_photos where user_id = ${other.id}`)[0].n).toBe(1)
   })
 
   it('does nothing when the user has no photos', async () => {
-    const select = vi.fn(() => ({ eq: () => ({ data: [], error: null }) }))
-    const del = vi.fn(() => ({ eq: () => ({ error: null }) }))
-    vi.mocked(db.from).mockImplementation(() => ({ select, delete: del } as any))
-    const remove = vi.fn().mockResolvedValue({ error: null })
-    vi.mocked(db.storage.from).mockImplementation(() => ({ remove } as any))
+    const u = await createUser()
 
-    await deleteAllPhotosForUser(USER_ID)
+    await deleteAllPhotosForUser(u.id)
 
-    expect(remove).not.toHaveBeenCalled()
-    expect(del).not.toHaveBeenCalled()
+    expect(storage.remove).not.toHaveBeenCalled()
   })
 
   it('swallows errors and never throws', async () => {
-    vi.mocked(db.from).mockImplementation(() => { throw new Error('boom') })
-
-    await expect(deleteAllPhotosForUser(USER_ID)).resolves.toBeUndefined()
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const u = await createUser()
+    await withMissingTable('user_photos', () =>
+      expect(deleteAllPhotosForUser(u.id)).resolves.toBeUndefined())
+    // Malformed id → Postgres 22P02 thrown → still swallowed.
+    await expect(deleteAllPhotosForUser('user-1')).resolves.toBeUndefined()
+    expect(errorSpy).toHaveBeenCalled()
+    errorSpy.mockRestore()
   })
 })

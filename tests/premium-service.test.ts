@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/bot.js', () => ({
   createPremiumInvoiceLink: vi.fn().mockResolvedValue('https://t.me/invoice/prem'),
   refundPremiumPayment: vi.fn().mockResolvedValue(undefined),
@@ -19,7 +18,6 @@ vi.mock('../src/payments/tonpays.js', async () => {
   }
 })
 vi.mock('../src/jobs/purchaseMessage.js', () => ({ schedulePurchaseCheckoutFollowup: vi.fn() }))
-import { db } from '../src/db.js'
 import { createPremiumInvoiceLink, notifyPaymentChannel } from '../src/bot.js'
 import {
   isPremiumActive, extendPremiumUntil, discountActive, chargedPrice,
@@ -32,7 +30,8 @@ import {
   changeCard, submitRefundCard,
 } from '../src/payments/tonpays.js'
 import { schedulePurchaseCheckoutFollowup } from '../src/jobs/purchaseMessage.js'
-import { chainable } from './admin-helpers.js'
+import { resetDb, createUser, sql } from './helpers/db.js'
+import { setPremiumConfig, createPlan, createTx, getTx, failPremiumUntilUpdates, restoreUserUpdates } from './helpers/premium.js'
 import { en } from '../src/i18n/en.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -102,80 +101,79 @@ describe('resolvePaymentProvider', () => {
   })
 })
 
+
+const UNKNOWN_ID = '00000000-0000-0000-0000-000000000000'
+
 describe('getTomanPerStar', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(async () => { vi.clearAllMocks(); await resetDb() })
 
   it('reads premium_config.toman_per_star', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'premium_config') return chainable({ data: { toman_per_star: 4200 } })
-      return chainable({ data: null })
-    })
+    await setPremiumConfig({ toman_per_star: 4200 })
     expect(await getTomanPerStar()).toBe(4200)
   })
 
   it('falls back to 3000 on a missing row', async () => {
-    vi.mocked(db.from).mockImplementation(() => chainable({ data: null }))
+    await sql`delete from premium_config`
     expect(await getTomanPerStar()).toBe(3000)
   })
 
-  it('falls back to 3000 when the column is missing/null', async () => {
-    vi.mocked(db.from).mockImplementation(() => chainable({ data: { toman_per_star: null } }))
+  it('uses the column default (3000) on a fresh install', async () => {
+    // The column is NOT NULL DEFAULT 3000, so "null column" can no longer happen;
+    // the fresh singleton row carries the default instead.
     expect(await getTomanPerStar()).toBe(3000)
   })
 })
 
 describe('getPremiumStatus', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(async () => { vi.clearAllMocks(); await resetDb() })
   afterEach(() => vi.unstubAllEnvs())
 
   it('returns toggle, own expiry, and mapped plans — charged price while a discount is active, full price otherwise', async () => {
     const future = new Date(Date.now() + DAY_MS).toISOString()
     const past = new Date(Date.now() - DAY_MS).toISOString()
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'premium_config') return chainable({ data: { premium_enabled: true } })
-      if (table === 'users') return chainable({ data: { premium_until: null, geo_country: null } })
-      if (table === 'premium_plans') return chainable({ data: [
-        { id: 'p1', title: '1 Month', description: 'Best start', price_stars: 100, discount_percent: null, discount_ends_at: null, duration_days: 30 },
-        { id: 'p2', title: '3 Months', description: '', price_stars: 150, discount_percent: 50, discount_ends_at: null, duration_days: 90 },
-        { id: 'p3', title: '6 Months', description: '', price_stars: 200, discount_percent: 25, discount_ends_at: future, duration_days: 180 },
-        { id: 'p4', title: '12 Months', description: '', price_stars: 300, discount_percent: 40, discount_ends_at: past, duration_days: 365 },
-      ] })
-      return chainable({ data: null })
-    })
-    const res = await getPremiumStatus('u1')
+    await setPremiumConfig({ premium_enabled: true })
+    const me = await createUser({ geo_country: null })
+    // inserted out of order: sort_order decides; inactive plans are hidden
+    const p3 = await createPlan({ title: '6 Months', description: '', price_stars: 200, discount_percent: 25, discount_ends_at: future, duration_days: 180, sort_order: 3 })
+    const p1 = await createPlan({ title: '1 Month', description: 'Best start', price_stars: 100, duration_days: 30, sort_order: 1 })
+    const p4 = await createPlan({ title: '12 Months', description: '', price_stars: 300, discount_percent: 40, discount_ends_at: past, duration_days: 365, sort_order: 4 })
+    const p2 = await createPlan({ title: '3 Months', description: '', price_stars: 150, discount_percent: 50, duration_days: 90, sort_order: 2 })
+    await createPlan({ title: 'Hidden', is_active: false, sort_order: 0 })
+
+    const res = await getPremiumStatus(me.id)
     expect(res.enabled).toBe(true)
     expect(res.premiumUntil).toBe(null)
     expect(res.paymentProvider).toBe('stars')
     expect(res.plans).toEqual([
-      { id: 'p1', title: '1 Month', description: 'Best start', priceStars: 100, discountPercent: null, originalPriceStars: null, discountEndsAt: null, durationDays: 30 },
-      { id: 'p2', title: '3 Months', description: '', priceStars: 75, discountPercent: 50, originalPriceStars: 150, discountEndsAt: null, durationDays: 90 },
-      { id: 'p3', title: '6 Months', description: '', priceStars: 150, discountPercent: 25, originalPriceStars: 200, discountEndsAt: future, durationDays: 180 },
-      { id: 'p4', title: '12 Months', description: '', priceStars: 300, discountPercent: null, originalPriceStars: null, discountEndsAt: null, durationDays: 365 },
+      { id: p1.id, title: '1 Month', description: 'Best start', priceStars: 100, discountPercent: null, originalPriceStars: null, discountEndsAt: null, durationDays: 30 },
+      { id: p2.id, title: '3 Months', description: '', priceStars: 75, discountPercent: 50, originalPriceStars: 150, discountEndsAt: null, durationDays: 90 },
+      { id: p3.id, title: '6 Months', description: '', priceStars: 150, discountPercent: 25, originalPriceStars: 200, discountEndsAt: future, durationDays: 180 },
+      { id: p4.id, title: '12 Months', description: '', priceStars: 300, discountPercent: null, originalPriceStars: null, discountEndsAt: null, durationDays: 365 },
     ])
   })
 
+  it('reports the toggle off and the viewer\'s own premium_until', async () => {
+    const until = new Date(Date.now() + 3 * DAY_MS).toISOString()
+    const me = await createUser({ premium_until: until })
+    const res = await getPremiumStatus(me.id)
+    expect(res.enabled).toBe(false)
+    expect(res.premiumUntil).toBe(until)
+    expect(res.plans).toEqual([])
+  })
+
   it('provider is stars for IR when TonPays key is missing', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'premium_config') return chainable({ data: { premium_enabled: true } })
-      if (table === 'users') return chainable({ data: { premium_until: null, geo_country: 'IR' } })
-      if (table === 'premium_plans') return chainable({ data: [] })
-      return chainable({ data: null })
-    })
-    const res = await getPremiumStatus('u1')
+    await setPremiumConfig({ premium_enabled: true })
+    const me = await createUser({ geo_country: 'IR' })
+    const res = await getPremiumStatus(me.id)
     expect(res.paymentProvider).toBe('stars')
   })
 
   it('carries paymentProvider "tonpays" and toman pricing (priceToman = chargedStars × rate) for an Iranian user when TonPays is configured', async () => {
     vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'premium_config') return chainable({ data: { premium_enabled: true, toman_per_star: 3000 } })
-      if (table === 'users') return chainable({ data: { premium_until: null, geo_country: 'IR' } })
-      if (table === 'premium_plans') return chainable({ data: [
-        { id: 'p1', title: '1 Month', description: 'Best start', price_stars: 100, discount_percent: 20, discount_ends_at: null, duration_days: 30 },
-      ] })
-      return chainable({ data: null })
-    })
-    const res = await getPremiumStatus('u1')
+    await setPremiumConfig({ premium_enabled: true, toman_per_star: 3000 })
+    const me = await createUser({ geo_country: 'IR' })
+    await createPlan({ price_stars: 100, discount_percent: 20 })
+    const res = await getPremiumStatus(me.id)
     expect(res.paymentProvider).toBe('tonpays')
     expect(res.plans[0]).toMatchObject({
       priceStars: 80, originalPriceStars: 100, priceToman: 240000, originalPriceToman: 300000,
@@ -183,312 +181,236 @@ describe('getPremiumStatus', () => {
   })
 
   it('localizes plan copy from translations for the viewer\'s locale, falling back per field', async () => {
-    const plansLog: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'premium_config') return chainable({ data: { premium_enabled: true } })
-      if (table === 'users') return chainable({ data: { premium_until: null, locale: 'en' } })
-      if (table === 'premium_plans') return chainable({ data: [
-        { id: 'p1', title: 'یک ماهه', description: 'شروع خوب', translations: { en: { title: '1 Month', description: 'Good start' } },
-          price_stars: 100, discount_percent: null, discount_ends_at: null, duration_days: 30 },
-        { id: 'p2', title: 'سه ماهه', description: 'بهترین', translations: { en: { title: '3 Months', description: '  ' } },
-          price_stars: 150, discount_percent: null, discount_ends_at: null, duration_days: 90 },
-        { id: 'p3', title: 'شش ماهه', description: '', translations: null,
-          price_stars: 200, discount_percent: null, discount_ends_at: null, duration_days: 180 },
-      ] }, plansLog)
-      return chainable({ data: null })
-    })
-    const res = await getPremiumStatus('u1')
+    await setPremiumConfig({ premium_enabled: true })
+    const me = await createUser({ locale: 'en' })
+    await createPlan({ title: 'یک ماهه', description: 'شروع خوب', translations: sql.json({ en: { title: '1 Month', description: 'Good start' } }), sort_order: 1 })
+    await createPlan({ title: 'سه ماهه', description: 'بهترین', translations: sql.json({ en: { title: '3 Months', description: '  ' } }), sort_order: 2 })
+    await createPlan({ title: 'شش ماهه', description: '', sort_order: 3 }) // translations column default {}
+    const res = await getPremiumStatus(me.id)
     expect(res.plans.map((p) => [p.title, p.description])).toEqual([
       ['1 Month', 'Good start'],
       ['3 Months', 'بهترین'],   // blank translated description → Persian base
       ['شش ماهه', ''],          // no translations → Persian base
     ])
-    // The query must actually fetch the jsonb column, or planText never sees a translation.
-    const select = plansLog.find((e) => e.method === 'select')
-    expect(String(select?.args[0])).toContain('translations')
   })
 
   it('keeps Persian copy for a viewer whose locale is still NULL', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'premium_config') return chainable({ data: { premium_enabled: true } })
-      if (table === 'users') return chainable({ data: { premium_until: null, locale: null } })
-      if (table === 'premium_plans') return chainable({ data: [
-        { id: 'p1', title: 'یک ماهه', description: 'شروع خوب', translations: { en: { title: '1 Month', description: 'Good start' } },
-          price_stars: 100, discount_percent: null, discount_ends_at: null, duration_days: 30 },
-      ] })
-      return chainable({ data: null })
-    })
-    const res = await getPremiumStatus('u1')
+    await setPremiumConfig({ premium_enabled: true })
+    const me = await createUser({ locale: null })
+    await createPlan({ title: 'یک ماهه', description: 'شروع خوب', translations: sql.json({ en: { title: '1 Month', description: 'Good start' } }) })
+    const res = await getPremiumStatus(me.id)
     expect(res.plans[0]).toMatchObject({ title: 'یک ماهه', description: 'شروع خوب' })
   })
 })
 
 describe('createPremiumCheckout', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(async () => { vi.clearAllMocks(); await resetDb() })
 
-  function mockDb(opts: { enabled: boolean; plan: any; insertData?: any; buyer?: any }) {
-    const inserts: any[] = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'premium_config') return chainable({ data: { premium_enabled: opts.enabled } })
-      if (table === 'premium_plans') return chainable({ data: opts.plan })
-      if (table === 'users') return chainable({ data: opts.buyer ?? { locale: null } })
-      if (table === 'premium_transactions') {
-        return {
-          insert: (payload: any) => { inserts.push(payload); return chainable({ data: opts.insertData ?? { id: 'tx1' }, error: null }) },
-        } as any
-      }
-      return chainable({ data: null })
-    })
-    return inserts
+  const txsOf = (userId: string) =>
+    sql`select * from premium_transactions where user_id = ${userId} order by created_at`
+
+  async function setup(opts: { enabled: boolean; plan?: Record<string, unknown>; buyer?: Record<string, unknown> }) {
+    await setPremiumConfig({ premium_enabled: opts.enabled })
+    const buyer = await createUser({ locale: null, ...opts.buyer })
+    const plan = await createPlan({ title: '1 Month', description: 'Best start', price_stars: 100, duration_days: 30, ...opts.plan })
+    return { buyer, plan }
   }
 
   it('rejects when premium is disabled', async () => {
-    mockDb({ enabled: false, plan: null })
-    expect(await createPremiumCheckout('u1', 'p1')).toEqual({ error: 'premium_disabled' })
+    const { buyer, plan } = await setup({ enabled: false })
+    expect(await createPremiumCheckout(buyer.id, plan.id)).toEqual({ error: 'premium_disabled' })
+    expect(await txsOf(buyer.id)).toEqual([])
   })
 
   it('rejects an unknown/inactive plan', async () => {
-    mockDb({ enabled: true, plan: null })
-    expect(await createPremiumCheckout('u1', 'p1')).toEqual({ error: 'plan_unavailable' })
+    const { buyer } = await setup({ enabled: true })
+    const inactive = await createPlan({ is_active: false })
+    expect(await createPremiumCheckout(buyer.id, UNKNOWN_ID)).toEqual({ error: 'plan_unavailable' })
+    expect(await createPremiumCheckout(buyer.id, inactive.id)).toEqual({ error: 'plan_unavailable' })
+  })
+
+  it('rejects a malformed plan id as unavailable (no 22P02 throw)', async () => {
+    const { buyer } = await setup({ enabled: true })
+    expect(await createPremiumCheckout(buyer.id, 'p1')).toEqual({ error: 'plan_unavailable' })
   })
 
   it('inserts a pending snapshot tx at full price when no discount is configured', async () => {
-    const inserts = mockDb({
-      enabled: true,
-      plan: {
-        id: 'p1', title: '1 Month', description: 'Best start', price_stars: 100,
-        discount_percent: null, discount_ends_at: null, duration_days: 30,
-      },
-    })
-    const res = await createPremiumCheckout('u1', 'p1')
-    expect(res).toEqual({ transactionId: 'tx1', provider: 'stars', invoiceLink: 'https://t.me/invoice/prem' })
-    expect(inserts[0]).toMatchObject({
-      user_id: 'u1', plan_id: 'p1', plan_title: '1 Month',
+    const { buyer, plan } = await setup({ enabled: true })
+    const res = await createPremiumCheckout(buyer.id, plan.id)
+    const [tx] = await txsOf(buyer.id)
+    expect(res).toEqual({ transactionId: tx.id, provider: 'stars', invoiceLink: 'https://t.me/invoice/prem' })
+    expect(tx).toMatchObject({
+      user_id: buyer.id, plan_id: plan.id, plan_title: '1 Month', provider: 'stars',
       price_stars: 100, duration_days: 30, status: 'pending_payment', source: 'purchase',
     })
-    expect(createPremiumInvoiceLink).toHaveBeenCalledWith('tx1', '1 Month', 'Best start', 100)
+    expect(createPremiumInvoiceLink).toHaveBeenCalledWith(tx.id, '1 Month', 'Best start', 100)
+    expect(schedulePurchaseCheckoutFollowup).toHaveBeenCalledWith(buyer.id)
   })
 
   it('snapshots the discounted price when the discount is still active at checkout', async () => {
     const future = new Date(Date.now() + DAY_MS).toISOString()
-    const inserts = mockDb({
-      enabled: true,
-      plan: {
-        id: 'p1', title: '1 Month', description: 'Best start', price_stars: 100,
-        discount_percent: 25, discount_ends_at: future, duration_days: 30,
-      },
-    })
-    const res = await createPremiumCheckout('u1', 'p1')
-    expect(res).toEqual({ transactionId: 'tx1', provider: 'stars', invoiceLink: 'https://t.me/invoice/prem' })
-    expect(inserts[0]).toMatchObject({ price_stars: 75 })
-    expect(createPremiumInvoiceLink).toHaveBeenCalledWith('tx1', '1 Month', 'Best start', 75)
+    const { buyer, plan } = await setup({ enabled: true, plan: { discount_percent: 25, discount_ends_at: future } })
+    const res = await createPremiumCheckout(buyer.id, plan.id)
+    const [tx] = await txsOf(buyer.id)
+    expect(res).toEqual({ transactionId: tx.id, provider: 'stars', invoiceLink: 'https://t.me/invoice/prem' })
+    expect(tx).toMatchObject({ price_stars: 75 })
+    expect(createPremiumInvoiceLink).toHaveBeenCalledWith(tx.id, '1 Month', 'Best start', 75)
   })
 
   it('snapshots the full price when the discount has already expired', async () => {
     const past = new Date(Date.now() - DAY_MS).toISOString()
-    const inserts = mockDb({
-      enabled: true,
-      plan: {
-        id: 'p1', title: '1 Month', description: 'Best start', price_stars: 100,
-        discount_percent: 25, discount_ends_at: past, duration_days: 30,
-      },
-    })
-    const res = await createPremiumCheckout('u1', 'p1')
-    expect(inserts[0]).toMatchObject({ price_stars: 100 })
-    expect(createPremiumInvoiceLink).toHaveBeenCalledWith('tx1', '1 Month', 'Best start', 100)
+    const { buyer, plan } = await setup({ enabled: true, plan: { discount_percent: 25, discount_ends_at: past } })
+    await createPremiumCheckout(buyer.id, plan.id)
+    const [tx] = await txsOf(buyer.id)
+    expect(tx).toMatchObject({ price_stars: 100 })
+    expect(createPremiumInvoiceLink).toHaveBeenCalledWith(tx.id, '1 Month', 'Best start', 100)
   })
 
   it('builds the invoice and snapshots plan_title in the buyer\'s language', async () => {
-    const inserts = mockDb({
-      enabled: true,
-      buyer: { locale: 'en' },
-      plan: {
-        id: 'p1', title: 'یک ماهه', description: 'شروع خوب',
-        translations: { en: { title: '1 Month', description: 'Good start' } },
-        price_stars: 100, discount_percent: null, discount_ends_at: null, duration_days: 30,
-      },
+    const { buyer, plan } = await setup({
+      enabled: true, buyer: { locale: 'en' },
+      plan: { title: 'یک ماهه', description: 'شروع خوب', translations: sql.json({ en: { title: '1 Month', description: 'Good start' } }) },
     })
-    await createPremiumCheckout('u1', 'p1')
-    expect(inserts[0]).toMatchObject({ plan_title: '1 Month' })
-    expect(createPremiumInvoiceLink).toHaveBeenCalledWith('tx1', '1 Month', 'Good start', 100)
+    await createPremiumCheckout(buyer.id, plan.id)
+    const [tx] = await txsOf(buyer.id)
+    expect(tx).toMatchObject({ plan_title: '1 Month' })
+    expect(createPremiumInvoiceLink).toHaveBeenCalledWith(tx.id, '1 Month', 'Good start', 100)
   })
 
   it('uses the localized description fallback when the plan has no description', async () => {
-    mockDb({
-      enabled: true,
-      buyer: { locale: 'en' },
-      plan: {
-        id: 'p1', title: 'یک ماهه', description: '', translations: { en: { title: '1 Month' } },
-        price_stars: 100, discount_percent: null, discount_ends_at: null, duration_days: 30,
-      },
+    const { buyer, plan } = await setup({
+      enabled: true, buyer: { locale: 'en' },
+      plan: { title: 'یک ماهه', description: '', translations: sql.json({ en: { title: '1 Month' } }) },
     })
-    await createPremiumCheckout('u1', 'p1')
-    expect(createPremiumInvoiceLink).toHaveBeenCalledWith('tx1', '1 Month', en.premium.invoiceDescriptionFallback(30), 100)
+    await createPremiumCheckout(buyer.id, plan.id)
+    const [tx] = await txsOf(buyer.id)
+    expect(createPremiumInvoiceLink).toHaveBeenCalledWith(tx.id, '1 Month', en.premium.invoiceDescriptionFallback(30), 100)
   })
 })
 
 describe('createPremiumCheckout — tonpays', () => {
-  const plan = {
-    id: 'p1', title: '1 Month', description: 'Best start', price_stars: 100,
-    discount_percent: null, discount_ends_at: null, duration_days: 30,
-  }
+  let buyer: Record<string, any>
+  let plan: Record<string, any>
 
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    await resetDb()
+    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
+    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
+    await setPremiumConfig({ premium_enabled: true, toman_per_star: 500 }) // 100 stars × 500 = 50000
+    buyer = await createUser({ locale: null, geo_country: 'IR', telegram_id: 777, name: 'Ali' })
+    plan = await createPlan({ title: '1 Month', description: 'Best start', price_stars: 100, duration_days: 30 })
+  })
   afterEach(() => vi.unstubAllEnvs())
 
-  type FilterLog = Array<{ method: string; args: unknown[] }>
+  /** The row this checkout attempt inserted (order id 'order-new'). */
+  const newRow = async () => (await sql`select * from premium_transactions where tonpays_order_id = 'order-new'`)[0]
 
-  /** An update() whose filter chain targets `.eq('id', id)`, with its captured filters. */
-  function findUpdate(
-    recorded: Array<{ payload: any; filters: FilterLog }>,
-    id: string,
-  ): { payload: any; filters: FilterLog } | undefined {
-    return recorded.find((u) => u.filters.some((f) => f.method === 'eq' && f.args[0] === 'id' && f.args[1] === id))
-  }
+  /** An existing pending TonPays tx of the buyer's, already invoiced upstream. */
+  const existingPending = (overrides: Record<string, unknown> = {}) => createTx(buyer.id, {
+    provider: 'tonpays', plan_id: plan.id, price_toman: 50000, tonpays_invoice_id: 'inv-old',
+    tonpays_final_amount: 50037, tonpays_order_id: 'order-old',
+    created_at: new Date(Date.now() - 60_000).toISOString(), ...overrides,
+  })
 
-  /** Whether an update carried the status='pending_payment' race guard. */
-  const hasPendingGuard = (u: { filters: FilterLog } | undefined) =>
-    !!u?.filters.some((f) => f.method === 'eq' && f.args[0] === 'status' && f.args[1] === 'pending_payment')
-
-  // Routes all premium_transactions calls to the right fake: insert() for the
-  // new attempt row, select() for the "find our existing pending row" lookup
-  // (BUYER_HAS_PENDING_INVOICE path) and then for the untracked-invoice
-  // recovery lookup, update() for status/invoice writes (whose filter chain is
-  // captured so the status guards can be asserted).
-  function mockTonPaysDb(opts: {
-    plan: any; buyer?: any; tomanPerStar?: number; insertData?: any
-    oldRow?: any | null; strayRow?: any | null; txUpdateResult?: any
-  }) {
-    const inserts: any[] = []
-    const updates: any[] = []
-    const recorded: Array<{ payload: any; filters: FilterLog }> = []
-    let selectCalls = 0
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'premium_config') return chainable({ data: { premium_enabled: true, toman_per_star: opts.tomanPerStar ?? 500 } })
-      if (table === 'premium_plans') return chainable({ data: opts.plan })
-      if (table === 'users') return chainable({ data: opts.buyer ?? { locale: null, geo_country: 'IR', telegram_id: 777 } })
-      if (table === 'premium_transactions') {
-        return {
-          insert: (payload: any) => { inserts.push(payload); return chainable({ data: opts.insertData ?? { id: 'tx-new' }, error: null }) },
-          // 1st select = our own pending-row lookup; any later one = the
-          // untracked-invoice recovery lookup.
-          select: () => chainable({ data: selectCalls++ === 0 ? (opts.oldRow ?? null) : (opts.strayRow ?? null) }),
-          update: (payload: any) => {
-            updates.push(payload)
-            const filters: FilterLog = []
-            recorded.push({ payload, filters })
-            return chainable({ data: opts.txUpdateResult ?? null, error: null }, filters)
-          },
-        } as any
-      }
-      return chainable({ data: null })
-    })
-    return { inserts, updates, recorded }
-  }
+  const pendingConflict = () => new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409)
 
   it('tonpays checkout inserts snapshot row and returns card payment', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     vi.mocked(generateTonPaysOrderId).mockReturnValue('order-abc')
     vi.mocked(createTelegramInvoice).mockResolvedValue({
       invoiceId: 'inv-1', cardNumber: '6037-xxxx-xxxx-1234', cardHolder: 'Card Holder', finalAmount: 50037, status: 'pending',
     })
-    const { inserts, updates } = mockTonPaysDb({ plan, tomanPerStar: 500 }) // 100 stars × 500 = 50000
 
-    const res = await createPremiumCheckout('u1', 'p1')
+    const res = await createPremiumCheckout(buyer.id, plan.id)
 
+    const [tx] = await sql`select * from premium_transactions`
     expect(res).toEqual({
-      transactionId: 'tx-new', provider: 'tonpays',
+      transactionId: tx.id, provider: 'tonpays',
       payment: { cardNumber: '6037-xxxx-xxxx-1234', cardHolder: 'Card Holder', amountToman: 50037, invoiceId: 'inv-1' },
     })
-    expect(inserts[0]).toMatchObject({
-      user_id: 'u1', plan_id: 'p1', provider: 'tonpays',
+    expect(tx).toMatchObject({
+      user_id: buyer.id, plan_id: plan.id, provider: 'tonpays',
       price_stars: 100, price_toman: 50000, tonpays_order_id: 'order-abc',
       status: 'pending_payment', source: 'purchase',
+      // the invoice details are written back onto the row
+      tonpays_invoice_id: 'inv-1', tonpays_final_amount: 50037, tonpays_status: 'pending',
     })
     expect(createTelegramInvoice).toHaveBeenCalledWith({ amountToman: 50000, orderId: 'order-abc', buyerChatId: 777 })
-    expect(updates[0]).toMatchObject({ tonpays_invoice_id: 'inv-1', tonpays_final_amount: 50037, tonpays_status: 'pending' })
+    expect(schedulePurchaseCheckoutFollowup).toHaveBeenCalledWith(buyer.id)
   })
 
   it('stars checkout unchanged for non-IR user', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true') // configured, but geo isn't IR
-    const inserts: any[] = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'premium_config') return chainable({ data: { premium_enabled: true } })
-      if (table === 'premium_plans') return chainable({ data: plan })
-      if (table === 'users') return chainable({ data: { locale: null, geo_country: 'DE', telegram_id: 777 } })
-      if (table === 'premium_transactions') {
-        return { insert: (payload: any) => { inserts.push(payload); return chainable({ data: { id: 'tx1' }, error: null }) } } as any
-      }
-      return chainable({ data: null })
-    })
+    await sql`update users set geo_country = 'DE' where id = ${buyer.id}` // configured, but geo isn't IR
 
-    const res = await createPremiumCheckout('u1', 'p1')
+    const res = await createPremiumCheckout(buyer.id, plan.id)
 
-    expect(res).toEqual({ transactionId: 'tx1', provider: 'stars', invoiceLink: 'https://t.me/invoice/prem' })
+    const [tx] = await sql`select * from premium_transactions`
+    expect(res).toEqual({ transactionId: tx.id, provider: 'stars', invoiceLink: 'https://t.me/invoice/prem' })
     expect(createTelegramInvoice).not.toHaveBeenCalled()
-    expect(inserts[0]).toMatchObject({ price_stars: 100, status: 'pending_payment' })
+    expect(tx).toMatchObject({ provider: 'stars', price_stars: 100, price_toman: null, status: 'pending_payment' })
   })
 
   it('resumes the pending invoice for same plan and amount, using the fresh card from checkInvoice', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
-    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
-    vi.mocked(createTelegramInvoice).mockRejectedValue(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
+    const old = await existingPending()
+    vi.mocked(createTelegramInvoice).mockRejectedValue(pendingConflict())
     vi.mocked(checkInvoice).mockResolvedValue({
       invoiceId: 'inv-old', status: 'pending', paid: false, remainingAmount: null, refundPending: false,
       cardNumber: '6037-xxxx-xxxx-1234', cardHolder: 'Card Holder',
     })
 
-    const { updates } = mockTonPaysDb({
-      plan, tomanPerStar: 500,
-      oldRow: { id: 'tx-old', plan_id: 'p1', price_toman: 50000, tonpays_invoice_id: 'inv-old', tonpays_final_amount: 50037 },
-    })
-
-    const res = await createPremiumCheckout('u1', 'p1')
+    const res = await createPremiumCheckout(buyer.id, plan.id)
 
     expect(checkInvoice).toHaveBeenCalledWith('inv-old')
     expect(cancelInvoice).not.toHaveBeenCalled()
     expect(res).toEqual({
-      transactionId: 'tx-old', provider: 'tonpays',
+      transactionId: old.id, provider: 'tonpays',
       payment: { cardNumber: '6037-xxxx-xxxx-1234', cardHolder: 'Card Holder', invoiceId: 'inv-old', amountToman: 50037 },
     })
     // the fresh never-invoiced attempt row is dropped, not left dangling as pending
-    expect(updates.some((u) => u.status === 'canceled')).toBe(true)
+    expect((await newRow()).status).toBe('canceled')
+    expect((await getTx(old.id)).status).toBe('pending_payment')
     // resume is a successful checkout response too — the abandoned-checkout nudge still fires
-    expect(schedulePurchaseCheckoutFollowup).toHaveBeenCalledWith('u1')
+    expect(schedulePurchaseCheckoutFollowup).toHaveBeenCalledWith(buyer.id)
+  })
+
+  it('resume falls back to price_toman when the old row has no final amount', async () => {
+    const old = await existingPending({ tonpays_final_amount: null })
+    vi.mocked(createTelegramInvoice).mockRejectedValue(pendingConflict())
+    vi.mocked(checkInvoice).mockResolvedValue({
+      invoiceId: 'inv-old', status: 'pending', paid: false, remainingAmount: null, refundPending: false,
+      cardNumber: '6037', cardHolder: 'Holder',
+    })
+    const res = await createPremiumCheckout(buyer.id, plan.id)
+    expect(res).toMatchObject({ transactionId: old.id, payment: { amountToman: 50000 } })
   })
 
   it('falls back to cancel-and-recreate when checkInvoice itself rejects', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
-    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
+    const old = await existingPending()
     vi.mocked(createTelegramInvoice)
-      .mockRejectedValueOnce(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
+      .mockRejectedValueOnce(pendingConflict())
       .mockResolvedValueOnce({ invoiceId: 'inv-fresh', cardNumber: '6037-zzzz-zzzz-0000', cardHolder: 'Fresh Card', finalAmount: 50037, status: 'pending' })
     vi.mocked(checkInvoice).mockRejectedValue(new TonPaysApiError('INTERNAL_ERROR', 'boom', 500))
     vi.mocked(cancelInvoice).mockResolvedValue(undefined)
 
-    const { updates } = mockTonPaysDb({
-      plan, tomanPerStar: 500,
-      oldRow: { id: 'tx-old', plan_id: 'p1', price_toman: 50000, tonpays_invoice_id: 'inv-old', tonpays_final_amount: 50037 },
-    })
-
     // Must not throw — the rejected checkInvoice must be handled, not propagated.
-    const res = await createPremiumCheckout('u1', 'p1')
+    const res = await createPremiumCheckout(buyer.id, plan.id)
 
     expect(checkInvoice).toHaveBeenCalledWith('inv-old')
     expect(cancelInvoice).toHaveBeenCalledWith('inv-old')
-    expect(updates.some((u) => u.status === 'canceled')).toBe(true)
+    expect((await getTx(old.id)).status).toBe('canceled')
     expect(createTelegramInvoice).toHaveBeenCalledTimes(2)
+    const fresh = await newRow()
+    expect(fresh).toMatchObject({ status: 'pending_payment', tonpays_invoice_id: 'inv-fresh' })
     expect(res).toEqual({
-      transactionId: 'tx-new', provider: 'tonpays',
+      transactionId: fresh.id, provider: 'tonpays',
       payment: { cardNumber: '6037-zzzz-zzzz-0000', cardHolder: 'Fresh Card', amountToman: 50037, invoiceId: 'inv-fresh' },
     })
   })
 
   it('falls back to cancel-and-recreate when the resume check has no card data', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
-    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
+    const old = await existingPending()
     vi.mocked(createTelegramInvoice)
-      .mockRejectedValueOnce(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
+      .mockRejectedValueOnce(pendingConflict())
       .mockResolvedValueOnce({ invoiceId: 'inv-fresh', cardNumber: '6037-zzzz-zzzz-0000', cardHolder: 'Fresh Card', finalAmount: 50037, status: 'pending' })
     vi.mocked(checkInvoice).mockResolvedValue({
       invoiceId: 'inv-old', status: 'pending', paid: false, remainingAmount: null, refundPending: false,
@@ -496,96 +418,105 @@ describe('createPremiumCheckout — tonpays', () => {
     })
     vi.mocked(cancelInvoice).mockResolvedValue(undefined)
 
-    const { updates } = mockTonPaysDb({
-      plan, tomanPerStar: 500,
-      oldRow: { id: 'tx-old', plan_id: 'p1', price_toman: 50000, tonpays_invoice_id: 'inv-old', tonpays_final_amount: 50037 },
-    })
-
-    const res = await createPremiumCheckout('u1', 'p1')
+    const res = await createPremiumCheckout(buyer.id, plan.id)
 
     expect(checkInvoice).toHaveBeenCalledWith('inv-old')
     expect(cancelInvoice).toHaveBeenCalledWith('inv-old')
-    expect(updates.some((u) => u.status === 'canceled')).toBe(true)
+    expect((await getTx(old.id)).status).toBe('canceled')
     expect(createTelegramInvoice).toHaveBeenCalledTimes(2)
+    const fresh = await newRow()
     expect(res).toEqual({
-      transactionId: 'tx-new', provider: 'tonpays',
+      transactionId: fresh.id, provider: 'tonpays',
       payment: { cardNumber: '6037-zzzz-zzzz-0000', cardHolder: 'Fresh Card', amountToman: 50037, invoiceId: 'inv-fresh' },
     })
   })
 
   it('cancels and retries for a different plan', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
-    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
+    const otherPlan = await createPlan({ title: '3 Months', price_stars: 2 })
+    const old = await existingPending({ plan_id: otherPlan.id, price_toman: 999, tonpays_final_amount: 1000 })
     vi.mocked(createTelegramInvoice)
-      .mockRejectedValueOnce(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
+      .mockRejectedValueOnce(pendingConflict())
       .mockResolvedValueOnce({ invoiceId: 'inv-new', cardNumber: '6037-yyyy-yyyy-9999', cardHolder: 'New Card', finalAmount: 60012, status: 'pending' })
     vi.mocked(cancelInvoice).mockResolvedValue(undefined)
 
-    const { updates, recorded } = mockTonPaysDb({
-      plan, tomanPerStar: 500,
-      oldRow: { id: 'tx-old', plan_id: 'p2', price_toman: 999, tonpays_invoice_id: 'inv-old', tonpays_final_amount: 1000 },
-    })
+    const res = await createPremiumCheckout(buyer.id, plan.id)
 
-    const res = await createPremiumCheckout('u1', 'p1')
-
+    expect(checkInvoice).not.toHaveBeenCalled()
     expect(cancelInvoice).toHaveBeenCalledWith('inv-old')
-    expect(updates.some((u) => u.status === 'canceled')).toBe(true)
+    expect((await getTx(old.id)).status).toBe('canceled')
     expect(createTelegramInvoice).toHaveBeenCalledTimes(2)
+    const fresh = await newRow()
     expect(res).toEqual({
-      transactionId: 'tx-new', provider: 'tonpays',
+      transactionId: fresh.id, provider: 'tonpays',
       payment: { cardNumber: '6037-yyyy-yyyy-9999', cardHolder: 'New Card', amountToman: 60012, invoiceId: 'inv-new' },
     })
+  })
 
-    // The OLD row's cancel must be guarded on status='pending_payment': a
-    // webhook grant landing between the lookup and this write would otherwise
-    // be clobbered back to canceled, and could never be granted again.
-    const oldUpdate = findUpdate(recorded, 'tx-old')
-    expect(oldUpdate?.payload).toEqual({ status: 'canceled' })
-    expect(hasPendingGuard(oldUpdate)).toBe(true)
+  it('cancels and retries for the same plan at a different amount', async () => {
+    const old = await existingPending({ price_toman: 40000 })
+    vi.mocked(createTelegramInvoice)
+      .mockRejectedValueOnce(pendingConflict())
+      .mockResolvedValueOnce({ invoiceId: 'inv-new', cardNumber: 'c', cardHolder: 'h', finalAmount: 50001, status: 'pending' })
+    vi.mocked(cancelInvoice).mockResolvedValue(undefined)
+
+    await createPremiumCheckout(buyer.id, plan.id)
+
+    expect(checkInvoice).not.toHaveBeenCalled()
+    expect(cancelInvoice).toHaveBeenCalledWith('inv-old')
+    expect((await getTx(old.id)).status).toBe('canceled')
+  })
+
+  it('the old row\'s cancel is guarded on status=pending_payment: a grant landing mid-checkout is never clobbered', async () => {
+    const otherPlan = await createPlan({ title: '3 Months', price_stars: 2 })
+    const old = await existingPending({ plan_id: otherPlan.id, price_toman: 999 })
+    vi.mocked(createTelegramInvoice)
+      .mockRejectedValueOnce(pendingConflict())
+      .mockResolvedValueOnce({ invoiceId: 'inv-new', cardNumber: 'c', cardHolder: 'h', finalAmount: 50001, status: 'pending' })
+    // The webhook grant for the old invoice lands between our lookup and our cancel.
+    vi.mocked(cancelInvoice).mockImplementation(async () => {
+      await sql`update premium_transactions set status = 'paid' where id = ${old.id}`
+    })
+
+    await createPremiumCheckout(buyer.id, plan.id)
+
+    expect((await getTx(old.id)).status).toBe('paid')
   })
 
   it('resume: an already-paid invoice is granted and never cancelled', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
-    vi.mocked(createTelegramInvoice).mockRejectedValue(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
+    const old = await existingPending()
+    vi.mocked(createTelegramInvoice).mockRejectedValue(pendingConflict())
     // A paid invoice's check carries no card fields (confirmed live).
     vi.mocked(checkInvoice).mockResolvedValue({
       invoiceId: 'inv-old', status: 'paid', paid: true, remainingAmount: 0, refundPending: false,
       cardNumber: null, cardHolder: null,
     })
 
-    const { recorded } = mockTonPaysDb({
-      plan, tomanPerStar: 500,
-      buyer: { locale: null, geo_country: 'IR', telegram_id: 777, premium_until: null, name: 'Ali' },
-      oldRow: { id: 'tx-old', plan_id: 'p1', price_toman: 50000, tonpays_invoice_id: 'inv-old', tonpays_final_amount: 50037 },
-      // makes handleTonPaysPaid's claim succeed, so the grant really runs
-      txUpdateResult: { id: 'tx-old', user_id: 'u1', duration_days: 30, price_toman: 50000, tonpays_final_amount: 50037 },
-    })
-
-    const res = await createPremiumCheckout('u1', 'p1')
+    const res = await createPremiumCheckout(buyer.id, plan.id)
 
     // The buyer's money is already on this invoice — cancelling it is the one
     // thing we must never do here.
     expect(cancelInvoice).not.toHaveBeenCalled()
     expect(createTelegramInvoice).toHaveBeenCalledTimes(1) // no recreate
-    // The grant ran (not just reported): the success ops notice was posted.
+    // The grant ran (not just reported): row paid, time added, ops notice posted.
+    expect((await getTx(old.id)).status).toBe('paid')
+    const [u] = await sql`select premium_until from users where id = ${buyer.id}`
+    expect(new Date(u.premium_until).getTime()).toBeGreaterThan(Date.now() + 29 * DAY_MS)
     expect(vi.mocked(notifyPaymentChannel).mock.calls.flat().join('\n')).toContain('💎 Premium purchased (TonPays)')
     // The old transaction is handed back, so the client's first poll sees paid.
     expect(res).toEqual({
-      transactionId: 'tx-old', provider: 'tonpays',
+      transactionId: old.id, provider: 'tonpays',
       payment: { cardNumber: '', cardHolder: '', amountToman: 50037, invoiceId: 'inv-old' },
     })
     expect(warnSpy.mock.calls.flat().join(' ')).toContain('already paid')
-    expect(findUpdate(recorded, 'tx-new')?.payload).toEqual({ status: 'canceled' }) // the never-invoiced attempt row is dropped
+    expect((await newRow()).status).toBe('canceled') // the never-invoiced attempt row is dropped
     warnSpy.mockRestore()
   })
 
   it('resume: an invoice awaiting buyer action is not cancelled — reports checkout_pending_action', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
-    vi.mocked(createTelegramInvoice).mockRejectedValue(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'already pending', 409))
+    const old = await existingPending()
+    vi.mocked(createTelegramInvoice).mockRejectedValue(pendingConflict())
     // Underpaid: a transfer already landed on this invoice, but the check
     // gives us no card to show.
     vi.mocked(checkInvoice).mockResolvedValue({
@@ -593,45 +524,38 @@ describe('createPremiumCheckout — tonpays', () => {
       cardNumber: null, cardHolder: null,
     })
 
-    const { recorded } = mockTonPaysDb({
-      plan, tomanPerStar: 500,
-      oldRow: { id: 'tx-old', plan_id: 'p1', price_toman: 50000, tonpays_invoice_id: 'inv-old', tonpays_final_amount: 50037 },
-    })
-
-    const res = await createPremiumCheckout('u1', 'p1')
+    const res = await createPremiumCheckout(buyer.id, plan.id)
 
     expect(cancelInvoice).not.toHaveBeenCalled() // would orphan money already transferred
     expect(createTelegramInvoice).toHaveBeenCalledTimes(1)
     expect(res).toEqual({ error: 'checkout_pending_action' })
     expect(warnSpy.mock.calls.flat().join(' ')).toContain('awaits buyer action')
-    expect(findUpdate(recorded, 'tx-new')?.payload).toEqual({ status: 'canceled' })
+    expect((await newRow()).status).toBe('canceled')
+    expect((await getTx(old.id)).status).toBe('pending_payment')
     warnSpy.mockRestore()
   })
 
   it('recovers from an untracked upstream pending invoice: cancels it and retries create once', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
     vi.mocked(createTelegramInvoice)
       .mockRejectedValueOnce(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'invoice inv-stray is pending', 409))
       .mockResolvedValueOnce({ invoiceId: 'inv-fresh', cardNumber: '6037-zzzz-zzzz-0000', cardHolder: 'Fresh Card', finalAmount: 50037, status: 'pending' })
     vi.mocked(cancelInvoice).mockResolvedValue(undefined)
 
     // No pending row of ours (the sweep already cancelled it locally), but a
-    // recent canceled row still carries the live upstream invoice id.
-    mockTonPaysDb({
-      plan, tomanPerStar: 500,
-      oldRow: null,
-      strayRow: { id: 'tx-stray', tonpays_invoice_id: 'inv-stray' },
-    })
+    // recent canceled row still carries the live upstream invoice id. An older
+    // one (outside the 48h window) must not be picked.
+    await existingPending({ status: 'canceled', tonpays_invoice_id: 'inv-ancient', tonpays_order_id: 'o1', created_at: new Date(Date.now() - 50 * 60 * 60 * 1000).toISOString() })
+    await existingPending({ status: 'canceled', tonpays_invoice_id: 'inv-stray', tonpays_order_id: 'o2' })
 
-    const res = await createPremiumCheckout('u1', 'p1')
+    const res = await createPremiumCheckout(buyer.id, plan.id)
 
     expect(checkInvoice).not.toHaveBeenCalled()
-    expect(cancelInvoice).toHaveBeenCalledWith('inv-stray')
+    expect(vi.mocked(cancelInvoice).mock.calls).toEqual([['inv-stray']])
     expect(createTelegramInvoice).toHaveBeenCalledTimes(2)
+    const fresh = await newRow()
     expect(res).toEqual({
-      transactionId: 'tx-new', provider: 'tonpays',
+      transactionId: fresh.id, provider: 'tonpays',
       payment: { cardNumber: '6037-zzzz-zzzz-0000', cardHolder: 'Fresh Card', amountToman: 50037, invoiceId: 'inv-fresh' },
     })
     expect(warnSpy.mock.calls.flat().join(' ')).toContain('inv-stray')
@@ -639,18 +563,15 @@ describe('createPremiumCheckout — tonpays', () => {
   })
 
   it('still retries once and logs loudly when no local invoice can be reconciled', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
     vi.mocked(createTelegramInvoice).mockRejectedValue(new TonPaysApiError('BUYER_HAS_PENDING_INVOICE', 'buyer has a pending invoice', 409))
 
-    mockTonPaysDb({ plan, tomanPerStar: 500, oldRow: null, strayRow: null })
-
-    const res = await createPremiumCheckout('u1', 'p1')
+    const res = await createPremiumCheckout(buyer.id, plan.id)
 
     expect(cancelInvoice).not.toHaveBeenCalled()
     expect(createTelegramInvoice).toHaveBeenCalledTimes(2)
     expect(res).toEqual({ error: 'checkout_failed' })
+    expect((await newRow()).status).toBe('canceled')
     // The silent-forever-loop case from the review: it must at least be loud.
     const logged = errSpy.mock.calls.flat().join(' ')
     expect(logged).toContain('BUYER_HAS_PENDING_INVOICE')
@@ -659,89 +580,66 @@ describe('createPremiumCheckout — tonpays', () => {
   })
 
   it('marks the row canceled when create fails outright', async () => {
-    vi.stubEnv('TONPAYS_API_KEY', 'key123'); vi.stubEnv('TONPAYS_CHECKOUT_ENABLED', 'true')
-    vi.mocked(generateTonPaysOrderId).mockReturnValue('order-new')
     vi.mocked(createTelegramInvoice).mockRejectedValue(new TonPaysApiError('INTERNAL_ERROR', 'boom', 500))
 
-    const { updates } = mockTonPaysDb({ plan, tomanPerStar: 500 })
-
-    const res = await createPremiumCheckout('u1', 'p1')
+    const res = await createPremiumCheckout(buyer.id, plan.id)
 
     expect(res).toEqual({ error: 'checkout_failed' })
-    expect(updates[0]).toMatchObject({ status: 'canceled' })
+    expect(await newRow()).toMatchObject({ status: 'canceled', tonpays_invoice_id: null })
   })
 })
 
 describe('getPremiumTransactionStatus — tonpays poll fallback', () => {
-  beforeEach(() => { vi.clearAllMocks(); _resetTonPaysPollThrottle() })
+  let me: Record<string, any>
 
-  // premium_transactions.select() answers the poll's own row fetch; its
-  // update() answers either handleTonPaysPaid's claim-and-grant update or the
-  // markGrantFailed/markCanceled update, depending on the scenario under test
-  // (each test only exercises one of those paths).
-  function mockPremiumTxDb(opts: { txRow: any; txUpdateResult?: any; usersRow?: any; userUpdateError?: any }) {
-    const txUpdates: any[] = []
-    const txUpdateFilters: Array<Array<{ method: string; args: unknown[] }>> = []
-    const userUpdates: any[] = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'premium_transactions') {
-        return {
-          select: () => chainable({ data: opts.txRow }),
-          update: (payload: any) => {
-            txUpdates.push(payload)
-            const filters: Array<{ method: string; args: unknown[] }> = []
-            txUpdateFilters.push(filters)
-            return chainable({ data: opts.txUpdateResult ?? null }, filters)
-          },
-        } as any
-      }
-      if (table === 'users') {
-        return {
-          select: () => chainable({ data: opts.usersRow }),
-          update: (payload: any) => { userUpdates.push(payload); return chainable({ data: null, error: opts.userUpdateError ?? null }) },
-        } as any
-      }
-      return chainable({ data: null })
-    })
-    return { txUpdates, txUpdateFilters, userUpdates }
-  }
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    _resetTonPaysPollThrottle()
+    await resetDb()
+    me = await createUser({ name: 'Ali', locale: null, telegram_id: 777 })
+  })
+  afterEach(async () => { await restoreUserUpdates() })
+
+  const pendingTonPays = (overrides: Record<string, unknown> = {}) => createTx(me.id, {
+    provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending',
+    price_toman: 50000, tonpays_final_amount: 50037, ...overrides,
+  })
+
+  const pendingCheck = { invoiceId: 'inv1', status: 'pending', paid: false, remainingAmount: null, refundPending: false, cardNumber: null, cardHolder: null }
+  const paidCheck = { invoiceId: 'inv1', status: 'paid', paid: true, remainingAmount: 0, refundPending: false, cardNumber: null, cardHolder: null }
 
   it('returns stored state unchanged for a non-pending or stars row, without calling checkInvoice', async () => {
-    mockPremiumTxDb({ txRow: { status: 'paid', user_id: 'u1', provider: 'stars', tonpays_invoice_id: null, tonpays_status: null } })
-    const res = await getPremiumTransactionStatus('tx1', 'u1')
-    expect(res).toEqual({ status: 'paid', provider: 'stars' })
+    const stars = await createTx(me.id, { status: 'paid' })
+    expect(await getPremiumTransactionStatus(stars.id, me.id)).toEqual({ status: 'paid', provider: 'stars' })
+    const done = await pendingTonPays({ status: 'canceled' })
+    expect(await getPremiumTransactionStatus(done.id, me.id)).toEqual({
+      status: 'canceled', provider: 'tonpays', tonpaysStatus: 'pending', remainingAmount: null, refundPending: false,
+    })
     expect(checkInvoice).not.toHaveBeenCalled()
   })
 
   it('poll on pending tonpays tx checks upstream and grants when paid', async () => {
-    mockPremiumTxDb({
-      txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
-      txUpdateResult: { id: 'tx1', user_id: 'u1', duration_days: 30, price_toman: 50000, tonpays_final_amount: 50037 },
-      usersRow: { premium_until: null, name: 'Ali', locale: null, telegram_id: 777 },
-    })
-    vi.mocked(checkInvoice).mockResolvedValue({
-      invoiceId: 'inv1', status: 'paid', paid: true, remainingAmount: 0, refundPending: false, cardNumber: null, cardHolder: null,
-    })
+    const tx = await pendingTonPays()
+    vi.mocked(checkInvoice).mockResolvedValue(paidCheck)
 
-    const res = await getPremiumTransactionStatus('tx1', 'u1')
+    const res = await getPremiumTransactionStatus(tx.id, me.id)
 
     expect(checkInvoice).toHaveBeenCalledWith('inv1')
-    // the grant actually ran (not just reported) — premium_until was extended on the user row
     expect(res).toEqual({ status: 'paid', provider: 'tonpays', tonpaysStatus: 'paid', remainingAmount: 0, refundPending: false })
+    // the grant actually ran (not just reported) — premium_until was extended on the user row
+    expect((await getTx(tx.id)).status).toBe('paid')
+    const [u] = await sql`select premium_until from users where id = ${me.id}`
+    expect(new Date(u.premium_until).getTime()).toBeGreaterThan(Date.now() + 29 * DAY_MS)
     // terminal state — the throttle/cache entry must not linger forever
-    expect(_tonpaysPollCacheHas('tx1')).toBe(false)
+    expect(_tonpaysPollCacheHas(tx.id)).toBe(false)
   })
 
   it('poll throttles upstream checks within 5s', async () => {
-    mockPremiumTxDb({
-      txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
-    })
-    vi.mocked(checkInvoice).mockResolvedValue({
-      invoiceId: 'inv1', status: 'pending', paid: false, remainingAmount: null, refundPending: false, cardNumber: null, cardHolder: null,
-    })
+    const tx = await pendingTonPays()
+    vi.mocked(checkInvoice).mockResolvedValue(pendingCheck)
 
-    await getPremiumTransactionStatus('tx1', 'u1')
-    const second = await getPremiumTransactionStatus('tx1', 'u1')
+    await getPremiumTransactionStatus(tx.id, me.id)
+    const second = await getPremiumTransactionStatus(tx.id, me.id)
 
     expect(checkInvoice).toHaveBeenCalledTimes(1)
     // throttled call still answers from the row's stored state, not an error
@@ -749,15 +647,11 @@ describe('getPremiumTransactionStatus — tonpays poll fallback', () => {
   })
 
   it('a throttled call reports the last real remainingAmount/refundPending instead of resetting to null/false', async () => {
-    mockPremiumTxDb({
-      txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
-    })
-    vi.mocked(checkInvoice).mockResolvedValue({
-      invoiceId: 'inv1', status: 'refund_pending', paid: false, remainingAmount: 12000, refundPending: true, cardNumber: null, cardHolder: null,
-    })
+    const tx = await pendingTonPays()
+    vi.mocked(checkInvoice).mockResolvedValue({ ...pendingCheck, status: 'refund_pending', remainingAmount: 12000, refundPending: true })
 
-    const first = await getPremiumTransactionStatus('tx1', 'u1')
-    const second = await getPremiumTransactionStatus('tx1', 'u1')
+    const first = await getPremiumTransactionStatus(tx.id, me.id)
+    const second = await getPremiumTransactionStatus(tx.id, me.id)
 
     expect(checkInvoice).toHaveBeenCalledTimes(1)
     expect(first).toEqual({ status: 'pending_payment', provider: 'tonpays', tonpaysStatus: 'refund_pending', remainingAmount: 12000, refundPending: true })
@@ -765,42 +659,41 @@ describe('getPremiumTransactionStatus — tonpays poll fallback', () => {
     expect(second).toEqual(first)
   })
 
-  it('poll marks the row canceled on expired status, guarded on status=pending_payment', async () => {
-    const { txUpdates, txUpdateFilters } = mockPremiumTxDb({
-      txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
-    })
-    vi.mocked(checkInvoice).mockResolvedValue({
-      invoiceId: 'inv1', status: 'expired', paid: false, remainingAmount: null, refundPending: false, cardNumber: null, cardHolder: null,
-    })
+  it('poll marks the row canceled on expired status', async () => {
+    const tx = await pendingTonPays()
+    vi.mocked(checkInvoice).mockResolvedValue({ ...pendingCheck, status: 'expired' })
 
-    const res = await getPremiumTransactionStatus('tx1', 'u1')
+    const res = await getPremiumTransactionStatus(tx.id, me.id)
 
     expect(res).toEqual({ status: 'canceled', provider: 'tonpays', tonpaysStatus: 'expired', remainingAmount: null, refundPending: false })
-    expect(txUpdates).toContainEqual({ status: 'canceled', tonpays_status: 'expired' })
-    // Guard: a webhook grant landing between the row read and this write must
-    // not be clobbered back to canceled (it could never be granted again).
-    const idx = txUpdates.findIndex((u) => u.status === 'canceled')
-    expect(txUpdateFilters[idx].some((f) => f.method === 'eq' && f.args[0] === 'status' && f.args[1] === 'pending_payment')).toBe(true)
+    expect(await getTx(tx.id)).toMatchObject({ status: 'canceled', tonpays_status: 'expired' })
     // terminal state — the throttle/cache entry must not linger forever
-    expect(_tonpaysPollCacheHas('tx1')).toBe(false)
+    expect(_tonpaysPollCacheHas(tx.id)).toBe(false)
+  })
+
+  it('the expired cancel is guarded on status=pending_payment: a webhook grant landing mid-poll is never clobbered', async () => {
+    const tx = await pendingTonPays()
+    vi.mocked(checkInvoice).mockImplementation(async () => {
+      await sql`update premium_transactions set status = 'paid' where id = ${tx.id}`
+      return { ...pendingCheck, status: 'expired' }
+    })
+
+    await getPremiumTransactionStatus(tx.id, me.id)
+
+    // (the response itself still says canceled — unchanged legacy behaviour)
+    expect(await getTx(tx.id)).toMatchObject({ status: 'paid', tonpays_status: 'pending' })
   })
 
   it('a failed grant marks paid_grant_failed and alerts the payment channel', async () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const { txUpdates } = mockPremiumTxDb({
-      txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
-      txUpdateResult: { id: 'tx1', user_id: 'u1', duration_days: 30, price_toman: 50000, tonpays_final_amount: 50037 },
-      usersRow: { premium_until: null, name: 'Ali', locale: null, telegram_id: 777 },
-      userUpdateError: { message: 'db exploded' },
-    })
-    vi.mocked(checkInvoice).mockResolvedValue({
-      invoiceId: 'inv1', status: 'paid', paid: true, remainingAmount: 0, refundPending: false, cardNumber: null, cardHolder: null,
-    })
+    const tx = await pendingTonPays()
+    await failPremiumUntilUpdates('db exploded')
+    vi.mocked(checkInvoice).mockResolvedValue(paidCheck)
 
-    const res = await getPremiumTransactionStatus('tx1', 'u1')
+    const res = await getPremiumTransactionStatus(tx.id, me.id)
 
     expect(res).toMatchObject({ status: 'paid_grant_failed' })
-    expect(txUpdates).toContainEqual({ status: 'paid_grant_failed' })
+    expect((await getTx(tx.id)).status).toBe('paid_grant_failed')
     // Money arrived and nothing was granted — ops must hear about it on the
     // same channel that reports successes, not only in a log line.
     const alert = vi.mocked(notifyPaymentChannel).mock.calls.flat().join('\n')
@@ -814,155 +707,152 @@ describe('getPremiumTransactionStatus — tonpays poll fallback', () => {
   })
 
   it('evicts the throttle/cache entry once a tx reaches a terminal state, but keeps it while still pending', async () => {
-    mockPremiumTxDb({
-      txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
-    })
-    vi.mocked(checkInvoice).mockResolvedValueOnce({
-      invoiceId: 'inv1', status: 'pending', paid: false, remainingAmount: null, refundPending: false, cardNumber: null, cardHolder: null,
-    })
-    await getPremiumTransactionStatus('tx1', 'u1')
-    expect(_tonpaysPollCacheHas('tx1')).toBe(true) // still pending — cache kept for the throttle window
+    const tx = await pendingTonPays()
+    vi.mocked(checkInvoice).mockResolvedValueOnce(pendingCheck)
+    await getPremiumTransactionStatus(tx.id, me.id)
+    expect(_tonpaysPollCacheHas(tx.id)).toBe(true) // still pending — cache kept for the throttle window
 
     _resetTonPaysPollThrottle() // bypass the 5s throttle so the next call actually re-checks upstream
-    vi.mocked(checkInvoice).mockResolvedValueOnce({
-      invoiceId: 'inv1', status: 'paid', paid: true, remainingAmount: 0, refundPending: false, cardNumber: null, cardHolder: null,
-    })
-    await getPremiumTransactionStatus('tx1', 'u1')
-    expect(_tonpaysPollCacheHas('tx1')).toBe(false) // now terminal — evicted
+    vi.mocked(checkInvoice).mockResolvedValueOnce(paidCheck)
+    await getPremiumTransactionStatus(tx.id, me.id)
+    expect(_tonpaysPollCacheHas(tx.id)).toBe(false) // now terminal — evicted
   })
 
   it('a checkInvoice failure does not break the poll — returns the stored state', async () => {
-    mockPremiumTxDb({
-      txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
-    })
+    const tx = await pendingTonPays()
     vi.mocked(checkInvoice).mockRejectedValue(new TonPaysApiError('INTERNAL_ERROR', 'boom', 500))
 
-    const res = await getPremiumTransactionStatus('tx1', 'u1')
+    const res = await getPremiumTransactionStatus(tx.id, me.id)
 
     expect(res).toEqual({ status: 'pending_payment', provider: 'tonpays', tonpaysStatus: 'pending', remainingAmount: null, refundPending: false })
   })
 
   it('a failed check still advances the throttle, so an outage does not get hammered on every poll', async () => {
-    mockPremiumTxDb({
-      txRow: { status: 'pending_payment', user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' },
-    })
+    const tx = await pendingTonPays()
     vi.mocked(checkInvoice).mockRejectedValue(new TonPaysApiError('INTERNAL_ERROR', 'boom', 500))
 
-    const first = await getPremiumTransactionStatus('tx1', 'u1')
-    const second = await getPremiumTransactionStatus('tx1', 'u1')
+    const first = await getPremiumTransactionStatus(tx.id, me.id)
+    const second = await getPremiumTransactionStatus(tx.id, me.id)
 
     expect(checkInvoice).toHaveBeenCalledTimes(1) // the second poll must be throttled, not re-hit the failing upstream
     expect(second).toEqual(first)
     expect(second).toEqual({ status: 'pending_payment', provider: 'tonpays', tonpaysStatus: 'pending', remainingAmount: null, refundPending: false })
   })
 
-  it('returns null for another user or an unknown tx', async () => {
-    mockPremiumTxDb({ txRow: { status: 'pending_payment', user_id: 'other', provider: 'tonpays', tonpays_invoice_id: 'inv1', tonpays_status: 'pending' } })
-    expect(await getPremiumTransactionStatus('tx1', 'u1')).toBeNull()
-    mockPremiumTxDb({ txRow: null })
-    expect(await getPremiumTransactionStatus('tx9', 'u1')).toBeNull()
+  it('a pending row with no invoice id yet is answered from storage without an upstream check', async () => {
+    const tx = await pendingTonPays({ tonpays_invoice_id: null, tonpays_status: null })
+    expect(await getPremiumTransactionStatus(tx.id, me.id)).toEqual({
+      status: 'pending_payment', provider: 'tonpays', tonpaysStatus: null, remainingAmount: null, refundPending: false,
+    })
+    expect(checkInvoice).not.toHaveBeenCalled()
+  })
+
+  it('returns null for another user, an unknown tx, or a malformed id', async () => {
+    const other = await createUser()
+    const foreign = await createTx(other.id, { provider: 'tonpays', tonpays_invoice_id: 'inv1' })
+    expect(await getPremiumTransactionStatus(foreign.id, me.id)).toBeNull()
+    expect(await getPremiumTransactionStatus(UNKNOWN_ID, me.id)).toBeNull()
+    expect(await getPremiumTransactionStatus('tx9', me.id)).toBeNull()
+    expect(checkInvoice).not.toHaveBeenCalled()
   })
 })
 
 describe('changeTonPaysCard', () => {
-  beforeEach(() => vi.clearAllMocks())
+  let me: Record<string, any>
+  let tx: Record<string, any>
 
-  function mockTxLookup(row: any) {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'premium_transactions') return chainable({ data: row })
-      return chainable({ data: null })
-    })
-  }
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    await resetDb()
+    me = await createUser()
+    tx = await createTx(me.id, { provider: 'tonpays', tonpays_invoice_id: 'inv1' })
+  })
 
   it('returns the new card on success', async () => {
-    mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
     vi.mocked(changeCard).mockResolvedValue({ cardNumber: '6037-1111', cardHolder: 'New Holder' })
 
-    const res = await changeTonPaysCard('tx1', 'u1')
+    const res = await changeTonPaysCard(tx.id, me.id)
 
     expect(changeCard).toHaveBeenCalledWith('inv1')
     expect(res).toEqual({ ok: true, cardNumber: '6037-1111', cardHolder: 'New Holder' })
   })
 
   it('maps a TonPays error with a COOLDOWN code, or httpStatus 429, to the cooldown code', async () => {
-    mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
-
     vi.mocked(changeCard).mockRejectedValueOnce(new TonPaysApiError('COOLDOWN', 'wait 60s', 400))
-    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'cooldown' })
+    expect(await changeTonPaysCard(tx.id, me.id)).toEqual({ ok: false, code: 'cooldown' })
 
     vi.mocked(changeCard).mockRejectedValueOnce(new TonPaysApiError('change_card_cooldown', 'wait', 400))
-    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'cooldown' }) // case-insensitive match
+    expect(await changeTonPaysCard(tx.id, me.id)).toEqual({ ok: false, code: 'cooldown' }) // case-insensitive match
 
     vi.mocked(changeCard).mockRejectedValueOnce(new TonPaysApiError('SOME_OTHER_CODE', 'rate limited', 429))
-    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'cooldown' }) // httpStatus 429 alone is enough
+    expect(await changeTonPaysCard(tx.id, me.id)).toEqual({ ok: false, code: 'cooldown' }) // httpStatus 429 alone is enough
   })
 
   it('maps a non-cooldown 4xx to invalid_request, not cooldown', async () => {
-    mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
     vi.mocked(changeCard).mockRejectedValue(new TonPaysApiError('INVALID_INVOICE', 'invoice not changeable', 400))
-
-    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'invalid_request' })
+    expect(await changeTonPaysCard(tx.id, me.id)).toEqual({ ok: false, code: 'invalid_request' })
   })
 
   it('maps an unexpected 5xx to an upstream error, not cooldown', async () => {
-    mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
     vi.mocked(changeCard).mockRejectedValue(new TonPaysApiError('INTERNAL_ERROR', 'boom', 500))
-
-    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'upstream_error' })
+    expect(await changeTonPaysCard(tx.id, me.id)).toEqual({ ok: false, code: 'upstream_error' })
   })
 
   it('maps INVALID_RESPONSE to an upstream error even when its carried httpStatus looks like a 4xx', async () => {
-    mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
     vi.mocked(changeCard).mockRejectedValue(new TonPaysApiError('INVALID_RESPONSE', 'tonpays_invalid_json_http_400', 400))
-
-    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'upstream_error' })
+    expect(await changeTonPaysCard(tx.id, me.id)).toEqual({ ok: false, code: 'upstream_error' })
   })
 
-  it('reports not_found for a foreign tx or a stars row', async () => {
-    mockTxLookup({ user_id: 'other', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
-    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'not_found' })
+  it('reports not_found for a foreign tx, a stars row, an unknown or a malformed id', async () => {
+    const other = await createUser()
+    const foreign = await createTx(other.id, { provider: 'tonpays', tonpays_invoice_id: 'inv2' })
+    expect(await changeTonPaysCard(foreign.id, me.id)).toEqual({ ok: false, code: 'not_found' })
 
-    mockTxLookup({ user_id: 'u1', provider: 'stars', tonpays_invoice_id: null })
-    expect(await changeTonPaysCard('tx1', 'u1')).toEqual({ ok: false, code: 'not_found' })
+    const stars = await createTx(me.id)
+    expect(await changeTonPaysCard(stars.id, me.id)).toEqual({ ok: false, code: 'not_found' })
+
+    expect(await changeTonPaysCard(UNKNOWN_ID, me.id)).toEqual({ ok: false, code: 'not_found' })
+    expect(await changeTonPaysCard('tx9', me.id)).toEqual({ ok: false, code: 'not_found' })
+    expect(changeCard).not.toHaveBeenCalled()
   })
 })
 
 describe('submitTonPaysRefundCard', () => {
-  beforeEach(() => vi.clearAllMocks())
+  let me: Record<string, any>
+  let tx: Record<string, any>
 
-  function mockTxLookup(row: any) {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'premium_transactions') return chainable({ data: row })
-      return chainable({ data: null })
-    })
-  }
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    await resetDb()
+    me = await createUser()
+    tx = await createTx(me.id, { provider: 'tonpays', tonpays_invoice_id: 'inv1' })
+  })
 
   it('validates card number (16 digits after stripping spaces) and non-empty holder, and forwards to tonpays', async () => {
-    mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
-
-    expect(await submitTonPaysRefundCard('tx1', 'u1', '1234', 'Ali')).toEqual({ ok: false, code: 'invalid_card' })
-    expect(await submitTonPaysRefundCard('tx1', 'u1', '6037 9911 2233 4455', '')).toEqual({ ok: false, code: 'invalid_card' })
-    expect(await submitTonPaysRefundCard('tx1', 'u1', '6037 9911 2233 4455', '   ')).toEqual({ ok: false, code: 'invalid_card' })
+    expect(await submitTonPaysRefundCard(tx.id, me.id, '1234', 'Ali')).toEqual({ ok: false, code: 'invalid_card' })
+    expect(await submitTonPaysRefundCard(tx.id, me.id, '6037 9911 2233 4455', '')).toEqual({ ok: false, code: 'invalid_card' })
+    expect(await submitTonPaysRefundCard(tx.id, me.id, '6037 9911 2233 4455', '   ')).toEqual({ ok: false, code: 'invalid_card' })
     expect(submitRefundCard).not.toHaveBeenCalled()
 
     vi.mocked(submitRefundCard).mockResolvedValue(undefined)
-    const res = await submitTonPaysRefundCard('tx1', 'u1', '6037 9911 2233 4455', 'Ali Rezaei')
+    const res = await submitTonPaysRefundCard(tx.id, me.id, '6037 9911 2233 4455', 'Ali Rezaei')
     expect(res).toEqual({ ok: true })
     expect(submitRefundCard).toHaveBeenCalledWith('inv1', '6037991122334455', 'Ali Rezaei')
   })
 
-  it('reports not_found for a foreign tx or a stars row', async () => {
-    mockTxLookup({ user_id: 'other', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
-    expect(await submitTonPaysRefundCard('tx1', 'u1', '6037991122334455', 'Ali')).toEqual({ ok: false, code: 'not_found' })
+  it('reports not_found for a foreign tx, a stars row or a malformed id', async () => {
+    const other = await createUser()
+    const foreign = await createTx(other.id, { provider: 'tonpays', tonpays_invoice_id: 'inv2' })
+    expect(await submitTonPaysRefundCard(foreign.id, me.id, '6037991122334455', 'Ali')).toEqual({ ok: false, code: 'not_found' })
 
-    mockTxLookup({ user_id: 'u1', provider: 'stars', tonpays_invoice_id: null })
-    expect(await submitTonPaysRefundCard('tx1', 'u1', '6037991122334455', 'Ali')).toEqual({ ok: false, code: 'not_found' })
+    const stars = await createTx(me.id)
+    expect(await submitTonPaysRefundCard(stars.id, me.id, '6037991122334455', 'Ali')).toEqual({ ok: false, code: 'not_found' })
+
+    expect(await submitTonPaysRefundCard('tx9', me.id, '6037991122334455', 'Ali')).toEqual({ ok: false, code: 'not_found' })
   })
 
   it('reports an upstream_error when tonpays rejects the refund submission', async () => {
-    mockTxLookup({ user_id: 'u1', provider: 'tonpays', tonpays_invoice_id: 'inv1' })
     vi.mocked(submitRefundCard).mockRejectedValue(new TonPaysApiError('INTERNAL_ERROR', 'boom', 500))
-
-    expect(await submitTonPaysRefundCard('tx1', 'u1', '6037991122334455', 'Ali')).toEqual({ ok: false, code: 'upstream_error' })
+    expect(await submitTonPaysRefundCard(tx.id, me.id, '6037991122334455', 'Ali')).toEqual({ ok: false, code: 'upstream_error' })
   })
 })

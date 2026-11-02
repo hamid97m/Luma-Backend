@@ -1,24 +1,30 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/bot.js', () => ({ getBotStarBalance: vi.fn() }))
 
 import { buildApp } from '../src/server.js'
-import { db } from '../src/db.js'
 import { getBotStarBalance } from '../src/bot.js'
 import { signAdminToken } from '../src/routes/admin/auth-utils.js'
-import { chainable } from './admin-helpers.js'
+import { resetDb, createUser, sql } from './helpers/db.js'
+import { createGiftTx, failWritesTo } from './helpers/gifts-referrals.js'
 
 describe('admin gifts', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
   let headers: Record<string, string>
+  let alice: Record<string, any>
+  let bob: Record<string, any>
 
   beforeEach(async () => {
-    vi.clearAllMocks()
+    await resetDb()
     process.env.ADMIN_JWT_SECRET = 'test-secret'
     app = await buildApp()
+    // The admin preHandler only verifies the JWT (no admins-table lookup).
     headers = { authorization: `Bearer ${signAdminToken({ adminId: 'a1', username: 'root' })}` }
+    alice = await createUser({ name: 'Alice' })
+    bob = await createUser({ name: 'Bob', gender: 'woman', looking_for: 'men' })
   })
+
+  const list = (qs = '') => app.inject({ method: 'GET', url: `/admin/gifts/transactions${qs}`, headers })
 
   it('rejects requests without a valid admin token', async () => {
     const res = await app.inject({ method: 'GET', url: '/admin/gifts/config' })
@@ -26,36 +32,44 @@ describe('admin gifts', () => {
   })
 
   it('reads the gift config', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'gift_config') {
-        return chainable({ data: { markup_percent: 33, low_balance_threshold: 500 }, error: null })
-      }
-      return chainable({ data: null, error: null })
-    })
-
+    await sql`update gift_config set markup_percent = 33, low_balance_threshold = 500 where id = true`
     const res = await app.inject({ method: 'GET', url: '/admin/gifts/config', headers })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ markupPercent: 33, lowBalanceThreshold: 500 })
   })
 
-  it('updates the gift config and returns the new values', async () => {
-    const configUpdate = vi.fn(() =>
-      chainable({ data: { markup_percent: 40, low_balance_threshold: 1000 }, error: null }),
-    )
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'gift_config') return { update: configUpdate } as any
-      return chainable({ data: null, error: null })
-    })
+  it('500 config_fetch_failed when the config row is missing', async () => {
+    await sql`delete from gift_config`
+    const res = await app.inject({ method: 'GET', url: '/admin/gifts/config', headers })
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toEqual({ error: 'config_fetch_failed' })
+  })
 
+  it('updates the gift config and returns the new values', async () => {
     const res = await app.inject({
       method: 'PUT', url: '/admin/gifts/config', headers,
       payload: { markupPercent: 40, lowBalanceThreshold: 1000 },
     })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ markupPercent: 40, lowBalanceThreshold: 1000 })
-    expect((configUpdate.mock.calls[0][0] as any)).toMatchObject({
-      markup_percent: 40, low_balance_threshold: 1000,
-    })
+    const [row] = await sql`select markup_percent, low_balance_threshold from gift_config`
+    expect(row).toEqual({ markup_percent: 40, low_balance_threshold: 1000 })
+  })
+
+  it('a partial update leaves the other field untouched', async () => {
+    const res = await app.inject({ method: 'PUT', url: '/admin/gifts/config', headers, payload: { markupPercent: 10 } })
+    expect(res.json()).toEqual({ markupPercent: 10, lowBalanceThreshold: 500 })
+  })
+
+  it('500 config_update_failed when the write errors', async () => {
+    const cleanup = await failWritesTo('gift_config', 'UPDATE')
+    try {
+      const res = await app.inject({ method: 'PUT', url: '/admin/gifts/config', headers, payload: { markupPercent: 10 } })
+      expect(res.statusCode).toBe(500)
+      expect(res.json()).toEqual({ error: 'config_update_failed' })
+    } finally {
+      await cleanup()
+    }
   })
 
   it('rejects a negative markupPercent on update', async () => {
@@ -67,157 +81,116 @@ describe('admin gifts', () => {
   })
 
   it('flags low balance when below the configured threshold', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'gift_config') {
-        return chainable({ data: { low_balance_threshold: 500 }, error: null })
-      }
-      return chainable({ data: null, error: null })
-    })
     vi.mocked(getBotStarBalance).mockResolvedValue(100)
-
     const res = await app.inject({ method: 'GET', url: '/admin/gifts/balance', headers })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ balance: 100, lowBalanceThreshold: 500, low: true })
   })
 
   it('returns balance: null without erroring when the Telegram call fails', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'gift_config') {
-        return chainable({ data: { low_balance_threshold: 500 }, error: null })
-      }
-      return chainable({ data: null, error: null })
-    })
     vi.mocked(getBotStarBalance).mockRejectedValue(new Error('telegram down'))
-
     const res = await app.inject({ method: 'GET', url: '/admin/gifts/balance', headers })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ balance: null, lowBalanceThreshold: 500, low: false })
   })
 
-  it('lists recent gift transactions with buyer/recipient names', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'gift_transactions') {
-        return chainable({
-          data: [{
-            id: 'g1', gift_emoji: '🌹', gift_star_cost: 15, charged_stars: 20, markup_stars: 5,
-            status: 'sent', context: 'chat', intro_status: null, created_at: 'now',
-            buyer: { name: 'Alice' }, recipient: { name: 'Bob' },
-          }],
-          count: 1,
-          error: null,
-        })
-      }
-      return chainable({ data: [], count: 0, error: null })
-    })
+  it('treats a missing config row as threshold 0 on /balance', async () => {
+    await sql`delete from gift_config`
+    vi.mocked(getBotStarBalance).mockResolvedValue(100)
+    const res = await app.inject({ method: 'GET', url: '/admin/gifts/balance', headers })
+    expect(res.json()).toEqual({ balance: 100, lowBalanceThreshold: 0, low: false })
+  })
 
-    const res = await app.inject({ method: 'GET', url: '/admin/gifts/transactions', headers })
+  it('lists recent gift transactions with buyer/recipient names', async () => {
+    const tx = await createGiftTx(alice.id, bob.id, {
+      context: 'chat', status: 'sent', created_at: '2026-10-01T10:00:00Z',
+    })
+    const res = await list()
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({
       items: [{
-        id: 'g1', buyerName: 'Alice', recipientName: 'Bob', emoji: '🌹',
+        id: tx.id, buyerName: 'Alice', recipientName: 'Bob', emoji: '🌹',
         giftStarCost: 15, chargedStars: 20, markupStars: 5,
-        status: 'sent', context: 'chat', introStatus: null, createdAt: 'now',
+        status: 'sent', context: 'chat', introStatus: null, createdAt: '2026-10-01T10:00:00.000Z',
       }],
       total: 1, page: 1, pageCount: 1,
     })
   })
 
-  it('applies a status filter as .eq("status", ...)', async () => {
-    const log: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'gift_transactions') return chainable({ data: [], count: 0, error: null }, log)
-      return chainable({ data: [], count: 0, error: null })
-    })
-
-    const res = await app.inject({
-      method: 'GET', url: '/admin/gifts/transactions?status=paid', headers,
-    })
-    expect(res.statusCode).toBe(200)
-    expect(log.some((c) => c.method === 'eq' && c.args[0] === 'status' && c.args[1] === 'paid')).toBe(true)
-    expect(log.some((c) => c.method === 'eq' && c.args[0] === 'context')).toBe(false)
+  it('orders newest first', async () => {
+    const a = await createGiftTx(alice.id, bob.id, { created_at: '2026-10-01T00:00:00Z' })
+    const b = await createGiftTx(alice.id, bob.id, { created_at: '2026-10-03T00:00:00Z' })
+    const c = await createGiftTx(alice.id, bob.id, { created_at: '2026-10-02T00:00:00Z' })
+    expect((await list()).json().items.map((i: any) => i.id)).toEqual([b.id, c.id, a.id])
   })
 
-  it('applies a context filter as .eq("context", ...)', async () => {
-    const log: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'gift_transactions') return chainable({ data: [], count: 0, error: null }, log)
-      return chainable({ data: [], count: 0, error: null })
+  describe('filters', () => {
+    beforeEach(async () => {
+      await createGiftTx(alice.id, bob.id, { status: 'paid', context: 'chat' })
+      await createGiftTx(alice.id, bob.id, { status: 'paid', context: 'discovery' })
+      await createGiftTx(alice.id, bob.id, { status: 'sent', context: 'discovery' })
     })
 
-    const res = await app.inject({
-      method: 'GET', url: '/admin/gifts/transactions?context=discovery', headers,
+    it('applies a status filter', async () => {
+      const body = (await list('?status=paid')).json()
+      expect(body.total).toBe(2)
+      expect(body.items.every((i: any) => i.status === 'paid')).toBe(true)
     })
-    expect(res.statusCode).toBe(200)
-    expect(log.some((c) => c.method === 'eq' && c.args[0] === 'context' && c.args[1] === 'discovery')).toBe(true)
-    expect(log.some((c) => c.method === 'eq' && c.args[0] === 'status')).toBe(false)
+
+    it('applies a context filter', async () => {
+      const body = (await list('?context=discovery')).json()
+      expect(body.total).toBe(2)
+      expect(body.items.every((i: any) => i.context === 'discovery')).toBe(true)
+    })
+
+    it('combines status and context filters', async () => {
+      const body = (await list('?status=paid&context=discovery')).json()
+      expect(body.total).toBe(1)
+      expect(body.items).toHaveLength(1)
+    })
+
+    it('ignores invalid status/context values instead of filtering or erroring', async () => {
+      const res = await list('?status=bogus&context=nowhere')
+      expect(res.statusCode).toBe(200)
+      expect(res.json().total).toBe(3)
+    })
+
+    it('applies status=all/context=all as no filter', async () => {
+      const res = await list('?status=all&context=all')
+      expect(res.statusCode).toBe(200)
+      expect(res.json().total).toBe(3)
+    })
   })
 
-  it('ignores invalid status/context values instead of filtering or erroring', async () => {
-    const log: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'gift_transactions') return chainable({ data: [], count: 0, error: null }, log)
-      return chainable({ data: [], count: 0, error: null })
-    })
+  it('paginates: computes pageCount from total, echoes the page, and slices 25 per page', async () => {
+    const rows = Array.from({ length: 53 }, (_, i) => ({
+      buyer_id: alice.id, recipient_id: bob.id, context: 'discovery', gift_id: 'g',
+      gift_star_cost: 15, charged_stars: 20,
+      created_at: new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString(),
+    }))
+    await sql`insert into gift_transactions ${sql(rows)}`
 
-    const res = await app.inject({
-      method: 'GET', url: '/admin/gifts/transactions?status=bogus&context=nowhere', headers,
-    })
-    expect(res.statusCode).toBe(200)
-    expect(log.some((c) => c.method === 'eq')).toBe(false)
+    const p3 = (await list('?page=3')).json()
+    expect(p3.total).toBe(53)
+    expect(p3.page).toBe(3)
+    expect(p3.pageCount).toBe(3) // ceil(53 / 25)
+    expect(p3.items).toHaveLength(3)
+
+    // Page 2 = rows 25..49 of the newest-first list.
+    const p2 = (await list('?page=2')).json()
+    expect(p2.items).toHaveLength(25)
+    expect(p2.items[0].createdAt).toBe(rows[52 - 25].created_at)
+    expect(p2.items[24].createdAt).toBe(rows[52 - 49].created_at)
   })
 
-  it('applies status=all/context=all as no filter', async () => {
-    const log: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'gift_transactions') return chainable({ data: [], count: 0, error: null }, log)
-      return chainable({ data: [], count: 0, error: null })
-    })
-
-    const res = await app.inject({
-      method: 'GET', url: '/admin/gifts/transactions?status=all&context=all', headers,
-    })
-    expect(res.statusCode).toBe(200)
-    expect(log.some((c) => c.method === 'eq')).toBe(false)
-  })
-
-  it('paginates: computes pageCount from count and echoes the requested page', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'gift_transactions') return chainable({ data: [], count: 53, error: null })
-      return chainable({ data: [], count: 0, error: null })
-    })
-
-    const res = await app.inject({
-      method: 'GET', url: '/admin/gifts/transactions?page=3', headers,
-    })
-    expect(res.statusCode).toBe(200)
-    const body = res.json()
-    expect(body.total).toBe(53)
-    expect(body.page).toBe(3)
-    expect(body.pageCount).toBe(3) // ceil(53 / 25)
-  })
-
-  it('uses .range(from, from + PAGE_SIZE - 1) for the requested page', async () => {
-    const log: Array<{ method: string; args: unknown[] }> = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'gift_transactions') return chainable({ data: [], count: 0, error: null }, log)
-      return chainable({ data: [], count: 0, error: null })
-    })
-
-    const res = await app.inject({
-      method: 'GET', url: '/admin/gifts/transactions?page=2', headers,
-    })
-    expect(res.statusCode).toBe(200)
-    expect(log.some((c) => c.method === 'range' && c.args[0] === 25 && c.args[1] === 49)).toBe(true)
-  })
-
-  it('defaults to page 1 with no total when the query errors', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'gift_transactions') return chainable({ data: null, count: null, error: { message: 'boom' } })
-      return chainable({ data: [], count: 0, error: null })
-    })
-
-    const res = await app.inject({ method: 'GET', url: '/admin/gifts/transactions', headers })
-    expect(res.statusCode).toBe(500)
-    expect(res.json()).toEqual({ error: 'transactions_fetch_failed' })
+  it('returns 500 transactions_fetch_failed when the query errors', async () => {
+    await sql`alter table gift_transactions rename column gift_emoji to gift_emoji_x`
+    try {
+      const res = await list()
+      expect(res.statusCode).toBe(500)
+      expect(res.json()).toEqual({ error: 'transactions_fetch_failed' })
+    } finally {
+      await sql`alter table gift_transactions rename column gift_emoji_x to gift_emoji`
+    }
   })
 })

@@ -1,16 +1,79 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../../db.js'
+import { sql, isUuid } from '../../db.js'
 import { pickFakeSender, type FakeChatUser } from '../../messaging/fakeParticipant.js'
 import { deliverMessageNotification } from '../../messaging/deliver.js'
 
 const PAGE_SIZE = 20
 const MESSAGES_PAGE_SIZE = 50
 
-const MATCH_SELECT = `
-  id, created_at, last_message_at, user1_id, user2_id,
-  user1:users!matches_user1_id_fkey(id, name, is_seed, telegram_id, last_active, notified_offline_at, allows_write_to_pm, user_photos(url, position)),
-  user2:users!matches_user2_id_fkey(id, name, is_seed, telegram_id, last_active, notified_offline_at, allows_write_to_pm, user_photos(url, position))
-`
+// Participant columns, flattened per side (u1_* / u2_*) and rebuilt into the
+// `user1` / `user2` objects the old embedded select returned. Built in JS (not
+// json_build_object) so timestamps keep the ISO format of the type parser.
+const USER_COLS = ['id', 'name', 'is_seed', 'telegram_id', 'last_active', 'notified_offline_at', 'allows_write_to_pm'] as const
+
+const participantCols = (alias: 'u1' | 'u2') => sql.unsafe(
+  USER_COLS.map((c) => `${alias}.${c} as ${alias}_${c}`).join(', ') +
+  `, coalesce((select json_agg(json_build_object('url', p.url, 'position', p.position))
+              from user_photos p where p.user_id = ${alias}.id), '[]') as ${alias}_user_photos`,
+)
+
+function nestUser(row: any, alias: 'u1' | 'u2') {
+  if (row[`${alias}_id`] == null) return null // left join miss → null, as PostgREST did
+  const u: Record<string, unknown> = {}
+  for (const c of USER_COLS) u[c] = row[`${alias}_${c}`]
+  u.user_photos = row[`${alias}_user_photos`] ?? []
+  return u
+}
+
+/** Matches with both participants nested as `user1` / `user2` (old MATCH_SELECT shape). */
+function withParticipants(rows: any[]) {
+  return rows.map((row) => ({
+    id: row.id, created_at: row.created_at, last_message_at: row.last_message_at,
+    user1_id: row.user1_id, user2_id: row.user2_id,
+    user1: nestUser(row, 'u1'), user2: nestUser(row, 'u2'),
+    message_count: row.message_count, last_body: row.last_body, last_created_at: row.last_created_at,
+    has_last: row.has_last,
+  }))
+}
+
+async function findMatch(matchId: string) {
+  const rows = await sql`
+    select m.id, m.created_at, m.last_message_at, m.user1_id, m.user2_id,
+           ${participantCols('u1')}, ${participantCols('u2')}
+    from matches m
+    left join users u1 on u1.id = m.user1_id
+    left join users u2 on u2.id = m.user2_id
+    where m.id = ${matchId}`
+  return withParticipants(rows)[0]
+}
+
+/** One page of chat-list rows (newest activity first), each with its non-icebreaker
+ *  message count and latest non-icebreaker message. `ids` restricts the set. */
+async function chatListRows(from: number, ids?: string[]) {
+  const rows = await sql`
+    select m.id, m.created_at, m.last_message_at, m.user1_id, m.user2_id,
+           ${participantCols('u1')}, ${participantCols('u2')},
+           (select count(*)::int from messages c where c.match_id = m.id and c.type <> 'icebreaker') as message_count,
+           last.body as last_body, last.created_at as last_created_at, last.found as has_last
+    from matches m
+    left join users u1 on u1.id = m.user1_id
+    left join users u2 on u2.id = m.user2_id
+    left join lateral (
+      select l.body, l.created_at, true as found from messages l
+      where l.match_id = m.id and l.type <> 'icebreaker'
+      order by l.created_at desc limit 1
+    ) last on true
+    ${ids ? sql`where m.id = any(${ids}::uuid[])` : sql``}
+    order by m.last_message_at desc
+    limit ${PAGE_SIZE} offset ${from}`
+  return withParticipants(rows).map((row) => ({
+    matchId: row.id,
+    matchedAt: row.created_at,
+    users: [participant(row.user1), participant(row.user2)],
+    messageCount: row.message_count ?? 0,
+    lastMessage: row.has_last ? { body: row.last_body, createdAt: row.last_created_at } : null,
+  }))
+}
 
 function participant(u: any) {
   const photo =
@@ -26,41 +89,26 @@ function fakeChatUser(u: any): FakeChatUser {
   }
 }
 
-// Match ids where a fake chat has ≥1 unread message from the real user.
-// Reused by GET /chats/unread-count and the ?filter=fake-unread list.
+// Match ids where a fake chat (exactly one seed participant) has ≥1 unread,
+// non-icebreaker message from the real user. Reused by GET /chats/unread-count
+// and the ?filter=fake-unread list. Errors yield [] — the old version ignored them.
 async function fakeUnreadMatchIds(): Promise<string[]> {
-  const { data: seeds } = await db.from('users').select('id').eq('is_seed', true)
-  const seedIds = (seeds ?? []).map((s: any) => s.id)
-  if (seedIds.length === 0) return []
-
-  const inList = `(${seedIds.join(',')})`
-  const { data: matches } = await db
-    .from('matches')
-    .select('id, user1_id, user2_id')
-    .or(`user1_id.in.${inList},user2_id.in.${inList}`)
-
-  const realByMatch = new Map<string, string>() // matchId -> real participant id
-  for (const m of matches ?? []) {
-    const u1Seed = seedIds.includes(m.user1_id)
-    const u2Seed = seedIds.includes(m.user2_id)
-    if (u1Seed && u2Seed) continue // both fake -> no real recipient
-    realByMatch.set(m.id, u1Seed ? m.user2_id : m.user1_id)
+  try {
+    const rows = await sql<{ id: string }[]>`
+      select distinct m.id
+      from matches m
+      join users u1 on u1.id = m.user1_id
+      join users u2 on u2.id = m.user2_id
+      join messages msg on msg.match_id = m.id
+      where u1.is_seed <> u2.is_seed
+        and msg.read_at is null
+        and msg.type <> 'icebreaker'
+        and msg.sender_id = case when u1.is_seed then m.user2_id else m.user1_id end`
+    return rows.map((r) => r.id)
+  } catch (err) {
+    console.error('[admin] fake-unread lookup failed:', (err as Error)?.message ?? err)
+    return []
   }
-  if (realByMatch.size === 0) return []
-
-  const matchIds = [...realByMatch.keys()]
-  const { data: unread } = await db
-    .from('messages')
-    .select('match_id, sender_id')
-    .is('read_at', null)
-    .neq('type', 'icebreaker')
-    .in('match_id', matchIds)
-
-  const result = new Set<string>()
-  for (const msg of unread ?? []) {
-    if (realByMatch.get(msg.match_id) === msg.sender_id) result.add(msg.match_id)
-  }
-  return [...result]
 }
 
 export async function adminChatsRoutes(app: FastifyInstance) {
@@ -78,65 +126,30 @@ export async function adminChatsRoutes(app: FastifyInstance) {
       const unreadIds = await fakeUnreadMatchIds()
       const total = unreadIds.length
       if (total === 0) return { items: [], total: 0, page: pageNum, pageCount: 1 }
-      // fakeUnreadMatchIds returns ids in arbitrary order; order the full set by
-      // most-recent activity before paginating so page boundaries are stable.
-      const { data: ordered, error: orderErr } = await db
-        .from('matches').select('id').in('id', unreadIds).order('last_message_at', { ascending: false })
-      if (orderErr) return reply.status(500).send({ error: 'chats_fetch_failed' })
-      const pageIds = (ordered ?? []).map((r: any) => r.id).slice(from, from + PAGE_SIZE)
-      const { data: rows, error } = await db
-        .from('matches').select(MATCH_SELECT).in('id', pageIds).order('last_message_at', { ascending: false })
-      if (error) return reply.status(500).send({ error: 'chats_fetch_failed' })
-      const items = await Promise.all((rows ?? []).map(async (row: any) => {
-        const [{ count: messageCount }, { data: lastRows }] = await Promise.all([
-          db.from('messages').select('id', { count: 'exact', head: true }).eq('match_id', row.id).neq('type', 'icebreaker'),
-          db.from('messages').select('body, created_at').eq('match_id', row.id).neq('type', 'icebreaker').order('created_at', { ascending: false }).limit(1),
-        ])
-        const last = lastRows?.[0]
-        return {
-          matchId: row.id, matchedAt: row.created_at,
-          users: [participant(row.user1), participant(row.user2)],
-          messageCount: messageCount ?? 0,
-          lastMessage: last ? { body: last.body, createdAt: last.created_at } : null,
-        }
-      }))
+      let items
+      try {
+        items = await chatListRows(from, unreadIds)
+      } catch (err) {
+        req.log.error({ err }, 'chats fetch failed')
+        return reply.status(500).send({ error: 'chats_fetch_failed' })
+      }
       return { items, total, page: pageNum, pageCount: Math.max(1, Math.ceil(total / PAGE_SIZE)) }
     }
 
-    const { data: rows, count, error } = await db
-      .from('matches')
-      .select(MATCH_SELECT, { count: 'exact' })
-      .order('last_message_at', { ascending: false })
-      .range(from, from + PAGE_SIZE - 1)
-
-    if (error) return reply.status(500).send({ error: 'chats_fetch_failed' })
-
     let items
+    let total: number
     try {
-      items = await Promise.all(
-        (rows ?? []).map(async (row: any) => {
-          const [{ count: messageCount, error: countErr }, { data: lastRows, error: lastErr }] = await Promise.all([
-            db.from('messages').select('id', { count: 'exact', head: true }).eq('match_id', row.id).neq('type', 'icebreaker'),
-            db.from('messages').select('body, created_at').eq('match_id', row.id).neq('type', 'icebreaker')
-              .order('created_at', { ascending: false }).limit(1),
-          ])
-          if (countErr || lastErr) throw new Error('chats sub-query failed')
-          const last = lastRows?.[0]
-          return {
-            matchId: row.id,
-            matchedAt: row.created_at,
-            users: [participant(row.user1), participant(row.user2)],
-            messageCount: messageCount ?? 0,
-            lastMessage: last ? { body: last.body, createdAt: last.created_at } : null,
-          }
-        })
-      )
+      const [rows, [{ count }]] = await Promise.all([
+        chatListRows(from),
+        sql<{ count: number }[]>`select count(*)::int as count from matches`,
+      ])
+      items = rows
+      total = count
     } catch (err) {
       req.log.error({ err }, 'chats fetch failed')
       return reply.status(500).send({ error: 'chats_fetch_failed' })
     }
 
-    const total = count ?? 0
     return { items, total, page: pageNum, pageCount: Math.max(1, Math.ceil(total / PAGE_SIZE)) }
   })
 
@@ -146,14 +159,11 @@ export async function adminChatsRoutes(app: FastifyInstance) {
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const from = (pageNum - 1) * MESSAGES_PAGE_SIZE
 
-    const { data: match, error: matchErr } = await db
-      .from('matches')
-      .select(MATCH_SELECT)
-      .eq('id', matchId)
-      .single()
-
-    if (matchErr && matchErr.code !== 'PGRST116') {
-      req.log.error({ err: matchErr }, 'match lookup failed')
+    let match: any
+    try {
+      match = isUuid(matchId) ? await findMatch(matchId) : undefined
+    } catch (err) {
+      req.log.error({ err }, 'match lookup failed')
       return reply.status(500).send({ error: 'chats_fetch_failed' })
     }
     if (!match) return reply.status(404).send({ error: 'match_not_found' })
@@ -163,24 +173,33 @@ export async function adminChatsRoutes(app: FastifyInstance) {
     // read-receipts between two real users).
     const picked = pickFakeSender(fakeChatUser((match as any).user1), fakeChatUser((match as any).user2))
     if (picked) {
-      await db
-        .from('messages')
-        .update({ read_at: new Date().toISOString() })
-        .eq('match_id', matchId)
-        .eq('sender_id', picked.recipient.id)
-        .is('read_at', null)
+      try {
+        await sql`
+          update messages set read_at = ${new Date().toISOString()}
+          where match_id = ${matchId} and sender_id = ${picked.recipient.id} and read_at is null`
+      } catch (err) {
+        req.log.warn({ err }, 'marking fake-chat messages read failed') // ignored before, too
+      }
     }
 
-    const { data: rows, count, error } = await db
-      .from('messages')
-      .select('id, sender_id, body, created_at, read_at, type, icebreaker_answer', { count: 'exact' })
-      .eq('match_id', matchId)
-      .order('created_at', { ascending: true })
-      .range(from, from + MESSAGES_PAGE_SIZE - 1)
+    let rows: any[]
+    let total: number
+    try {
+      const [msgRows, [{ count }]] = await Promise.all([
+        sql`
+          select id, sender_id, body, created_at, read_at, type, icebreaker_answer
+          from messages where match_id = ${matchId}
+          order by created_at asc
+          limit ${MESSAGES_PAGE_SIZE} offset ${from}`,
+        sql<{ count: number }[]>`select count(*)::int as count from messages where match_id = ${matchId}`,
+      ])
+      rows = msgRows
+      total = count
+    } catch (err) {
+      req.log.error({ err }, 'messages fetch failed')
+      return reply.status(500).send({ error: 'messages_fetch_failed' })
+    }
 
-    if (error) return reply.status(500).send({ error: 'messages_fetch_failed' })
-
-    const total = count ?? 0
     return {
       match: {
         id: (match as any).id,
@@ -206,10 +225,11 @@ export async function adminChatsRoutes(app: FastifyInstance) {
     if (!trimmed) return reply.status(400).send({ error: 'empty_message' })
     if (trimmed.length > 2000) return reply.status(400).send({ error: 'message_too_long' })
 
-    const { data: match, error: matchErr } = await db
-      .from('matches').select(MATCH_SELECT).eq('id', matchId).single()
-    if (matchErr && matchErr.code !== 'PGRST116') {
-      req.log.error({ err: matchErr }, 'match lookup failed')
+    let match: any
+    try {
+      match = isUuid(matchId) ? await findMatch(matchId) : undefined
+    } catch (err) {
+      req.log.error({ err }, 'match lookup failed')
       return reply.status(500).send({ error: 'chats_fetch_failed' })
     }
     if (!match) return reply.status(404).send({ error: 'match_not_found' })
@@ -217,12 +237,16 @@ export async function adminChatsRoutes(app: FastifyInstance) {
     const picked = pickFakeSender(fakeChatUser((match as any).user1), fakeChatUser((match as any).user2))
     if (!picked) return reply.status(400).send({ error: 'no_fake_participant' })
 
-    const { data: message, error } = await db
-      .from('messages')
-      .insert({ match_id: matchId, sender_id: picked.fake.id, body: trimmed, type: 'text' })
-      .select('id, sender_id, body, created_at')
-      .single()
-    if (error || !message) return reply.status(500).send({ error: 'send_failed' })
+    let message: { id: string; sender_id: string; body: string; created_at: string } | undefined
+    try {
+      ;[message] = await sql<{ id: string; sender_id: string; body: string; created_at: string }[]>`
+        insert into messages (match_id, sender_id, body, type)
+        values (${matchId}, ${picked.fake.id}, ${trimmed}, 'text')
+        returning id, sender_id, body, created_at`
+    } catch (err) {
+      req.log.error({ err }, 'admin fake send failed')
+    }
+    if (!message) return reply.status(500).send({ error: 'send_failed' })
 
     void deliverMessageNotification(
       {

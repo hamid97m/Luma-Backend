@@ -1,4 +1,4 @@
-import { db } from '../db.js'
+import { sql } from '../db.js'
 import { notifyMatch, notifyNewLike } from '../bot.js'
 import { getFakeLikerConfig } from './fakeLikerConfig.js'
 import { deliverMessageNotification } from '../messaging/deliver.js'
@@ -56,15 +56,24 @@ interface Fake {
   counter: number
 }
 
-/** PostgREST `.or()` filter for users whose effective language is one of `languages`.
- * Unset locale is Persian, so `fa` also matches `locale IS NULL`. */
-function localeOrFilter(languages: Iterable<Locale>): string {
-  const clauses: string[] = []
-  for (const lang of languages) {
-    clauses.push(`locale.eq.${lang}`)
-    if (lang === 'fa') clauses.push('locale.is.null')
+/** supabase-js-style result for a query: postgres.js throws, but this job's
+ * per-step error handling (count it, log it, carry on) is written against
+ * `{ data, error }`, so keep that shape instead of nesting try/catch everywhere. */
+async function attempt<T>(q: PromiseLike<T>): Promise<{ data: T; error: null } | { data: null; error: any }> {
+  try {
+    return { data: await q, error: null }
+  } catch (error) {
+    return { data: null, error }
   }
-  return clauses.join(',')
+}
+
+/** `where` fragment for users whose effective language is one of `languages`.
+ * Unset locale is Persian, so `fa` also matches `locale IS NULL`. */
+function localeFilter(languages: Iterable<Locale>) {
+  const langs = [...languages]
+  return langs.includes('fa')
+    ? sql`(locale = any(${langs}::text[]) or locale is null)`
+    : sql`locale = any(${langs}::text[])`
 }
 
 /** A fake (always gender=woman) is eligible to like a target iff her `looking_for` allows the target's gender. */
@@ -117,9 +126,8 @@ async function likeTargetAndMatch(
   stats: RunStats,
   logger: JobLogger,
 ): Promise<void> {
-  const { error: swipeErr } = await db
-    .from('swipes')
-    .insert({ swiper_id: fake.id, swiped_id: target.id, direction: 'like' })
+  const { error: swipeErr } = await attempt(sql`
+    insert into swipes (swiper_id, swiped_id, direction) values (${fake.id}, ${target.id}, 'like')`)
 
   if ((swipeErr as any)?.code === '23505') {
     stats.skipped++
@@ -133,13 +141,10 @@ async function likeTargetAndMatch(
   stats.likesSent++
 
   // Reverse-like? (target already liked this fake) → it's a match.
-  const { data: reverse, error: reverseErr } = await db
-    .from('swipes')
-    .select('id')
-    .eq('swiper_id', target.id)
-    .eq('swiped_id', fake.id)
-    .eq('direction', 'like')
-    .maybeSingle()
+  const { data: reverseRows, error: reverseErr } = await attempt(sql`
+    select id from swipes
+    where swiper_id = ${target.id} and swiped_id = ${fake.id} and direction = 'like'`)
+  const reverse = reverseRows?.[0]
   if (reverseErr) {
     // A transient error read as "no reverse like" would permanently miss the match
     // (neither side re-swipes this pair). Skip match-creation instead.
@@ -156,11 +161,9 @@ async function likeTargetAndMatch(
   }
 
   const [u1, u2] = [fake.id, target.id].sort()
-  const { data: match, error: matchErr } = await db
-    .from('matches')
-    .insert({ user1_id: u1, user2_id: u2 })
-    .select('id')
-    .single()
+  const { data: matchRows, error: matchErr } = await attempt(sql<{ id: string }[]>`
+    insert into matches (user1_id, user2_id) values (${u1}, ${u2}) returning id`)
+  const match = matchRows?.[0]
 
   if ((matchErr as any)?.code === '23505') return // already matched — no side effects
   if (matchErr || !match) {
@@ -196,11 +199,17 @@ export async function runFakeLikerJob(
   trigger: 'schedule' | 'manual',
   logger: JobLogger = console,
 ): Promise<RunStats | { skipped: string }> {
-  const cfg = await getFakeLikerConfig()
-  if (!cfg || !cfg.enabled) return { skipped: 'disabled' }
-
+  // Claim the guard before the first await: with a real DB the config read can
+  // resolve in either order for two concurrent triggers (e.g. one on a freshly
+  // opened pool connection), so checking `running` after it let both start.
   if (running) return { skipped: 'already_running' }
   running = true
+
+  const cfg = await getFakeLikerConfig() // never throws
+  if (!cfg || !cfg.enabled) {
+    running = false
+    return { skipped: 'disabled' }
+  }
 
   const startedAt = new Date()
   const stats: RunStats = { likesSent: 0, matchesCreated: 0, salamsSent: 0, skipped: 0, errors: 0 }
@@ -209,15 +218,11 @@ export async function runFakeLikerJob(
     logger.info({ trigger }, 'fake liker run started')
 
     // --- Fake pool: active, non-banned women seeds ---
-    const { data: pool, error: poolErr } = await db
-      .from('users')
-      .select('id, name, looking_for, location, locale, icebreaker_prompt, icebreaker_answer')
-      .eq('is_seed', true)
-      .eq('gender', 'woman')
-      .eq('is_active', true)
-      .eq('account_status', 'active')
-      .is('banned_at', null)
-      .is('deleted_at', null)
+    const { data: pool, error: poolErr } = await attempt(sql<any[]>`
+      select id, name, looking_for, location, locale, icebreaker_prompt, icebreaker_answer
+      from users
+      where is_seed = true and gender = 'woman' and is_active = true and account_status = 'active'
+        and banned_at is null and deleted_at is null`)
 
     if (poolErr) {
       stats.errors++
@@ -235,11 +240,9 @@ export async function runFakeLikerJob(
     // cumulative likes, skewing balancing. The pool is small (~tens), so per-fake is cheap.
     const counters: Record<string, number> = {}
     for (const f of (pool ?? []) as Array<{ id: string }>) {
-      const { count, error: cntErr } = await db
-        .from('swipes')
-        .select('id', { count: 'exact', head: true })
-        .eq('swiper_id', f.id)
-        .eq('direction', 'like')
+      const { data: cntRows, error: cntErr } = await attempt(sql<{ count: number }[]>`
+        select count(*)::int as count from swipes where swiper_id = ${f.id} and direction = 'like'`)
+      const count = cntRows?.[0]?.count
       if (cntErr) {
         logger.warn({ err: cntErr, fake: f.id }, 'fake liker: counter seed failed')
         counters[f.id] = 0
@@ -249,11 +252,10 @@ export async function runFakeLikerJob(
     }
 
     // --- Fake primary photos (lowest position) for notifications ---
-    const { data: photoRows } = await db
-      .from('user_photos')
-      .select('user_id, url')
-      .in('user_id', fakeIds)
-      .order('position', { ascending: true })
+    const { data: photoRows } = await attempt(sql`
+      select user_id, url from user_photos
+      where user_id = any(${fakeIds}::uuid[])
+      order by position asc`)
     const photoByFake: Record<string, string> = {}
     for (const p of (photoRows ?? []) as Array<{ user_id: string; url: string }>) {
       if (!(p.user_id in photoByFake)) photoByFake[p.user_id] = p.url
@@ -292,13 +294,12 @@ export async function runFakeLikerJob(
       let inScanned = 0
       let inOffset = 0
       while (inScanned < SCAN_CAP) {
-        const { data: batch, error: inErr } = await db
-          .from('swipes')
-          .select('swiper_id, swiped_id, created_at')
-          .in('swiped_id', fakeIds)
-          .eq('direction', 'like')
-          .order('created_at', { ascending: false })
-          .range(inOffset, inOffset + INCOMING_LIKE_PAGE_SIZE - 1)
+        // `desc nulls first` = PostgREST's ordering (created_at is nullable).
+        const { data: batch, error: inErr } = await attempt(sql`
+          select swiper_id, swiped_id, created_at from swipes
+          where swiped_id = any(${fakeIds}::uuid[]) and direction = 'like'
+          order by created_at desc nulls first, id
+          limit ${INCOMING_LIKE_PAGE_SIZE} offset ${inOffset}`)
         if (inErr) {
           stats.errors++
           logger.warn({ err: inErr }, 'fake liker: incoming-like fetch failed')
@@ -326,10 +327,8 @@ export async function runFakeLikerJob(
       const fakeMatchCountByReal = new Map<string, number>()
       const seenMatchIds = new Set<string>()
       for (const col of ['user1_id', 'user2_id'] as const) {
-        const { data: mrows } = await db
-          .from('matches')
-          .select('id, user1_id, user2_id')
-          .in(col, fakeIds)
+        const { data: mrows } = await attempt(sql`
+          select id, user1_id, user2_id from matches where ${sql(col)} = any(${fakeIds}::uuid[])`)
         for (const m of (mrows ?? []) as Array<{ id: string; user1_id: string; user2_id: string }>) {
           if (seenMatchIds.has(m.id)) continue
           seenMatchIds.add(m.id)
@@ -366,10 +365,10 @@ export async function runFakeLikerJob(
       const slice = leads.slice(0, remainingBudget)
       if (slice.length > 0) {
         const realIds = [...new Set(slice.map((p) => p.realId))]
-        const { data: reals, error: realsErr } = await db
-          .from('users')
-          .select('id, gender, telegram_id, allows_write_to_pm, locale, is_seed, is_active, account_status, banned_at, deleted_at')
-          .in('id', realIds)
+        const { data: reals, error: realsErr } = await attempt(sql`
+          select id, gender, telegram_id, allows_write_to_pm, locale, is_seed, is_active,
+                 account_status, banned_at, deleted_at
+          from users where id = any(${realIds}::uuid[])`)
         if (realsErr) {
           stats.errors++
           logger.warn({ err: realsErr }, 'fake liker: like-back real-user fetch failed')
@@ -410,19 +409,16 @@ export async function runFakeLikerJob(
     let offset = 0
 
     while (targets.length < remainingBudget && scanned < SCAN_CAP) {
-      const { data: batch, error: batchErr } = await db
-        .from('users')
-        .select('id, gender, telegram_id, allows_write_to_pm, locale, location')
-        .eq('is_seed', false)
-        .eq('is_active', true)
-        .eq('account_status', 'active')
-        .is('banned_at', null)
-        .is('deleted_at', null)
-        .lte('created_at', cutoff)
-        .in('looking_for', TARGET_LOOKING_FOR)
-        .or(localeOrFilter(new Set(fakes.map((f) => effectiveLocale(f.locale)))))
-        .order('created_at', { ascending: false })
-        .range(offset, offset + CANDIDATE_BATCH - 1)
+      const { data: batch, error: batchErr } = await attempt(sql`
+        select id, gender, telegram_id, allows_write_to_pm, locale, location
+        from users
+        where is_seed = false and is_active = true and account_status = 'active'
+          and banned_at is null and deleted_at is null
+          and created_at <= ${cutoff}
+          and looking_for::text = any(${TARGET_LOOKING_FOR}::text[])
+          and ${localeFilter(new Set(fakes.map((f) => effectiveLocale(f.locale))))}
+        order by created_at desc, id
+        limit ${CANDIDATE_BATCH} offset ${offset}`)
 
       if (batchErr) {
         stats.errors++
@@ -442,12 +438,11 @@ export async function runFakeLikerJob(
       let likedOffset = 0
       let likedFailed = false
       for (;;) {
-        const { data: liked, error: likedErr } = await db
-          .from('swipes')
-          .select('swiped_id')
-          .in('swiped_id', ids)
-          .eq('direction', 'like')
-          .range(likedOffset, likedOffset + RECEIVED_LIKE_PAGE_SIZE - 1)
+        const { data: liked, error: likedErr } = await attempt(sql`
+          select swiped_id from swipes
+          where swiped_id = any(${ids}::uuid[]) and direction = 'like'
+          order by id
+          limit ${RECEIVED_LIKE_PAGE_SIZE} offset ${likedOffset}`)
         if (likedErr) {
           stats.errors++
           logger.warn({ err: likedErr }, 'fake liker: received-like fetch failed')
@@ -501,12 +496,11 @@ export async function runFakeLikerJob(
     // swipe route created. Two `.in` queries + dedupe stand in for an OR anti-join.
     const matchMap = new Map<string, { id: string; user1_id: string; user2_id: string; created_at: string }>()
     for (const col of ['user1_id', 'user2_id'] as const) {
-      const { data: rows } = await db
-        .from('matches')
-        .select('id, user1_id, user2_id, created_at')
-        .in(col, fakeIds)
-        .order('created_at', { ascending: false })
-        .limit(SALAM_CAP)
+      const { data: rows } = await attempt(sql`
+        select id, user1_id, user2_id, created_at from matches
+        where ${sql(col)} = any(${fakeIds}::uuid[])
+        order by created_at desc nulls first
+        limit ${SALAM_CAP}`)
       for (const m of (rows ?? []) as Array<{ id: string; user1_id: string; user2_id: string; created_at: string }>) {
         matchMap.set(m.id, m)
       }
@@ -528,10 +522,9 @@ export async function runFakeLikerJob(
         realIds.add(u1Fake ? m.user2_id : m.user1_id)
       }
 
-      const { data: realUsers } = await db
-        .from('users')
-        .select('id, telegram_id, deleted_at, banned_at, last_active, notified_offline_at, allows_write_to_pm, locale')
-        .in('id', [...realIds])
+      const { data: realUsers } = await attempt(sql`
+        select id, telegram_id, deleted_at, banned_at, last_active, notified_offline_at, allows_write_to_pm, locale
+        from users where id = any(${[...realIds]}::uuid[])`)
       const realMap = new Map((realUsers ?? []).map((u: any) => [u.id, u]))
 
       // Which candidate matches are truly zero-message? Per-match head counts, not a
@@ -542,11 +535,10 @@ export async function runFakeLikerJob(
       // Auto-posted icebreakers aren't conversation, so they don't count.
       const zeroMessageMatchIds = new Set<string>()
       for (const m of candidateMatches) {
-        const { count, error: countErr } = await db
-          .from('messages')
-          .select('id', { count: 'exact', head: true })
-          .eq('match_id', m.id)
-          .neq('type', 'icebreaker')
+        const { data: countRows, error: countErr } = await attempt(sql<{ count: number }[]>`
+          select count(*)::int as count from messages
+          where match_id = ${m.id} and type <> 'icebreaker'`)
+        const count = countRows?.[0]?.count
         if (countErr) {
           stats.errors++
           logger.warn({ err: countErr, match: m.id }, 'fake liker: message-count query failed')
@@ -574,9 +566,8 @@ export async function runFakeLikerJob(
           // The greeting is written in the real user's language — they're the reader.
           const realLocale = (real.locale as Locale | null) ?? null
           const seedGreeting = tFor(realLocale).chat.seedGreeting
-          const { error: msgErr } = await db
-            .from('messages')
-            .insert({ match_id: m.id, sender_id: fakeId, body: seedGreeting })
+          const { error: msgErr } = await attempt(sql`
+            insert into messages (match_id, sender_id, body) values (${m.id}, ${fakeId}, ${seedGreeting})`)
           if (msgErr) {
             stats.errors++
             logger.warn({ err: msgErr, match: m.id }, 'fake liker: salam insert failed')
@@ -607,7 +598,7 @@ export async function runFakeLikerJob(
     return stats
   } finally {
     try {
-      const { error: runErr } = await db.from('fake_liker_runs').insert({
+      await sql`insert into fake_liker_runs ${sql({
         trigger,
         started_at: startedAt.toISOString(),
         finished_at: new Date().toISOString(),
@@ -615,10 +606,7 @@ export async function runFakeLikerJob(
         matches_created: stats.matchesCreated,
         salams_sent: stats.salamsSent,
         errors: stats.errors,
-      })
-      // supabase-js resolves (never throws) on a failed insert — the surrounding
-      // try/catch alone would let the failure pass silently.
-      if (runErr) logger.warn({ err: runErr }, 'fake liker: run row insert failed')
+      })}`
     } catch (err) {
       logger.warn({ err }, 'fake liker: run row insert failed')
     }

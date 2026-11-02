@@ -1,5 +1,5 @@
 import type { FastifyBaseLogger } from 'fastify'
-import { db } from '../db.js'
+import { sql, db } from '../db.js'
 import { pauseForPhotoReview } from './autoPause.js'
 
 export type PhotoVerdict = { approved: boolean; reason: string | null }
@@ -124,23 +124,21 @@ async function saveEvidence(userId: string, photoId: string): Promise<string | n
 }
 
 async function mainPhoto(userId: string): Promise<{ id: string; url: string } | null> {
-  const { data } = await db
-    .from('user_photos')
-    .select('id, url')
-    .eq('user_id', userId)
-    .order('position', { ascending: true })
-    .limit(1)
-    .maybeSingle()
+  // A failed read counts as "no main photo", as before.
+  const [data] = await sql<{ id: string; url: string }[]>`
+    select id, url from user_photos where user_id = ${userId}
+    order by position asc limit 1`.catch(() => [])
   return data ?? null
 }
 
 async function isCheckableMan(userId: string): Promise<boolean> {
-  const { data: user, error } = await db
-    .from('users')
-    .select('gender, age, is_seed, paused_at, banned_at, deleted_at')
-    .eq('id', userId)
-    .maybeSingle()
-  if (error) throw new Error(`photo_check_user_failed: ${error.message}`)
+  let user
+  try {
+    ;[user] = await sql`
+      select gender, age, is_seed, paused_at, banned_at, deleted_at from users where id = ${userId}`
+  } catch (error) {
+    throw new Error(`photo_check_user_failed: ${(error as Error).message}`)
+  }
   // New accounts are created as gender 'man' with age 0; the real gender only
   // lands with the onboarding profile save.
   return Boolean(
@@ -151,10 +149,9 @@ async function isCheckableMan(userId: string): Promise<boolean> {
 async function review(userId: string, photo: { id: string; url: string }): Promise<PhotoVerdict> {
   const { promptTokens, completionTokens, ...verdict } = await askDeepSeekPhoto(userId, photo.url)
   const evidencePath = verdict.approved ? null : await saveEvidence(userId, photo.id)
-  const { error } = await db
-    .from('photo_ai_checks')
-    .upsert(
-      {
+  try {
+    await sql`
+      insert into photo_ai_checks ${sql({
         photo_id: photo.id,
         user_id: userId,
         approved: verdict.approved,
@@ -163,10 +160,11 @@ async function review(userId: string, photo: { id: string; url: string }): Promi
         evidence_path: evidencePath,
         prompt_tokens: promptTokens,
         completion_tokens: completionTokens,
-      },
-      { onConflict: 'photo_id', ignoreDuplicates: true },
-    )
-  if (error) console.error('[moderation] photo_ai_checks upsert failed:', error.message)
+      })}
+      on conflict (photo_id) do nothing`
+  } catch (error) {
+    console.error('[moderation] photo_ai_checks upsert failed:', (error as Error).message)
+  }
   return verdict
 }
 
@@ -190,12 +188,13 @@ export async function checkMainPhoto(userId: string): Promise<PhotoVerdict | nul
   const photo = await mainPhoto(userId)
   if (!photo) return null
 
-  const { data: done, error } = await db
-    .from('photo_ai_checks')
-    .select('approved, reason')
-    .eq('photo_id', photo.id)
-    .maybeSingle()
-  if (error) throw new Error(`photo_check_lookup_failed: ${error.message}`)
+  let done: { approved: boolean; reason: string | null } | undefined
+  try {
+    ;[done] = await sql<{ approved: boolean; reason: string | null }[]>`
+      select approved, reason from photo_ai_checks where photo_id = ${photo.id}`
+  } catch (error) {
+    throw new Error(`photo_check_lookup_failed: ${(error as Error).message}`)
+  }
   if (done?.approved) return null
 
   // A cached rejection still pauses: an earlier pause can have been skipped

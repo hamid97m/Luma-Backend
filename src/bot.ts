@@ -1,7 +1,7 @@
 import { Bot, Context, InlineKeyboard, webhookCallback } from 'grammy'
 import { createHash } from 'crypto'
 import type { FastifyInstance } from 'fastify'
-import { db } from './db.js'
+import { sql } from './db.js'
 import { WEBHOOK_ROUTE_PREFIX } from './webhookRoute.js'
 import { isStandby, standbyBotGuard } from './appMode.js'
 import { createTicket, shouldCaptureSupport } from './support/service.js'
@@ -55,7 +55,9 @@ function webhookSecretToken(): string {
 async function replyLocale(ctx: Context): Promise<Locale> {
   const tgId = ctx.from?.id
   if (tgId) {
-    const { data } = await db.from('users').select('locale').eq('telegram_id', tgId).maybeSingle()
+    // A failed lookup falls back to the Telegram language (supabase-js never threw here).
+    const [data] = await sql<{ locale: string | null }[]>`
+      select locale from users where telegram_id = ${tgId}`.catch(() => [])
     if (data?.locale) return data.locale as Locale
   }
   return mapTelegramLang(ctx.from?.language_code)
@@ -69,13 +71,17 @@ async function sendStart(ctx: Context): Promise<void> {
 
 async function clearPending(ctx: Context): Promise<void> {
   const tgId = ctx.from?.id
-  if (tgId) await db.from('users').update({ awaiting_support_since: null }).eq('telegram_id', tgId)
+  if (tgId) {
+    await sql`update users set awaiting_support_since = null where telegram_id = ${tgId}`
+      .catch((err) => console.error('[bot] clear support prompt failed:', err?.message ?? err))
+  }
 }
 
 async function promptSupport(ctx: Context): Promise<void> {
   const tgId = ctx.from?.id
   if (tgId) {
-    await db.from('users').update({ awaiting_support_since: new Date().toISOString() }).eq('telegram_id', tgId)
+    await sql`update users set awaiting_support_since = ${new Date().toISOString()} where telegram_id = ${tgId}`
+      .catch((err) => console.error('[bot] set support prompt failed:', err?.message ?? err))
   }
   const t = tFor(await replyLocale(ctx))
   await ctx.reply(t.support.prompt)
@@ -122,18 +128,21 @@ function registerHandlers(bot: Bot): void {
     const text = ctx.message?.text
     if (!tgId) return next()
 
-    const { data: user } = await db
-      .from('users')
-      .select('id, awaiting_support_since, locale')
-      .eq('telegram_id', tgId)
-      .maybeSingle()
+    // Lookup failure = "no pending prompt" → fall through to the /start reply.
+    const [user] = await sql<{ id: string; awaiting_support_since: string | null; locale: string | null }[]>`
+      select id, awaiting_support_since, locale from users where telegram_id = ${tgId}`
+      .catch((err) => {
+        console.error('[bot] support capture lookup failed:', err?.message ?? err)
+        return []
+      })
 
     if (!user || !shouldCaptureSupport(text, user.awaiting_support_since ?? null, Date.now())) {
       return next()
     }
 
     const t = tFor((user.locale as Locale | null) ?? mapTelegramLang(ctx.from?.language_code))
-    await db.from('users').update({ awaiting_support_since: null }).eq('id', user.id)
+    await sql`update users set awaiting_support_since = null where id = ${user.id}`
+      .catch((err) => console.error('[bot] clear support prompt failed:', err?.message ?? err))
     const result = await createTicket(user.id, text!)
     const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
     if (result.ok) {

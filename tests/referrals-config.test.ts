@@ -1,98 +1,62 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
-import { db } from '../src/db.js'
+import { describe, it, expect, beforeEach } from 'vitest'
 import { getReferralConfig, updateReferralConfig } from '../src/referrals/config.js'
-import { chainable } from './admin-helpers.js'
+import { resetDb, sql } from './helpers/db.js'
+import { failWritesTo } from './helpers/gifts-referrals.js'
+
+beforeEach(() => resetDb())
 
 describe('getReferralConfig', () => {
-  beforeEach(() => vi.clearAllMocks())
-
   it('returns the config when the row exists', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) =>
-      table === 'referral_config'
-        ? chainable({ data: { enabled: true }, error: null })
-        : chainable({ data: null }))
-    const cfg = await getReferralConfig()
-    expect(cfg).toEqual({ enabled: true })
+    await sql`update referral_config set enabled = true`
+    expect(await getReferralConfig()).toEqual({ enabled: true })
   })
 
-  it('returns null when the query errors', async () => {
-    vi.mocked(db.from).mockImplementation(() =>
-      chainable({ data: null, error: { message: 'relation does not exist' } }))
-    const cfg = await getReferralConfig()
-    expect(cfg).toBeNull()
+  it('returns the default (disabled) config of a fresh install', async () => {
+    expect(await getReferralConfig()).toEqual({ enabled: false })
   })
 
   it('returns null when no row is found', async () => {
-    vi.mocked(db.from).mockImplementation(() => chainable({ data: null, error: null }))
-    const cfg = await getReferralConfig()
-    expect(cfg).toBeNull()
+    await sql`delete from referral_config`
+    expect(await getReferralConfig()).toBeNull()
   })
 
-  it('never throws — returns null even if the client throws', async () => {
-    vi.mocked(db.from).mockImplementation(() => {
-      throw new Error('boom')
-    })
-    await expect(getReferralConfig()).resolves.toBeNull()
+  it('never throws — returns null when the query errors', async () => {
+    await sql`alter table referral_config rename to referral_config_x`
+    try {
+      await expect(getReferralConfig()).resolves.toBeNull()
+    } finally {
+      await sql`alter table referral_config_x rename to referral_config`
+    }
   })
 })
 
 describe('updateReferralConfig', () => {
-  beforeEach(() => vi.clearAllMocks())
-
-  it('sends enabled + updated_at in the update payload and returns the fresh row', async () => {
-    const updates: any[] = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'referral_config') {
-        return {
-          update: (p: any) => {
-            updates.push(p)
-            return chainable({ data: { enabled: true }, error: null })
-          },
-        } as any
-      }
-      return chainable({ data: null })
-    })
-    const cfg = await updateReferralConfig({ enabled: true })
-    expect(cfg).toEqual({ enabled: true })
-    expect(updates[0]).toMatchObject({ enabled: true })
-    expect(updates[0]).toHaveProperty('updated_at')
+  it('persists enabled, bumps updated_at and returns the fresh row', async () => {
+    await sql`update referral_config set updated_at = '2020-01-01T00:00:00Z'`
+    expect(await updateReferralConfig({ enabled: true })).toEqual({ enabled: true })
+    const [row] = await sql`select enabled, updated_at from referral_config`
+    expect(row.enabled).toBe(true)
+    expect(row.updated_at).not.toBe('2020-01-01T00:00:00.000Z')
   })
 
-  it('omits enabled from the update payload when not provided in the patch', async () => {
-    const updates: any[] = []
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'referral_config') {
-        return {
-          update: (p: any) => {
-            updates.push(p)
-            return chainable({ data: { enabled: false }, error: null })
-          },
-        } as any
-      }
-      return chainable({ data: null })
-    })
-    const cfg = await updateReferralConfig({})
-    expect(cfg).toEqual({ enabled: false })
-    expect(updates[0]).not.toHaveProperty('enabled')
-    expect(updates[0]).toHaveProperty('updated_at')
+  it('leaves enabled untouched when not provided in the patch (only updated_at changes)', async () => {
+    await sql`update referral_config set enabled = true, updated_at = '2020-01-01T00:00:00Z'`
+    expect(await updateReferralConfig({})).toEqual({ enabled: true })
+    const [row] = await sql`select updated_at from referral_config`
+    expect(row.updated_at).not.toBe('2020-01-01T00:00:00.000Z')
   })
 
-  it('returns null when the update errors', async () => {
-    vi.mocked(db.from).mockImplementation((table: string) => {
-      if (table === 'referral_config') {
-        return { update: () => chainable({ data: null, error: { message: 'db down' } }) } as any
-      }
-      return chainable({ data: null })
-    })
-    const cfg = await updateReferralConfig({ enabled: true })
-    expect(cfg).toBeNull()
+  it('returns null when there is no config row', async () => {
+    await sql`delete from referral_config`
+    expect(await updateReferralConfig({ enabled: true })).toBeNull()
   })
 
-  it('never throws — returns null even if the client throws', async () => {
-    vi.mocked(db.from).mockImplementation(() => {
-      throw new Error('boom')
-    })
-    await expect(updateReferralConfig({ enabled: true })).resolves.toBeNull()
+  it('never throws — returns null when the update errors', async () => {
+    const cleanup = await failWritesTo('referral_config', 'UPDATE')
+    try {
+      await expect(updateReferralConfig({ enabled: true })).resolves.toBeNull()
+    } finally {
+      await cleanup()
+    }
   })
 })

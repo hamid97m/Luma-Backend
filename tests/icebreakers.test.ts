@@ -1,10 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
-
-import { db } from '../src/db.js'
 import { ICEBREAKER_PROMPTS, icebreakerIndex, icebreakerQuestion } from '../src/icebreakers/catalog.js'
 import { seedIcebreakers } from '../src/icebreakers/seed.js'
+import { resetDb, createUser, createMatch, sql } from './helpers/db.js'
 
 describe('ICEBREAKER_PROMPTS', () => {
   it('has the same 12 prompts in every locale', () => {
@@ -56,106 +54,77 @@ describe('icebreakerQuestion', () => {
   })
 })
 
-type UserRow = { id: string; icebreaker_prompt: string | null; icebreaker_answer: string | null }
-
-/** users: select().in() → rows; messages: insert(rows) → { error }. */
-function mockDb(opts: { users?: UserRow[]; usersError?: boolean; insertError?: boolean }) {
-  const userIn = vi.fn(() => (opts.usersError
-    ? { data: null, error: { message: 'boom' } }
-    : { data: opts.users ?? [], error: null }))
-  const userSelect = vi.fn(() => ({ in: userIn }))
-  const insert = vi.fn(() => ({ error: opts.insertError ? { message: 'insert boom' } : null }))
-  vi.mocked(db.from).mockImplementation(((table: string) => {
-    if (table === 'users') return { select: userSelect }
-    if (table === 'messages') return { insert }
-    throw new Error(`unexpected table ${table}`)
-  }) as any)
-  return { userSelect, userIn, insert }
-}
-
 const NOW = new Date('2026-10-09T12:00:00.000Z').getTime()
+
+const seeded = (matchId: string) => sql`
+  select sender_id, type, body, icebreaker_answer, created_at from messages
+  where match_id = ${matchId} order by created_at`
 
 describe('seedIcebreakers', () => {
   let errorSpy: ReturnType<typeof vi.spyOn>
-  beforeEach(() => {
-    vi.clearAllMocks()
+  beforeEach(async () => {
+    await resetDb()
     vi.spyOn(Date, 'now').mockReturnValue(NOW)
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
   afterEach(() => vi.restoreAllMocks())
 
   it('inserts one row per user with both fields, in the given order, 1 ms apart', async () => {
-    const { userSelect, userIn, insert } = mockDb({
-      users: [
-        { id: 'u2', icebreaker_prompt: '  My weirdest skill…  ', icebreaker_answer: '  Juggling  ' },
-        { id: 'u1', icebreaker_prompt: 'My ideal Friday…', icebreaker_answer: 'Hiking' },
-      ],
-    })
+    const u1 = await createUser({ icebreaker_prompt: 'My ideal Friday…', icebreaker_answer: 'Hiking' })
+    const u2 = await createUser({ icebreaker_prompt: '  My weirdest skill…  ', icebreaker_answer: '  Juggling  ' })
+    const match = await createMatch(u2.id, u1.id)
 
-    await seedIcebreakers('match-1', ['u1', 'u2'])
+    await seedIcebreakers(match.id, [u1.id, u2.id])
 
-    expect(userSelect).toHaveBeenCalledWith('id, icebreaker_prompt, icebreaker_answer')
-    expect(userIn).toHaveBeenCalledWith('id', ['u1', 'u2'])
-    expect(insert).toHaveBeenCalledTimes(1)
-    expect(insert).toHaveBeenCalledWith([
+    expect(await seeded(match.id)).toEqual([
       {
-        match_id: 'match-1', sender_id: 'u1', type: 'icebreaker',
+        sender_id: u1.id, type: 'icebreaker',
         body: 'My ideal Friday…', icebreaker_answer: 'Hiking', created_at: new Date(NOW).toISOString(),
       },
       {
-        match_id: 'match-1', sender_id: 'u2', type: 'icebreaker',
+        sender_id: u2.id, type: 'icebreaker',
         body: 'My weirdest skill…', icebreaker_answer: 'Juggling', created_at: new Date(NOW + 1).toISOString(),
       },
     ])
   })
 
   it('skips users missing a prompt or an answer (null or blank)', async () => {
-    const { insert } = mockDb({
-      users: [
-        { id: 'u1', icebreaker_prompt: null, icebreaker_answer: 'Hiking' },
-        { id: 'u2', icebreaker_prompt: 'My ideal Friday…', icebreaker_answer: '   ' },
-        { id: 'u3', icebreaker_prompt: 'My weirdest skill…', icebreaker_answer: 'Juggling' },
-      ],
-    })
+    const u1 = await createUser({ icebreaker_prompt: null, icebreaker_answer: 'Hiking' })
+    const u2 = await createUser({ icebreaker_prompt: 'My ideal Friday…', icebreaker_answer: '   ' })
+    const u3 = await createUser({ icebreaker_prompt: 'My weirdest skill…', icebreaker_answer: 'Juggling' })
+    const match = await createMatch(u1.id, u3.id)
 
-    await seedIcebreakers('match-1', ['u1', 'u2', 'u3'])
+    await seedIcebreakers(match.id, [u1.id, u2.id, u3.id])
 
-    const rows = (insert.mock.calls[0] as unknown[])[0] as Array<{ sender_id: string }>
-    expect(rows.map((r) => r.sender_id)).toEqual(['u3'])
+    expect((await seeded(match.id)).map((r) => r.sender_id)).toEqual([u3.id])
   })
 
   it('does not insert when nobody qualifies', async () => {
-    const { insert } = mockDb({
-      users: [
-        { id: 'u1', icebreaker_prompt: null, icebreaker_answer: null },
-        { id: 'u2', icebreaker_prompt: '  ', icebreaker_answer: 'x' },
-      ],
-    })
+    const u1 = await createUser({ icebreaker_prompt: null, icebreaker_answer: null })
+    const u2 = await createUser({ icebreaker_prompt: '  ', icebreaker_answer: 'x' })
+    const match = await createMatch(u1.id, u2.id)
 
-    await seedIcebreakers('match-1', ['u1', 'u2'])
+    await seedIcebreakers(match.id, [u1.id, u2.id])
 
-    expect(insert).not.toHaveBeenCalled()
+    expect(await seeded(match.id)).toEqual([])
   })
 
   it('swallows a users read error without inserting', async () => {
-    const { insert } = mockDb({ usersError: true })
+    // Malformed ids: Postgres throws 22P02 (PostgREST returned an error) → logged, no insert.
     await expect(seedIcebreakers('match-1', ['u1', 'u2'])).resolves.toBeUndefined()
-    expect(insert).not.toHaveBeenCalled()
-    expect(errorSpy).toHaveBeenCalled()
+    expect((await sql`select count(*)::int as n from messages`)[0].n).toBe(0)
+    expect(errorSpy).toHaveBeenCalledWith('[icebreakers] users read failed', expect.anything())
   })
 
   it('swallows an insert error', async () => {
-    mockDb({
-      users: [{ id: 'u1', icebreaker_prompt: 'My ideal Friday…', icebreaker_answer: 'Hiking' }],
-      insertError: true,
-    })
-    await expect(seedIcebreakers('match-1', ['u1'])).resolves.toBeUndefined()
-    expect(errorSpy).toHaveBeenCalled()
+    const u1 = await createUser({ icebreaker_prompt: 'My ideal Friday…', icebreaker_answer: 'Hiking' })
+    // No such match → foreign-key violation on insert.
+    await expect(seedIcebreakers('00000000-0000-0000-0000-000000000000', [u1.id])).resolves.toBeUndefined()
+    expect(errorSpy).toHaveBeenCalledWith('[icebreakers] insert failed', expect.anything())
   })
 
-  it('swallows a thrown db error', async () => {
-    vi.mocked(db.from).mockImplementation(() => { throw new Error('network down') })
-    await expect(seedIcebreakers('match-1', ['u1'])).resolves.toBeUndefined()
-    expect(errorSpy).toHaveBeenCalled()
+  it('handles an empty user list without querying errors', async () => {
+    await expect(seedIcebreakers('00000000-0000-0000-0000-000000000000', [])).resolves.toBeUndefined()
+    expect(errorSpy).not.toHaveBeenCalled()
   })
 })

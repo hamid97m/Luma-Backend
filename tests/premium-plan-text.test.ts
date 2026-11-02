@@ -1,5 +1,4 @@
 import { describe, it, expect, vi } from 'vitest'
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/bot.js', () => ({}))
 import { planText } from '../src/premium/service.js'
 

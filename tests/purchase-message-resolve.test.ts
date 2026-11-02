@@ -1,5 +1,4 @@
 import { describe, it, expect, vi } from 'vitest'
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 import { resolvePurchaseMessage, type PurchaseMessageConfig } from '../src/jobs/purchaseMessageConfig.js'
 
 const cfg: PurchaseMessageConfig = {

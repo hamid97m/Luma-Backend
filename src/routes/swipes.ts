@@ -1,9 +1,10 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../db.js'
+import { sql, isUuid } from '../db.js'
 import { notifyMatch, notifyNewLike } from '../bot.js'
 import { checkAndCountSwipe } from '../premium/swipeLimit.js'
 import { seedIcebreakers } from '../icebreakers/seed.js'
 import { ownerQuestion } from '../icebreakers/question.js'
+import type { Locale } from '../i18n/index.js'
 
 export async function swipesRoutes(app: FastifyInstance) {
   app.post('/swipes', {
@@ -25,11 +26,11 @@ export async function swipesRoutes(app: FastifyInstance) {
     // upsert would otherwise record a like against a ghost, which can create
     // an invisible match and DM an account that no longer exists. Checked
     // before the swipe limit so an invalid target never burns quota.
-    const { data: target } = await db
-      .from('users')
-      .select('id, deleted_at')
-      .eq('id', targetUserId)
-      .single()
+    // A non-uuid id can't be a user (PostgREST answered "no rows"; Postgres would throw).
+    const [target] = isUuid(targetUserId)
+      ? await sql<{ id: string; deleted_at: string | null }[]>`
+          select id, deleted_at from users where id = ${targetUserId}`
+      : []
     if (!target || target.deleted_at) {
       return reply.status(404).send({ error: 'target_not_found' })
     }
@@ -43,36 +44,36 @@ export async function swipesRoutes(app: FastifyInstance) {
     // Upsert swipe — a later swipe on the same pair (e.g. liking someone you
     // previously passed on, once the pass recycles back into the feed) must
     // overwrite the stored direction rather than silently no-op on conflict.
-    const { error: swipeErr } = await db.from('swipes').upsert({
-      swiper_id: req.userId,
-      swiped_id: targetUserId,
-      direction,
-      created_at: new Date().toISOString(),
-    }, { onConflict: 'swiper_id,swiped_id' })
-
-    if (swipeErr) return reply.status(500).send({ error: 'swipe_failed' })
+    try {
+      await sql`
+        insert into swipes (swiper_id, swiped_id, direction, created_at)
+        values (${req.userId}, ${targetUserId}, ${direction}, ${new Date().toISOString()})
+        on conflict (swiper_id, swiped_id)
+        do update set direction = excluded.direction, created_at = excluded.created_at`
+    } catch {
+      // e.g. an invalid direction (enum cast) — PostgREST returned an error here too.
+      return reply.status(500).send({ error: 'swipe_failed' })
+    }
 
     if (direction === 'pass') return { matched: false, ...swipeLimit }
 
     // Check for reverse like
-    const { data: reverseSwipe } = await db
-      .from('swipes')
-      .select('id')
-      .eq('swiper_id', targetUserId)
-      .eq('swiped_id', req.userId)
-      .eq('direction', 'like')
-      .single()
+    const [reverseSwipe] = await sql`
+      select id from swipes
+      where swiper_id = ${targetUserId} and swiped_id = ${req.userId} and direction = 'like'`
 
     if (!reverseSwipe) {
       // New like, no match yet → nudge the liked user (names the liker; FOMO teaser).
       // A woman is not DMed on this path: her one like DM is sent from
       // ensureDailyReveal (the 18:00 job / her first Likes or discovery read).
-      const { data: pair } = await db
-        .from('users')
-        .select('id, name, telegram_id, allows_write_to_pm, locale, gender')
-        .in('id', [req.userId, targetUserId])
-      const me = pair?.find((u: { id: string }) => u.id === req.userId)
-      const target = pair?.find((u: { id: string }) => u.id === targetUserId)
+      const pair = await sql<{
+        id: string; name: string; telegram_id: number; allows_write_to_pm: boolean | null
+        locale: Locale | null; gender: string
+      }[]>`
+        select id, name, telegram_id, allows_write_to_pm, locale, gender
+        from users where id = any(${[req.userId, targetUserId]}::uuid[])`
+      const me = pair.find((u: { id: string }) => u.id === req.userId)
+      const target = pair.find((u: { id: string }) => u.id === targetUserId)
       if (me && target && target.gender !== 'woman' && target.telegram_id > 0 && target.allows_write_to_pm !== false) {
         notifyNewLike(target.telegram_id, me.name, target.locale ?? null).catch(console.error)
       }
@@ -82,41 +83,49 @@ export async function swipesRoutes(app: FastifyInstance) {
     // Normalise pair order so UNIQUE(user1_id, user2_id) is deterministic
     const [u1, u2] = [req.userId, targetUserId].sort()
 
-    const { data: match, error: matchErr } = await db
-      .from('matches')
-      .insert({ user1_id: u1, user2_id: u2 })
-      .select('id')
-      .single()
-
-    if (matchErr?.code === '23505') return { matched: false, ...swipeLimit } // race — already matched
-    if (matchErr) return reply.status(500).send({ error: 'match_failed' })
+    let match: { id: string }
+    try {
+      ;[match] = await sql<{ id: string }[]>`
+        insert into matches (user1_id, user2_id) values (${u1}, ${u2}) returning id`
+    } catch (err) {
+      if ((err as { code?: string }).code === '23505') return { matched: false, ...swipeLimit } // race — already matched
+      return reply.status(500).send({ error: 'match_failed' })
+    }
 
     // Post both icebreakers (the earlier liker's first) before responding, so the
     // chat the swiper opens from the match popup already contains them.
-    await seedIcebreakers(match!.id, [targetUserId, req.userId])
+    await seedIcebreakers(match.id, [targetUserId, req.userId])
 
     // Fetch both users for notification
-    const { data: users, error: usersErr } = await db
-      .from('users')
-      .select('id, name, telegram_id, username, allows_write_to_pm, locale, icebreaker_prompt, icebreaker_answer')
-      .in('id', [req.userId, targetUserId])
-
-    if (usersErr || !users || users.length < 2) {
-      // Match was created, but we can't build the response — return minimal success
-      return { matched: true, ...swipeLimit, match: { id: match!.id, user: { id: targetUserId, name: '', telegramId: 0, username: null } } }
+    // Both users and their photos in one round trip (was two sequential reads).
+    // A failure keeps the old minimal-response path rather than 500ing the match.
+    type MatchUser = {
+      id: string; name: string; telegram_id: number; username: string | null
+      allows_write_to_pm: boolean | null; locale: Locale | null
+      icebreaker_prompt: string | null; icebreaker_answer: string | null
+      primary_photo: string | null
+    }
+    let users: MatchUser[] | null = null
+    try {
+      users = await sql<MatchUser[]>`
+        select u.id, u.name, u.telegram_id, u.username, u.allows_write_to_pm, u.locale,
+               u.icebreaker_prompt, u.icebreaker_answer,
+               (select p.url from user_photos p where p.user_id = u.id
+                order by p.position asc limit 1) as primary_photo
+        from users u where u.id = any(${[req.userId, targetUserId]}::uuid[])`
+    } catch {
+      users = null
     }
 
-    const me = users.find((u: { id: string }) => u.id === req.userId)!
-    const them = users.find((u: { id: string }) => u.id === targetUserId)!
+    if (!users || users.length < 2) {
+      // Match was created, but we can't build the response — return minimal success
+      return { matched: true, ...swipeLimit, match: { id: match.id, user: { id: targetUserId, name: '', telegramId: 0, username: null } } }
+    }
 
-    const { data: photos } = await db
-      .from('user_photos')
-      .select('user_id, url')
-      .in('user_id', [req.userId, targetUserId])
-      .order('position', { ascending: true })
+    const me = users.find((u) => u.id === req.userId)!
+    const them = users.find((u) => u.id === targetUserId)!
 
-    const primaryPhoto = (userId: string) =>
-      photos?.find((p: { user_id: string; url: string }) => p.user_id === userId)?.url ?? null
+    const primaryPhoto = (userId: string) => users!.find((u) => u.id === userId)?.primary_photo ?? null
 
     // Only DM the OTHER user (the earlier liker, who's away from the app). The
     // current swiper already sees the match live in-app (match popup / chat
@@ -134,7 +143,7 @@ export async function swipesRoutes(app: FastifyInstance) {
         matchName: r.matchName,
         matchPhoto: r.matchPhoto,
         locale: r.user.locale ?? null,
-        matchId: match!.id,
+        matchId: match.id,
         // The swiper's own icebreaker, asked in the recipient's language.
         question: ownerQuestion(me, r.user.locale),
       }))
@@ -145,7 +154,7 @@ export async function swipesRoutes(app: FastifyInstance) {
       matched: true,
       ...swipeLimit,
       match: {
-        id: match!.id,
+        id: match.id,
         user: { id: them.id, name: them.name, telegramId: them.telegram_id, username: them.username },
       },
     }

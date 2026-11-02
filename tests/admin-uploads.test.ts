@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn(), storage: { from: vi.fn() } } }))
+// Storage stays on supabase for now (route has no SQL); keep the real `sql` export.
+vi.mock('../src/db.js', async (orig) => ({
+  ...(await orig<typeof import('../src/db.js')>()),
+  db: { storage: { from: vi.fn() } },
+}))
 
 import { buildApp } from '../src/server.js'
 import { db } from '../src/db.js'

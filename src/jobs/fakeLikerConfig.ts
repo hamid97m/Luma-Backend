@@ -1,4 +1,4 @@
-import { db } from '../db.js'
+import { sql } from '../db.js'
 
 export interface FakeLikerConfig {
   enabled: boolean
@@ -10,12 +10,9 @@ export interface FakeLikerConfig {
  * back to a default/disabled state on null. */
 export async function getFakeLikerConfig(): Promise<FakeLikerConfig | null> {
   try {
-    const { data, error } = await db
-      .from('fake_liker_config')
-      .select('enabled, max_targets_per_run')
-      .eq('id', true)
-      .single()
-    if (error || !data) return null
+    const [data] = await sql<{ enabled: boolean; max_targets_per_run: number }[]>`
+      select enabled, max_targets_per_run from fake_liker_config where id = true`
+    if (!data) return null
     return { enabled: data.enabled, maxTargetsPerRun: data.max_targets_per_run }
   } catch {
     return null
@@ -27,13 +24,9 @@ export async function getFakeLikerConfig(): Promise<FakeLikerConfig | null> {
  * across restarts instead of re-firing shortly after every deploy. */
 export async function getLastFakeLikerRunAt(): Promise<string | null> {
   try {
-    const { data, error } = await db
-      .from('fake_liker_runs')
-      .select('started_at')
-      .order('started_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
-    if (error || !data) return null
+    const [data] = await sql<{ started_at: string | null }[]>`
+      select started_at from fake_liker_runs order by started_at desc limit 1`
+    if (!data) return null
     return data.started_at ?? null
   } catch {
     return null
@@ -50,13 +43,10 @@ export async function updateFakeLikerConfig(
     if (patch.enabled !== undefined) updates.enabled = patch.enabled
     if (patch.maxTargetsPerRun !== undefined) updates.max_targets_per_run = patch.maxTargetsPerRun
 
-    const { data, error } = await db
-      .from('fake_liker_config')
-      .update(updates)
-      .eq('id', true)
-      .select('enabled, max_targets_per_run')
-      .single()
-    if (error || !data) return null
+    const [data] = await sql<{ enabled: boolean; max_targets_per_run: number }[]>`
+      update fake_liker_config set ${sql(updates)} where id = true
+      returning enabled, max_targets_per_run`
+    if (!data) return null
     return { enabled: data.enabled, maxTargetsPerRun: data.max_targets_per_run }
   } catch {
     return null

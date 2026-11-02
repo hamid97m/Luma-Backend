@@ -4,12 +4,10 @@
 // directly for any `premium_transactions` row still `pending_payment` so a
 // lost webhook doesn't leave a paying user ungranted, and so long-abandoned
 // rows eventually get cleaned up instead of lingering forever.
-import { db } from '../db.js'
+import { sql } from '../db.js'
 import { isTonPaysConfigured, checkInvoice, cancelInvoice } from '../payments/tonpays.js'
 import { handleTonPaysPaid } from '../premium/service.js'
 import type { FastifyBaseLogger } from 'fastify'
-
-const TABLE = 'premium_transactions'
 
 // A row becomes checkable once it's had time to actually complete a transfer
 // (card-to-card isn't instant) — polling anything younger just wastes upstream
@@ -63,16 +61,14 @@ export async function runTonPaysSweepJob({ log }: { log: FastifyBaseLogger }): P
  * sequentially, one row's failure never stopping the rest) so no live invoice is
  * left blocking that buyer, then cancel them locally in one batch. */
 async function cancelAncientRows(ancientCutoff: string, log: FastifyBaseLogger): Promise<void> {
-  const { data, error } = await db
-    .from(TABLE)
-    .select('id, tonpays_invoice_id')
-    .eq('provider', 'tonpays')
-    .eq('status', 'pending_payment')
-    .lte('created_at', ancientCutoff)
-    .limit(ANCIENT_CAP)
-  if (error) { log.warn({ err: error }, 'tonpays sweep: ancient-row query failed'); return }
-
-  const rows = (data ?? []) as PendingRow[]
+  let rows: PendingRow[]
+  try {
+    rows = await sql<PendingRow[]>`
+      select id, tonpays_invoice_id from premium_transactions
+      where provider = 'tonpays' and status = 'pending_payment'
+        and created_at <= ${ancientCutoff}
+      limit ${ANCIENT_CAP}`
+  } catch (err) { log.warn({ err }, 'tonpays sweep: ancient-row query failed'); return }
   if (rows.length === 0) return
 
   // Cancel upstream first, one row at a time (rate-cap friendliness), and keep
@@ -93,28 +89,24 @@ async function cancelAncientRows(ancientCutoff: string, log: FastifyBaseLogger):
   // somehow qualified for both) could have already paid/graded the row —
   // without the guard this would silently clobber a paid row back to
   // canceled. Same idempotency pattern as handleTonPaysPaid.
-  const { error: updErr } = await db
-    .from(TABLE)
-    .update({ status: 'canceled' })
-    .eq('status', 'pending_payment')
-    .in('id', ids)
-  if (updErr) log.warn({ err: updErr }, 'tonpays sweep: ancient-row cancel failed')
+  try {
+    await sql`
+      update premium_transactions set status = 'canceled'
+      where status = 'pending_payment' and id = any(${ids}::uuid[])`
+  } catch (err) { log.warn({ err }, 'tonpays sweep: ancient-row cancel failed') }
 }
 
 /** Rows in the checkable window get polled against TonPays, one at a time. */
 async function checkPendingRows(youngCutoff: string, ancientCutoff: string, log: FastifyBaseLogger): Promise<void> {
-  const { data, error } = await db
-    .from(TABLE)
-    .select('id, tonpays_invoice_id')
-    .eq('provider', 'tonpays')
-    .eq('status', 'pending_payment')
-    .lt('created_at', youngCutoff)
-    .gt('created_at', ancientCutoff)
-    .order('created_at', { ascending: true })
-    .limit(CHECK_CAP)
-  if (error) { log.warn({ err: error }, 'tonpays sweep: pending-row query failed'); return }
-
-  const rows = (data ?? []) as PendingRow[]
+  let rows: PendingRow[]
+  try {
+    rows = await sql<PendingRow[]>`
+      select id, tonpays_invoice_id from premium_transactions
+      where provider = 'tonpays' and status = 'pending_payment'
+        and created_at < ${youngCutoff} and created_at > ${ancientCutoff}
+      order by created_at asc
+      limit ${CHECK_CAP}`
+  } catch (err) { log.warn({ err }, 'tonpays sweep: pending-row query failed'); return }
   for (const row of rows) {
     if (!row.tonpays_invoice_id) continue // create-invoice never completed; nothing to check yet
     try {
@@ -144,12 +136,11 @@ async function checkOneRow(row: PendingRow, log: FastifyBaseLogger): Promise<voi
     // (webhook or an earlier pass) between the SELECT and this UPDATE;
     // without the guard this would silently clobber a paid row back to
     // canceled. Same idempotency pattern as handleTonPaysPaid.
-    const { error } = await db
-      .from(TABLE)
-      .update({ status: 'canceled', tonpays_status: result.status })
-      .eq('id', row.id)
-      .eq('status', 'pending_payment')
-    if (error) log.warn({ err: error, txId: row.id }, 'tonpays sweep: cancel update failed')
+    try {
+      await sql`
+        update premium_transactions set status = 'canceled', tonpays_status = ${result.status}
+        where id = ${row.id} and status = 'pending_payment'`
+    } catch (err) { log.warn({ err, txId: row.id }, 'tonpays sweep: cancel update failed') }
   }
   // Any other status (still pending) is left alone for the next run.
 }

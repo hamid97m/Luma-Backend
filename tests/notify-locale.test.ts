@@ -8,7 +8,6 @@ vi.mock('grammy', () => ({
   InlineKeyboard: vi.fn().mockImplementation(() => ({ webApp })),
   Context: class {},
 }))
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 
 import {
   notifyMatch, notifyNewLike, notifyPaused, notifyFakePhotoWarning, notifyNewMessage, notifyTicketReply,
@@ -16,6 +15,7 @@ import {
 import { fa } from '../src/i18n/fa.js'
 import { en } from '../src/i18n/en.js'
 import { ar } from '../src/i18n/ar.js'
+import { resetDb, createUser } from './helpers/db.js'
 
 describe('notify helpers pick the recipient locale', () => {
   beforeEach(() => { vi.clearAllMocks(); process.env.WEB_URL = 'https://luma.test'; process.env.BOT_TOKEN = 'x' })
@@ -104,9 +104,12 @@ describe('notify helpers pick the recipient locale', () => {
 })
 
 describe('/start replies in the user locale or Telegram language', () => {
-  // Fresh module graph per test so getBot()/registerHandlers state and the db
-  // mock shape don't leak between cases.
-  beforeEach(() => { vi.resetModules(); vi.clearAllMocks(); process.env.WEB_URL = 'https://luma.test'; process.env.BOT_TOKEN = 'x' })
+  // Fresh module graph per test so getBot()/registerHandlers state doesn't
+  // leak between cases. The saved locale comes from a real users row.
+  beforeEach(async () => {
+    vi.resetModules(); vi.clearAllMocks(); process.env.WEB_URL = 'https://luma.test'; process.env.BOT_TOKEN = 'x'
+    await resetDb()
+  })
 
   async function runStart(savedLocale: string | null | undefined, languageCode: string | undefined) {
     const handlers: Record<string, (ctx: any) => Promise<void>> = {}
@@ -121,11 +124,8 @@ describe('/start replies in the user locale or Telegram language', () => {
       Context: class {},
       webhookCallback: vi.fn(() => async () => undefined),
     }))
-    const maybeSingle = vi.fn().mockResolvedValue({ data: savedLocale === undefined ? null : { locale: savedLocale } })
-    const eq = vi.fn().mockReturnValue({ maybeSingle })
-    const select = vi.fn().mockReturnValue({ eq })
-    const update = vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({}) })
-    vi.doMock('../src/db.js', () => ({ db: { from: vi.fn(() => ({ select, update })) } }))
+    // undefined → the user has no row yet (brand-new); otherwise a row with that locale.
+    if (savedLocale !== undefined) await createUser({ telegram_id: 42, locale: savedLocale })
 
     const { mountWebhook } = await import('../src/bot.js')
     mountWebhook({ post: vi.fn() } as any)

@@ -1,4 +1,4 @@
-import { db } from '../db.js'
+import { sql } from '../db.js'
 import { isPremiumEnabled, isPremiumActive } from './service.js'
 import { swipeLimitApplies } from './swipeLimit.js'
 
@@ -39,7 +39,25 @@ export function evaluateDirectChatWindow(startedAt: string | null, count: number
   return { blocked: false, resetAt, nextStartedAt: startedAt, nextCount: count + 1, remaining: DIRECT_CHAT_LIMIT - (count + 1) }
 }
 
-const WINDOW_COLUMNS = 'gender, looking_for, premium_until, direct_chat_window_started_at, direct_chat_window_count'
+interface WindowRow {
+  gender: string | null
+  looking_for: string | null
+  premium_until: string | null
+  direct_chat_window_started_at: string | null
+  direct_chat_window_count: number | null
+}
+
+/** The user's cohort + window columns; undefined when missing or on a read error (callers fail open). */
+async function readWindowRow(userId: string): Promise<WindowRow | undefined> {
+  try {
+    const [row] = await sql<WindowRow[]>`
+      select gender, looking_for, premium_until, direct_chat_window_started_at, direct_chat_window_count
+      from users where id = ${userId}`
+    return row
+  } catch {
+    return undefined
+  }
+}
 
 export type DirectChatGate = 'free' | 'paywall' | 'quota'
 
@@ -65,8 +83,8 @@ export interface DirectChatStatus {
 /** Read-only status for GET /discovery. Never consumes a slot. */
 export async function getDirectChatStatus(userId: string, nowMs = Date.now()): Promise<DirectChatStatus> {
   const free: DirectChatStatus = { gate: 'free', remaining: DIRECT_CHAT_LIMIT, limit: DIRECT_CHAT_LIMIT, resetAt: null }
-  const { data: me, error } = await db.from('users').select(WINDOW_COLUMNS).eq('id', userId).single()
-  if (error || !me) return free // fail open
+  const me = await readWindowRow(userId)
+  if (!me) return free // fail open
   const gate = await classifyGate(me, nowMs)
   if (gate !== 'quota') return { ...free, gate }
 
@@ -92,21 +110,22 @@ export type DirectChatCheck =
 
 /** Optimistic-concurrency write — mirrors swipeLimit.guardedWindowUpdate. */
 async function guardedWindowUpdate(userId: string, expectedCount: number, w: DirectChatWindow): Promise<'ok' | 'lost' | 'dbError'> {
-  const { data, error } = await db
-    .from('users')
-    .update({ direct_chat_window_started_at: w.nextStartedAt, direct_chat_window_count: w.nextCount })
-    .eq('id', userId)
-    .eq('direct_chat_window_count', expectedCount)
-    .select('id')
-  if (error) return 'dbError'
-  if (!data || data.length === 0) return 'lost'
-  return 'ok'
+  try {
+    const rows = await sql`
+      update users
+      set direct_chat_window_started_at = ${w.nextStartedAt ?? null}, direct_chat_window_count = ${w.nextCount ?? null}
+      where id = ${userId} and direct_chat_window_count = ${expectedCount}
+      returning id`
+    return rows.length === 0 ? 'lost' : 'ok'
+  } catch {
+    return 'dbError'
+  }
 }
 
 /** Gate + counter for POST /discovery/direct-chat. Consumes a slot only for gate 'quota'. */
 export async function checkAndCountDirectChat(userId: string, nowMs = Date.now()): Promise<DirectChatCheck> {
-  const { data: me, error } = await db.from('users').select(WINDOW_COLUMNS).eq('id', userId).single()
-  if (error || !me) return { gate: 'free' } // fail open
+  const me = await readWindowRow(userId)
+  if (!me) return { gate: 'free' } // fail open
   const gate = await classifyGate(me, nowMs)
   if (gate === 'free') return { gate: 'free' }
   if (gate === 'paywall') return { gate: 'paywall' }
@@ -118,8 +137,8 @@ export async function checkAndCountDirectChat(userId: string, nowMs = Date.now()
   if (first !== 'lost') return { gate: 'quota', blocked: false, remaining: w.remaining!, resetAt: w.resetAt } // ok or dbError → allow
 
   // Lost the optimistic race — re-read once and re-evaluate.
-  const { data: retry, error: retryErr } = await db.from('users').select(WINDOW_COLUMNS).eq('id', userId).single()
-  if (retryErr || !retry) return { gate: 'quota', blocked: false, remaining: w.remaining!, resetAt: w.resetAt }
+  const retry = await readWindowRow(userId)
+  if (!retry) return { gate: 'quota', blocked: false, remaining: w.remaining!, resetAt: w.resetAt }
   const retryW = evaluateDirectChatWindow(retry.direct_chat_window_started_at ?? null, retry.direct_chat_window_count ?? 0, nowMs)
   if (retryW.blocked) return { gate: 'quota', blocked: true, resetAt: retryW.resetAt }
   await guardedWindowUpdate(userId, retry.direct_chat_window_count ?? 0, retryW)

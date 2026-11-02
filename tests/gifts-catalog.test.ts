@@ -1,15 +1,15 @@
-import { describe, it, expect, vi } from 'vitest'
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 vi.mock('../src/bot.js', () => ({
   getGiftCatalog: vi.fn(), createGiftInvoiceLink: vi.fn(), sendGiftToUser: vi.fn(),
   refundGift: vi.fn(), notifyNewMessage: vi.fn(), notifyGiftIntro: vi.fn(),
 }))
-import { db } from '../src/db.js'
 import { getGiftCatalog } from '../src/bot.js'
 import { getCatalogForBuyer } from '../src/gifts/service.js'
+import { resetDb, insertRow, sql } from './helpers/db.js'
 
 describe('getCatalogForBuyer', () => {
-  it('excludes gifts with globally sold-out or exhausted bot allocation, includes the rest with marked-up pricing', async () => {
+  beforeEach(async () => {
+    await resetDb()
     vi.mocked(getGiftCatalog).mockResolvedValue([
       // Regular gift: no remaining_count/personal_remaining_count at all -> included.
       { id: 'regular', sticker: { emoji: '🌹' }, star_count: 15 } as any,
@@ -20,19 +20,10 @@ describe('getCatalogForBuyer', () => {
       // Limited, both counts positive -> included.
       { id: 'available_limited', sticker: { emoji: '🚀' }, star_count: 200, remaining_count: 5, personal_remaining_count: 3 } as any,
     ])
+  })
 
-    // db.from is called twice by getCatalogForBuyer: once for gift_config (markup), once for gift_price_overrides.
-    let call = 0
-    vi.mocked(db.from).mockImplementation((): any => {
-      call += 1
-      if (call === 1) {
-        // pricingConfig(): select('markup_percent').eq('id', true).single()
-        return { select: () => ({ eq: () => ({ single: () => ({ data: { markup_percent: 33 } }) }) }) }
-      }
-      // overrides: select('gift_id, charged_stars')
-      return { select: () => ({ data: [] }) }
-    })
-
+  it('excludes gifts with globally sold-out or exhausted bot allocation, includes the rest with marked-up pricing', async () => {
+    // Fresh install: gift_config.markup_percent defaults to 33, no overrides.
     const catalog = await getCatalogForBuyer()
 
     const ids = catalog.map((g) => g.giftId)
@@ -49,5 +40,20 @@ describe('getCatalogForBuyer', () => {
     const limited = catalog.find((g) => g.giftId === 'available_limited')!
     expect(limited.emoji).toBe('🚀')
     expect(limited.chargedStars).toBe(266) // 200 * 1.33 = 266
+  })
+
+  it('applies the configured markup and per-gift price overrides', async () => {
+    await sql`update gift_config set markup_percent = 0 where id = true`
+    await insertRow('gift_price_overrides', { gift_id: 'regular', charged_stars: 25 })
+
+    const catalog = await getCatalogForBuyer()
+    expect(catalog.find((g) => g.giftId === 'regular')!.chargedStars).toBe(25)
+    expect(catalog.find((g) => g.giftId === 'available_limited')!.chargedStars).toBe(200)
+  })
+
+  it('falls back to the 33% default markup when the config row is missing', async () => {
+    await sql`delete from gift_config`
+    const catalog = await getCatalogForBuyer()
+    expect(catalog.find((g) => g.giftId === 'regular')!.chargedStars).toBe(20)
   })
 })

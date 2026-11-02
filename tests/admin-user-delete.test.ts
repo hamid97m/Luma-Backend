@@ -1,72 +1,65 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
+import { describe, it, expect, beforeEach } from 'vitest'
 
 import { buildApp } from '../src/server.js'
-import { db } from '../src/db.js'
-import { signAdminToken } from '../src/routes/admin/auth-utils.js'
-import { chainable } from './admin-helpers.js'
-
-function mockUsers({
-  fetch = { data: { id: 'u1', is_seed: true }, error: null },
-  update = vi.fn(() => chainable({ error: null })),
-} = {}) {
-  vi.mocked(db.from).mockImplementation((table: string) => {
-    if (table === 'users') return { select: () => chainable(fetch), update } as any
-    return chainable({ data: null })
-  })
-  return { update }
-}
+import { resetDb, createUser, sql } from './helpers/db.js'
+import { adminHeaders } from './helpers/admin.js'
+import { withFailingWrite } from './helpers/admin-db-fault.js'
 
 describe('DELETE /admin/users/:id', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
   let headers: Record<string, string>
+  let seed: Record<string, any>
 
   beforeEach(async () => {
-    vi.clearAllMocks()
+    await resetDb()
     process.env.ADMIN_JWT_SECRET = 'test-secret'
     app = await buildApp()
-    headers = { authorization: `Bearer ${signAdminToken({ adminId: 'a1', username: 'root' })}` }
+    headers = adminHeaders()
+    seed = await createUser({ telegram_id: -100, is_seed: true, name: 'Seed' })
   })
 
+  const del = (id: string) => app.inject({ method: 'DELETE', url: `/admin/users/${id}`, headers })
+  const row = async (id: string) => (await sql`select deleted_at, is_active from users where id = ${id}`)[0]
+
   it('rejects requests without a valid admin token', async () => {
-    const res = await app.inject({ method: 'DELETE', url: '/admin/users/u1' })
+    const res = await app.inject({ method: 'DELETE', url: `/admin/users/${seed.id}` })
     expect(res.statusCode).toBe(401)
+    expect((await row(seed.id)).deleted_at).toBeNull()
   })
 
   it('404s for an unknown user', async () => {
-    const { update } = mockUsers({ fetch: { data: null, error: { message: 'not found' } } })
-    const res = await app.inject({ method: 'DELETE', url: '/admin/users/nope', headers })
+    const res = await del('00000000-0000-0000-0000-000000000000')
     expect(res.statusCode).toBe(404)
     expect(res.json()).toEqual({ error: 'user_not_found' })
-    expect(update).not.toHaveBeenCalled()
+  })
+
+  it('404s (not 500) for a malformed id', async () => {
+    const res = await del('nope')
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toEqual({ error: 'user_not_found' })
   })
 
   it('400s for a real (non-seed) user', async () => {
-    const { update } = mockUsers({ fetch: { data: { id: 'u1', is_seed: false }, error: null } })
-    const res = await app.inject({ method: 'DELETE', url: '/admin/users/u1', headers })
+    const real = await createUser({ name: 'Real' })
+    const res = await del(real.id)
     expect(res.statusCode).toBe(400)
     expect(res.json()).toEqual({ error: 'not_a_seed_user' })
-    expect(update).not.toHaveBeenCalled()
+    expect(await row(real.id)).toEqual({ deleted_at: null, is_active: true })
   })
 
   it('soft-deletes a seed user: sets deleted_at and is_active false', async () => {
-    const { update } = mockUsers()
-    const res = await app.inject({ method: 'DELETE', url: '/admin/users/u1', headers })
+    const res = await del(seed.id)
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ ok: true })
-    expect(update).toHaveBeenCalledTimes(1)
-    const patch = update.mock.calls[0][0] as any
-    expect(patch.is_active).toBe(false)
-    expect(typeof patch.deleted_at).toBe('string')
-    expect(Number.isNaN(Date.parse(patch.deleted_at))).toBe(false)
-    expect(Object.keys(patch).sort()).toEqual(['deleted_at', 'is_active'])
+    const after = await row(seed.id)
+    expect(after.is_active).toBe(false)
+    expect(Date.now() - Date.parse(after.deleted_at)).toBeLessThan(5_000)
+    expect((await sql`select count(*)::int as n from users`)[0].n).toBe(1) // soft, not hard
   })
 
   it('500s when the update fails', async () => {
-    mockUsers({ update: vi.fn(() => chainable({ error: { message: 'db down' } })) })
-    const res = await app.inject({ method: 'DELETE', url: '/admin/users/u1', headers })
+    const res = await withFailingWrite('users', 'update', () => del(seed.id))
     expect(res.statusCode).toBe(500)
     expect(res.json()).toEqual({ error: 'delete_failed' })
   })

@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../db.js'
+import { sql } from '../db.js'
 import { verifyInitData } from '../auth.js'
 import { getBotUsername } from '../bot.js'
 import { getProfileWithPhotos } from './profile.js'
@@ -23,12 +23,20 @@ export async function authRoutes(app: FastifyInstance) {
         ? { allows_write_to_pm: tgUser.allows_write_to_pm }
         : {}
 
-    // Find or create user
-    const { data: existing } = await db
-      .from('users')
-      .select('id, name, age, gender, looking_for, bio, deleted_at, banned_at, locale')
-      .eq('telegram_id', tgUser.id)
-      .single()
+    // Find or create user. A failed lookup was treated as "no such user" (the
+    // insert then fails on the unique telegram_id and answers 500) — kept.
+    type ExistingUser = {
+      id: string; name: string; age: number; gender: string; looking_for: string
+      bio: string | null; deleted_at: string | null; banned_at: string | null; locale: string | null
+    }
+    let existing: ExistingUser | undefined
+    try {
+      ;[existing] = await sql<ExistingUser[]>`
+        select id, name, age, gender, looking_for, bio, deleted_at, banned_at, locale
+        from users where telegram_id = ${tgUser.id}`
+    } catch {
+      existing = undefined
+    }
 
     if (existing?.banned_at) {
       // botUsername lets the Blocked screen deep-link into the support bot chat.
@@ -42,29 +50,37 @@ export async function authRoutes(app: FastifyInstance) {
       userId = existing.id
       userName = existing.name
       const reactivating = Boolean(existing.deleted_at)
-      const { error: updateError } = await db.from('users').update({
-        last_active: new Date().toISOString(),
-        ...writeAccess,
-        ...(reactivating ? { deleted_at: null, is_active: true } : {}),
-      }).eq('id', userId)
-      if (updateError) return reply.status(500).send({ error: 'auth_update_failed' })
+      try {
+        await sql`
+          update users set ${sql({
+            last_active: new Date().toISOString(),
+            ...writeAccess,
+            ...(reactivating ? { deleted_at: null, is_active: true } : {}),
+          })}
+          where id = ${userId}`
+      } catch {
+        return reply.status(500).send({ error: 'auth_update_failed' })
+      }
     } else {
-      const { data: created, error } = await db
-        .from('users')
-        .insert({
-          telegram_id: tgUser.id,
-          username: tgUser.username ?? null,
-          name: tgUser.first_name,
-          ...writeAccess,
-          // age, gender, looking_for will be set during profile setup
-          age: 0,
-          gender: 'man',
-          looking_for: 'women',
-        })
-        .select('id, name')
-        .single()
+      let created: { id: string; name: string } | undefined
+      try {
+        ;[created] = await sql<{ id: string; name: string }[]>`
+          insert into users ${sql({
+            telegram_id: tgUser.id,
+            username: tgUser.username ?? null,
+            name: tgUser.first_name,
+            ...writeAccess,
+            // age, gender, looking_for will be set during profile setup
+            age: 0,
+            gender: 'man',
+            looking_for: 'women',
+          })}
+          returning id, name`
+      } catch {
+        created = undefined
+      }
 
-      if (error || !created) return reply.status(500).send({ error: 'user_creation_failed' })
+      if (!created) return reply.status(500).send({ error: 'user_creation_failed' })
       userId = created.id
       userName = created.name
 

@@ -1,6 +1,7 @@
-import { db } from '../db.js'
+import { sql } from '../db.js'
 import { notifyFakePhotoWarning, notifyPaused } from '../bot.js'
 import { deleteAllPhotosForUser } from '../photos/deleteAllPhotosForUser.js'
+import type { Locale } from '../i18n/locale.js'
 
 /** First pending fake-photo report count that is at least half the pause
  * threshold. Null when the threshold is off or too small for a halfway warning. */
@@ -12,11 +13,9 @@ export function fakePhotoWarnAt(threshold: number): number | null {
 
 /** Pending-report count that triggers an automatic photo-review pause. 0 = off. */
 export async function getPhotoReportThreshold(): Promise<number> {
-  const { data } = await db
-    .from('moderation_config')
-    .select('photo_report_threshold')
-    .eq('id', true)
-    .single()
+  // A failed read means "off" (0), as before.
+  const [data] = await sql<{ photo_report_threshold: number }[]>`
+    select photo_report_threshold from moderation_config where id = true`.catch(() => [])
   return data?.photo_report_threshold ?? 0
 }
 
@@ -31,26 +30,22 @@ export async function maybeWarnFakePhoto(reportedUserId: string): Promise<boolea
     const warnAt = fakePhotoWarnAt(threshold)
     if (warnAt == null) return false
 
-    const { count: fakeCount } = await db
-      .from('reports')
-      .select('id', { count: 'exact', head: true })
-      .eq('reported_id', reportedUserId)
-      .eq('status', 'pending')
-      .eq('reason', 'fake')
-    if ((fakeCount ?? 0) !== warnAt) return false
+    const [{ count: fakeCount }] = await sql<{ count: number }[]>`
+      select count(*)::int as count from reports
+      where reported_id = ${reportedUserId} and status = 'pending' and reason = 'fake'`
+    if (fakeCount !== warnAt) return false
 
-    const { count: pendingCount } = await db
-      .from('reports')
-      .select('id', { count: 'exact', head: true })
-      .eq('reported_id', reportedUserId)
-      .eq('status', 'pending')
-    if ((pendingCount ?? 0) >= threshold) return false
+    const [{ count: pendingCount }] = await sql<{ count: number }[]>`
+      select count(*)::int as count from reports
+      where reported_id = ${reportedUserId} and status = 'pending'`
+    if (pendingCount >= threshold) return false
 
-    const { data } = await db
-      .from('users')
-      .select('telegram_id, allows_write_to_pm, locale, gender, paused_at, banned_at')
-      .eq('id', reportedUserId)
-      .maybeSingle()
+    const [data] = await sql<{
+      telegram_id: number; allows_write_to_pm: boolean | null; locale: Locale | null
+      gender: string | null; paused_at: string | null; banned_at: string | null
+    }[]>`
+      select telegram_id, allows_write_to_pm, locale, gender, paused_at, banned_at
+      from users where id = ${reportedUserId}`
     if (!data || data.paused_at || data.banned_at) return false
     if (!(data.telegram_id > 0) || data.allows_write_to_pm === false) return false
 
@@ -76,12 +71,10 @@ export async function maybeAutoPauseForReports(reportedUserId: string): Promise<
     const threshold = await getPhotoReportThreshold()
     if (threshold <= 0) return false
 
-    const { count } = await db
-      .from('reports')
-      .select('id', { count: 'exact', head: true })
-      .eq('reported_id', reportedUserId)
-      .eq('status', 'pending')
-    if ((count ?? 0) < threshold) return false
+    const [{ count }] = await sql<{ count: number }[]>`
+      select count(*)::int as count from reports
+      where reported_id = ${reportedUserId} and status = 'pending'`
+    if (count < threshold) return false
 
     return await pauseForPhotoReview(reportedUserId)
   } catch (err) {
@@ -98,14 +91,14 @@ export async function maybeAutoPauseForReports(reportedUserId: string): Promise<
 export async function pauseForPhotoReview(userId: string): Promise<boolean> {
   // The update only matches an active, non-banned, not-already-paused row,
   // so concurrent callers can't double-pause or double-notify.
-  const { data } = await db
-    .from('users')
-    .update({ paused_at: new Date().toISOString() })
-    .eq('id', userId)
-    .is('paused_at', null)
-    .is('banned_at', null)
-    .select('telegram_id, allows_write_to_pm, locale')
-    .maybeSingle()
+  // A failed write reads as "not paused" (false), as with supabase-js.
+  const [data] = await sql<{ telegram_id: number; allows_write_to_pm: boolean | null; locale: Locale | null }[]>`
+    update users set paused_at = ${new Date().toISOString()}
+    where id = ${userId} and paused_at is null and banned_at is null
+    returning telegram_id, allows_write_to_pm, locale`.catch((err) => {
+      console.error('[moderation] pauseForPhotoReview update failed:', (err as Error)?.message ?? err)
+      return []
+    })
   if (!data) return false
 
   await deleteAllPhotosForUser(userId)

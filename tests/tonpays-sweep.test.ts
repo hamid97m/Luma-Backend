@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
 vi.mock('../src/payments/tonpays.js', () => ({
   isTonPaysConfigured: vi.fn(() => true),
   checkInvoice: vi.fn(),
@@ -10,93 +9,51 @@ vi.mock('../src/premium/service.js', () => ({
   handleTonPaysPaid: vi.fn(),
 }))
 
-import { db } from '../src/db.js'
+import { resetDb, createUser, sql } from './helpers/db.js'
+import { createTx, getTx, ago } from './helpers/premium.js'
 import { isTonPaysConfigured, checkInvoice, cancelInvoice } from '../src/payments/tonpays.js'
 import { handleTonPaysPaid } from '../src/premium/service.js'
 import { runTonPaysSweepJob } from '../src/jobs/tonpaysSweep.js'
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any
 
-type UpdateCall = { patch: any; matchers: Array<[string, any]> }
+const MIN = 60 * 1000
+const HOUR = 60 * MIN
 
-/**
- * Mock db.from('premium_transactions') query builder.
- *
- * Distinguishes the two selects the job issues by which range-filter method is
- * called last: `.lte(...)` with no accompanying `.lt(...)` marks the ancient
- * (>48h) cleanup scan; `.lt(...)` (+`.gt(...)`) marks the checkable (10m-48h)
- * window scan. `.limit(n)` truncates the relevant fixture array, so the cap
- * is exercised for real rather than merely asserted on the call args.
- * `.update(...)` returns a chainable that records EVERY `.eq`/`.in` matcher
- * in call order (so both the row-identity matcher and the `status =
- * 'pending_payment'` idempotency guard show up), resolving once awaited.
- */
-function buildDb(opts: { checkable?: any[]; ancient?: any[] }) {
-  const updates: UpdateCall[] = []
-  const fromCalls: string[] = []
-
-  const from = vi.fn((table: string) => {
-    fromCalls.push(table)
-    let mode: 'ancient' | 'checkable' | null = null
-    const q: any = {
-      select: () => q,
-      eq: () => q,
-      lte: () => { mode = 'ancient'; return q },
-      lt: () => { mode = 'checkable'; return q },
-      gt: () => q,
-      order: () => q,
-      limit: (n: number) => {
-        const source = mode === 'ancient' ? (opts.ancient ?? []) : (opts.checkable ?? [])
-        return Promise.resolve({ data: source.slice(0, n), error: null })
-      },
-      update: (patch: any) => {
-        const matchers: Array<[string, any]> = []
-        const uq: any = {
-          eq: (col: string, val: any) => { matchers.push([col, val]); return uq },
-          in: (col: string, val: any) => { matchers.push([col, val]); return uq },
-          then: (resolve: any, reject: any) => {
-            updates.push({ patch, matchers })
-            return Promise.resolve({ error: null }).then(resolve, reject)
-          },
-        }
-        return uq
-      },
-    }
-    return q
+/** A pending TonPays tx created `ageMs` ago. */
+async function pendingTx(ageMs: number, inv: string | null, overrides: Record<string, unknown> = {}) {
+  const u = await createUser()
+  return createTx(u.id, {
+    provider: 'tonpays', tonpays_invoice_id: inv, created_at: ago(ageMs), ...overrides,
   })
-
-  return { from, updates, fromCalls }
 }
 
-const hasMatcher = (u: UpdateCall, col: string, val: any) =>
-  u.matchers.some(([c, v]) => c === col && (Array.isArray(v) ? v.includes(val) : v === val))
-
-beforeEach(() => {
+beforeEach(async () => {
+  await resetDb()
   vi.mocked(isTonPaysConfigured).mockReturnValue(true)
   vi.mocked(checkInvoice).mockReset()
   vi.mocked(cancelInvoice).mockReset()
   vi.mocked(cancelInvoice).mockResolvedValue(undefined)
   vi.mocked(handleTonPaysPaid).mockReset()
-  vi.mocked(db.from).mockReset()
   log.info.mockReset(); log.warn.mockReset(); log.error.mockReset()
 })
 
 describe('runTonPaysSweepJob', () => {
   it('no-ops without TONPAYS_API_KEY', async () => {
     vi.mocked(isTonPaysConfigured).mockReturnValue(false)
-    const mockDb = buildDb({})
-    vi.mocked(db.from).mockImplementation(mockDb.from as any)
+    const ancient = await pendingTx(49 * HOUR, 'inv-ancient')
+    await pendingTx(20 * MIN, 'inv1')
 
     await runTonPaysSweepJob({ log })
 
-    expect(mockDb.from).not.toHaveBeenCalled()
+    expect((await getTx(ancient.id)).status).toBe('pending_payment')
     expect(checkInvoice).not.toHaveBeenCalled()
+    expect(cancelInvoice).not.toHaveBeenCalled()
     expect(handleTonPaysPaid).not.toHaveBeenCalled()
   })
 
   it('grants a paid invoice found by the sweep', async () => {
-    const mockDb = buildDb({ checkable: [{ id: 'tx1', tonpays_invoice_id: 'inv1' }] })
-    vi.mocked(db.from).mockImplementation(mockDb.from as any)
+    const tx = await pendingTx(20 * MIN, 'inv1')
     vi.mocked(checkInvoice).mockResolvedValue({
       invoiceId: 'inv1', status: 'paid', paid: true,
       remainingAmount: 0, refundPending: false, cardNumber: null, cardHolder: null,
@@ -107,17 +64,30 @@ describe('runTonPaysSweepJob', () => {
 
     expect(checkInvoice).toHaveBeenCalledWith('inv1')
     expect(handleTonPaysPaid).toHaveBeenCalledWith('inv1')
-    // A paid row is finalized entirely inside handleTonPaysPaid — the sweep
-    // itself issues no separate status update for it.
-    expect(mockDb.updates.find((u) => hasMatcher(u, 'id', 'tx1'))).toBeUndefined()
+    // A paid row is finalized entirely inside handleTonPaysPaid (mocked here) —
+    // the sweep itself issues no separate status update for it.
+    expect((await getTx(tx.id)).status).toBe('pending_payment')
+  })
+
+  it('only checks rows inside the 10m–48h window, skipping rows with no invoice and non-tonpays/non-pending rows', async () => {
+    await pendingTx(5 * MIN, 'inv-young')                         // too young
+    await pendingTx(20 * MIN, null)                               // never got an invoice
+    await pendingTx(20 * MIN, 'inv-stars', { provider: 'stars' })  // not tonpays
+    await pendingTx(20 * MIN, 'inv-paid', { status: 'paid' })      // already resolved
+    await pendingTx(30 * MIN, 'inv-ok')
+    vi.mocked(checkInvoice).mockResolvedValue({
+      invoiceId: 'inv-ok', status: 'pending', paid: false,
+      remainingAmount: null, refundPending: false, cardNumber: null, cardHolder: null,
+    })
+
+    await runTonPaysSweepJob({ log })
+
+    expect(vi.mocked(checkInvoice).mock.calls).toEqual([['inv-ok']])
   })
 
   it('cancels expired rows and ancient rows without checking the ancient ones, guarding both updates on pending_payment', async () => {
-    const mockDb = buildDb({
-      checkable: [{ id: 'tx-expired', tonpays_invoice_id: 'inv-expired' }],
-      ancient: [{ id: 'tx-ancient', tonpays_invoice_id: 'inv-ancient' }],
-    })
-    vi.mocked(db.from).mockImplementation(mockDb.from as any)
+    const expired = await pendingTx(20 * MIN, 'inv-expired')
+    const ancient = await pendingTx(49 * HOUR, 'inv-ancient')
     vi.mocked(checkInvoice).mockResolvedValue({
       invoiceId: 'inv-expired', status: 'expired', paid: false,
       remainingAmount: null, refundPending: false, cardNumber: null, cardHolder: null,
@@ -129,17 +99,8 @@ describe('runTonPaysSweepJob', () => {
     expect(checkInvoice).toHaveBeenCalledTimes(1)
     expect(checkInvoice).toHaveBeenCalledWith('inv-expired')
 
-    const expiredUpdate = mockDb.updates.find((u) => hasMatcher(u, 'id', 'tx-expired'))
-    expect(expiredUpdate?.patch).toEqual({ status: 'canceled', tonpays_status: 'expired' })
-    // Guard: the per-row expired/canceled update must not clobber a row that
-    // paid between the SELECT and this UPDATE.
-    expect(hasMatcher(expiredUpdate!, 'status', 'pending_payment')).toBe(true)
-
-    const ancientUpdate = mockDb.updates.find((u) => hasMatcher(u, 'id', 'tx-ancient'))
-    expect(ancientUpdate?.patch).toEqual({ status: 'canceled' })
-    // Guard: the ancient batch cancel must not clobber a row that paid
-    // between the SELECT and this UPDATE either.
-    expect(hasMatcher(ancientUpdate!, 'status', 'pending_payment')).toBe(true)
+    expect(await getTx(expired.id)).toMatchObject({ status: 'canceled', tonpays_status: 'expired' })
+    expect(await getTx(ancient.id)).toMatchObject({ status: 'canceled', tonpays_status: null })
 
     // An ancient row's invoice must also be cancelled UPSTREAM: TonPays allows
     // one pending invoice per buyer, so leaving it live would block that buyer
@@ -147,15 +108,37 @@ describe('runTonPaysSweepJob', () => {
     expect(cancelInvoice).toHaveBeenCalledWith('inv-ancient')
   })
 
-  it('cancels an ancient row locally even when the upstream cancel fails, and keeps going across rows', async () => {
-    const mockDb = buildDb({
-      ancient: [
-        { id: 'tx-a', tonpays_invoice_id: 'inv-a' },
-        { id: 'tx-b', tonpays_invoice_id: null }, // never got an invoice — nothing upstream
-        { id: 'tx-c', tonpays_invoice_id: 'inv-c' },
-      ],
+  it('never clobbers a row that got paid between the SELECT and the cancel (expired path)', async () => {
+    const tx = await pendingTx(20 * MIN, 'inv-race')
+    // The webhook grant lands while the upstream check is in flight.
+    vi.mocked(checkInvoice).mockImplementation(async () => {
+      await sql`update premium_transactions set status = 'paid' where id = ${tx.id}`
+      return {
+        invoiceId: 'inv-race', status: 'expired', paid: false,
+        remainingAmount: null, refundPending: false, cardNumber: null, cardHolder: null,
+      }
     })
-    vi.mocked(db.from).mockImplementation(mockDb.from as any)
+
+    await runTonPaysSweepJob({ log })
+
+    expect(await getTx(tx.id)).toMatchObject({ status: 'paid', tonpays_status: null })
+  })
+
+  it('never clobbers an ancient row that got paid between the SELECT and the batch cancel', async () => {
+    const tx = await pendingTx(49 * HOUR, 'inv-race')
+    vi.mocked(cancelInvoice).mockImplementation(async () => {
+      await sql`update premium_transactions set status = 'paid' where id = ${tx.id}`
+    })
+
+    await runTonPaysSweepJob({ log })
+
+    expect((await getTx(tx.id)).status).toBe('paid')
+  })
+
+  it('cancels an ancient row locally even when the upstream cancel fails, and keeps going across rows', async () => {
+    const a = await pendingTx(50 * HOUR, 'inv-a')
+    const b = await pendingTx(50 * HOUR, null) // never got an invoice — nothing upstream
+    const c = await pendingTx(50 * HOUR, 'inv-c')
     vi.mocked(cancelInvoice).mockRejectedValueOnce(new Error('tonpays down'))
 
     await runTonPaysSweepJob({ log })
@@ -166,15 +149,27 @@ describe('runTonPaysSweepJob', () => {
     expect(cancelInvoice).toHaveBeenCalledWith('inv-c')
     expect(log.warn).toHaveBeenCalled()
     // ...and the local cancel still has to happen, or these rows get re-swept forever.
-    const batch = mockDb.updates.find((u) => hasMatcher(u, 'id', 'tx-a'))
-    expect(batch?.patch).toEqual({ status: 'canceled' })
-    expect(hasMatcher(batch!, 'id', 'tx-c')).toBe(true)
+    for (const tx of [a, b, c]) expect((await getTx(tx.id)).status).toBe('canceled')
   })
 
-  it('caps at 30 checks per run', async () => {
-    const checkable = Array.from({ length: 40 }, (_, i) => ({ id: `tx${i}`, tonpays_invoice_id: `inv${i}` }))
-    const mockDb = buildDb({ checkable })
-    vi.mocked(db.from).mockImplementation(mockDb.from as any)
+  it('a failing upstream check on one row is logged and does not stop the rest', async () => {
+    await pendingTx(40 * MIN, 'inv-bad')
+    const ok = await pendingTx(30 * MIN, 'inv-ok')
+    vi.mocked(checkInvoice)
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce({
+        invoiceId: 'inv-ok', status: 'canceled', paid: false,
+        remainingAmount: null, refundPending: false, cardNumber: null, cardHolder: null,
+      })
+
+    await runTonPaysSweepJob({ log })
+
+    expect(log.warn).toHaveBeenCalled()
+    expect(await getTx(ok.id)).toMatchObject({ status: 'canceled', tonpays_status: 'canceled' })
+  })
+
+  it('caps at 30 checks per run, oldest first', async () => {
+    for (let i = 0; i < 40; i++) await pendingTx((20 + i) * MIN, `inv${i}`)
     vi.mocked(checkInvoice).mockResolvedValue({
       invoiceId: 'inv', status: 'pending', paid: false,
       remainingAmount: null, refundPending: false, cardNumber: null, cardHolder: null,
@@ -183,5 +178,6 @@ describe('runTonPaysSweepJob', () => {
     await runTonPaysSweepJob({ log })
 
     expect(checkInvoice).toHaveBeenCalledTimes(30)
+    expect(vi.mocked(checkInvoice).mock.calls[0]).toEqual(['inv39']) // ascending created_at
   })
 })

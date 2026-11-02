@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../db.js'
+import { sql } from '../db.js'
 import { isPremiumActive } from '../premium/service.js'
 import { getIncomingLikers, getIncomingLiker } from '../likes/service.js'
 import { ensureDailyReveal } from '../likes/reveal.js'
@@ -16,10 +16,18 @@ async function likersForViewer(userId: string) {
 
 /** Is the premium gate active for this viewer right now? (toggle on AND not premium) */
 async function gateActiveFor(userId: string): Promise<boolean> {
-  const { data: cfg } = await db.from('premium_config').select('premium_enabled').eq('id', true).single()
-  if (cfg?.premium_enabled !== true) return false
-  const { data: me } = await db.from('users').select('premium_until').eq('id', userId).single()
-  return !isPremiumActive(me?.premium_until ?? null)
+  // Toggle + viewer expiry in one round trip (was two sequential reads). Read
+  // errors were ignored before (toggle unreadable → gate off); keep that.
+  try {
+    const [row] = await sql<{ premium_enabled: boolean | null; premium_until: string | null }[]>`
+      select
+        (select premium_enabled from premium_config where id = true) as premium_enabled,
+        (select premium_until from users where id = ${userId}) as premium_until`
+    if (row?.premium_enabled !== true) return false
+    return !isPremiumActive(row.premium_until ?? null)
+  } catch {
+    return false
+  }
 }
 
 export async function likesRoutes(app: FastifyInstance) {
@@ -44,12 +52,12 @@ export async function likesRoutes(app: FastifyInstance) {
     const photosByUser = new Map<string, string[]>()
     const allIds = likers.map((l) => l.id)
     if (allIds.length > 0) {
-      const { data: photoRows } = await db
-        .from('user_photos')
-        .select('user_id, url, position')
-        .in('user_id', allIds)
-        .order('position', { ascending: true })
-      for (const p of (photoRows ?? []) as Array<{ user_id: string; url: string }>) {
+      // A failed photo read only means tiles without photos (error was ignored before).
+      const photoRows = await sql<{ user_id: string; url: string }[]>`
+        select user_id, url from user_photos
+        where user_id = any(${allIds}::uuid[])
+        order by position asc`.catch(() => [] as { user_id: string; url: string }[])
+      for (const p of photoRows) {
         const arr = photosByUser.get(p.user_id) ?? []
         arr.push(p.url)
         photosByUser.set(p.user_id, arr)
@@ -74,8 +82,8 @@ export async function likesRoutes(app: FastifyInstance) {
 
     // Mark seen so the badge clears. Fire-and-forget — a failed watermark write
     // only means the badge lingers, not a broken screen.
-    db.from('users').update({ likes_seen_at: new Date().toISOString() }).eq('id', req.userId)
-      .then(({ error }: { error: unknown }) => { if (error) req.log.warn({ err: error }, 'likes_seen_at update failed') })
+    sql`update users set likes_seen_at = ${new Date().toISOString()} where id = ${req.userId}`
+      .catch((err) => req.log.warn({ err }, 'likes_seen_at update failed'))
 
     return { visible, locked, lockedCount, premiumRequired: lockedCount > 0 }
   })
@@ -83,9 +91,11 @@ export async function likesRoutes(app: FastifyInstance) {
   app.get('/likes/unread-count', async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
-    const [likers, { data: me }] = await Promise.all([
+    const [likers, me] = await Promise.all([
       likersForViewer(req.userId),
-      db.from('users').select('likes_seen_at').eq('id', req.userId).single(),
+      // A failed watermark read counted every like as unread before; keep that.
+      sql<{ likes_seen_at: string | null }[]>`select likes_seen_at from users where id = ${req.userId}`
+        .then(([row]) => row ?? null, () => null),
     ])
     const seenAt = me?.likes_seen_at ? new Date(me.likes_seen_at).getTime() : 0
     const count = likers.filter((l) => new Date(l.likedAt).getTime() > seenAt).length

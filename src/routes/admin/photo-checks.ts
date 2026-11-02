@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../../db.js'
+import { db, sql } from '../../db.js'
 import { EVIDENCE_BUCKET } from '../../moderation/photoAiCheck.js'
 
 const PAGE_SIZE = 24
@@ -11,8 +11,13 @@ const OUTPUT_USD_PER_TOKEN = 1.2 / 1_000_000
 
 export async function adminPhotoChecksRoutes(app: FastifyInstance) {
   app.get('/photo-checks/stats', async (_req, reply) => {
-    const { data: s, error } = await db.from('photo_ai_check_stats').select('*').single()
-    if (error || !s) return reply.status(500).send({ error: 'photo_checks_fetch_failed' })
+    let s: any
+    try {
+      ;[s] = await sql`select * from photo_ai_check_stats`
+    } catch (err) {
+      _req.log.error({ err }, 'photo check stats failed')
+    }
+    if (!s) return reply.status(500).send({ error: 'photo_checks_fetch_failed' })
 
     const promptTokens = Number(s.prompt_tokens ?? 0)
     const completionTokens = Number(s.completion_tokens ?? 0)
@@ -34,21 +39,39 @@ export async function adminPhotoChecksRoutes(app: FastifyInstance) {
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const from = (pageNum - 1) * PAGE_SIZE
 
-    let q = db
-      .from('photo_ai_checks')
-      .select(
-        'photo_id, approved, reason, photo_url, evidence_path, created_at, ' +
-        'user:users(id, name, gender, paused_at, banned_at, deleted_at)',
-        { count: 'exact' },
-      )
-    if (verdict === 'approved') q = q.eq('approved', true)
-    else if (verdict === 'rejected') q = q.eq('approved', false)
+    const verdictFilter =
+      verdict === 'approved' ? sql`where c.approved = true`
+      : verdict === 'rejected' ? sql`where c.approved = false`
+      : sql``
 
-    const { data, count, error } = await q
-      .order('created_at', { ascending: false })
-      .range(from, from + PAGE_SIZE - 1)
-    if (error) return reply.status(500).send({ error: 'photo_checks_fetch_failed' })
-    const rows = (data ?? []) as any[]
+    let rows: any[]
+    let total: number
+    try {
+      const [data, [{ count }]] = await Promise.all([
+        sql`
+          select c.photo_id, c.approved, c.reason, c.photo_url, c.evidence_path, c.created_at,
+                 u.id as user_id, u.name as user_name, u.gender as user_gender,
+                 u.paused_at as user_paused_at, u.banned_at as user_banned_at, u.deleted_at as user_deleted_at
+          from photo_ai_checks c
+          left join users u on u.id = c.user_id
+          ${verdictFilter}
+          order by c.created_at desc
+          limit ${PAGE_SIZE} offset ${from}`,
+        sql<{ count: number }[]>`select count(*)::int as count from photo_ai_checks c ${verdictFilter}`,
+      ])
+      // Nest the user as the old embedded `user:users(...)` did (null when missing).
+      rows = data.map((r: any) => ({
+        ...r,
+        user: r.user_id == null ? null : {
+          id: r.user_id, name: r.user_name, gender: r.user_gender,
+          paused_at: r.user_paused_at, banned_at: r.user_banned_at, deleted_at: r.user_deleted_at,
+        },
+      }))
+      total = count
+    } catch (err) {
+      req.log.error({ err }, 'photo checks fetch failed')
+      return reply.status(500).send({ error: 'photo_checks_fetch_failed' })
+    }
 
     const paths = rows.map((r) => r.evidence_path).filter(Boolean) as string[]
     let signed: Record<string, string> = {}
@@ -59,7 +82,6 @@ export async function adminPhotoChecksRoutes(app: FastifyInstance) {
       )
     }
 
-    const total = count ?? 0
     return {
       items: rows.map((r) => ({
         photoId: r.photo_id,

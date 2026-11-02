@@ -1,4 +1,4 @@
-import { db } from '../db.js'
+import { sql } from '../db.js'
 import { sendBroadcastMessage, forwardBroadcastMessage } from '../bot.js'
 import { getPurchaseMessageConfig, resolvePurchaseMessage, type PurchaseMessageConfig } from './purchaseMessageConfig.js'
 import type { Locale } from '../i18n/index.js'
@@ -27,12 +27,13 @@ type Deliver = (target: Pick<Target, 'telegram_id' | 'locale'>) => Promise<void>
 type Logger = { info?: (...a: any[]) => void; warn?: (...a: any[]) => void; error?: (...a: any[]) => void }
 
 export interface PurchaseMessageDeps {
-  db?: any
+  /** @deprecated ignored — the job queries Postgres via `sql` directly. */
+  db?: unknown
   log?: Logger
   now?: number
   sendText?: (telegramId: number, text: string, button?: any) => Promise<void>
   forward?: (telegramId: number, chatId: string, messageId: number) => Promise<void>
-  getConfig?: (dbClient: any) => Promise<PurchaseMessageConfig | null>
+  getConfig?: (dbClient?: unknown) => Promise<PurchaseMessageConfig | null>
 }
 
 export interface RunPurchaseMessageJobDeps extends PurchaseMessageDeps {
@@ -65,34 +66,42 @@ function buildDeliver(cfg: PurchaseMessageConfig, deps: PurchaseMessageDeps): De
  * sweep) wins the claim — the other sees the conflict and skips, so a user is
  * never double-messaged. Returns false when already claimed or the insert failed
  * (either way we must not send without a recorded claim). */
-async function claimUser(dbClient: any, userId: string): Promise<boolean> {
-  const { error } = await dbClient.from('purchase_message_sends').insert({ user_id: userId, status: 'sent' })
-  return !error
+async function claimUser(userId: string): Promise<boolean> {
+  try {
+    // Single statement: the row comes back only for the caller that inserted it.
+    const claimed = await sql`
+      insert into purchase_message_sends (user_id, status) values (${userId}, 'sent')
+      on conflict (user_id) do nothing
+      returning user_id`
+    return claimed.length > 0
+  } catch {
+    return false
+  }
 }
 
-async function setStatus(dbClient: any, userId: string, status: 'sent' | 'blocked') {
-  try { await dbClient.from('purchase_message_sends').update({ status }).eq('user_id', userId) } catch { /* best-effort */ }
+async function setStatus(userId: string, status: 'sent' | 'blocked') {
+  try { await sql`update purchase_message_sends set status = ${status} where user_id = ${userId}` } catch { /* best-effort */ }
 }
-async function releaseClaim(dbClient: any, userId: string) {
-  try { await dbClient.from('purchase_message_sends').delete().eq('user_id', userId) } catch { /* best-effort */ }
+async function releaseClaim(userId: string) {
+  try { await sql`delete from purchase_message_sends where user_id = ${userId}` } catch { /* best-effort */ }
 }
 
 /** Claim → deliver → finalize one recipient. 403 records 'blocked' (never retry);
  * a transient error releases the claim so a later run/timer retries. */
 async function deliverToUser(
-  dbClient: any, deliver: Deliver, target: Target, stats: PurchaseMessageStats, log?: Logger,
+  deliver: Deliver, target: Target, stats: PurchaseMessageStats, log?: Logger,
 ) {
-  if (!(await claimUser(dbClient, target.id))) return // someone else has it (or transient insert error)
+  if (!(await claimUser(target.id))) return // someone else has it (or transient insert error)
   try {
     await deliver(target)
     stats.sent++
   } catch (err) {
     if (isBlocked(err)) {
       stats.blocked++
-      await setStatus(dbClient, target.id, 'blocked')
+      await setStatus(target.id, 'blocked')
     } else {
       stats.failed++
-      await releaseClaim(dbClient, target.id)
+      await releaseClaim(target.id)
       log?.warn?.({ err, userId: target.id }, 'purchase-message send failed')
     }
   }
@@ -101,30 +110,32 @@ async function deliverToUser(
 /** Load one user IFF they are eligible right now: has a pending (unpaid) purchase
  * attempt on/after the cutoff, never completed a purchase, hasn't been messaged,
  * lives in Iran, and is a messageable real user. Returns null otherwise. */
-async function loadEligibleTargetForUser(
-  dbClient: any, activeSince: string, userId: string,
-): Promise<Target | null> {
-  const { data: paid } = await dbClient
-    .from('premium_transactions').select('id')
-    .eq('user_id', userId).eq('source', 'purchase').eq('status', 'paid').limit(1)
-  if (paid?.length) return null
+async function loadEligibleTargetForUser(activeSince: string, userId: string): Promise<Target | null> {
+  // Query errors propagate (fail closed: never message on an unanswered check);
+  // the per-payment caller's .catch logs them.
+  const paid = await sql`
+    select id from premium_transactions
+    where user_id = ${userId} and source = 'purchase' and status = 'paid'
+    limit 1`
+  if (paid.length) return null
 
-  const { data: pending } = await dbClient
-    .from('premium_transactions').select('id')
-    .eq('user_id', userId).eq('source', 'purchase').eq('status', 'pending_payment')
-    .gte('created_at', activeSince).limit(1)
-  if (!pending?.length) return null
+  const pending = await sql`
+    select id from premium_transactions
+    where user_id = ${userId} and source = 'purchase' and status = 'pending_payment'
+      and created_at >= ${activeSince}
+    limit 1`
+  if (!pending.length) return null
 
-  const { data: sent } = await dbClient
-    .from('purchase_message_sends').select('user_id').eq('user_id', userId).limit(1)
-  if (sent?.length) return null
+  const sent = await sql`select user_id from purchase_message_sends where user_id = ${userId} limit 1`
+  if (sent.length) return null
 
-  const { data: users } = await dbClient
-    .from('users').select('id, telegram_id, locale, geo_country')
-    .eq('id', userId).eq('is_seed', false).is('banned_at', null).is('deleted_at', null)
-    .eq('geo_country', IRAN_COUNTRY)
-    .gt('telegram_id', 0).or('allows_write_to_pm.is.null,allows_write_to_pm.eq.true').limit(1)
-  return users?.[0] ?? null
+  const [user] = await sql<Target[]>`
+    select id, telegram_id, locale, geo_country from users
+    where id = ${userId} and is_seed = false and banned_at is null and deleted_at is null
+      and geo_country = ${IRAN_COUNTRY}
+      and telegram_id > 0 and (allows_write_to_pm is null or allows_write_to_pm = true)
+    limit 1`
+  return user ?? null
 }
 
 /**
@@ -133,19 +144,18 @@ async function loadEligibleTargetForUser(
  * work — a couple of indexed lookups + one send — so it adds negligible load.
  */
 export async function maybeSendPurchaseMessageForUser(userId: string, deps: PurchaseMessageDeps = {}): Promise<PurchaseMessageStats> {
-  const dbClient = deps.db ?? db
   const getConfig = deps.getConfig ?? getPurchaseMessageConfig
   const stats: PurchaseMessageStats = { eligible: 0, sent: 0, blocked: 0, failed: 0 }
 
-  const cfg = await getConfig(dbClient)
+  const cfg = await getConfig()
   if (!cfg || !cfg.enabled || !isDeliverable(cfg)) return stats
 
   const activeSince = cfg.activeSince ?? new Date(0).toISOString()
-  const target = await loadEligibleTargetForUser(dbClient, activeSince, userId)
+  const target = await loadEligibleTargetForUser(activeSince, userId)
   if (!target) return stats
 
   stats.eligible = 1
-  await deliverToUser(dbClient, buildDeliver(cfg, deps), target, stats, deps.log)
+  await deliverToUser(buildDeliver(cfg, deps), target, stats, deps.log)
   return stats
 }
 
@@ -169,7 +179,6 @@ export function schedulePurchaseCheckoutFollowup(userId: string, deps: PurchaseM
  * (cap + batches + pauses), so it adds little load.
  */
 export async function runPurchaseMessageJob(deps: RunPurchaseMessageJobDeps = {}): Promise<PurchaseMessageStats> {
-  const dbClient = deps.db ?? db
   const now = deps.now ?? Date.now()
   const graceMs = deps.graceMs ?? GRACE_MS
   const cap = deps.cap ?? CAP
@@ -179,54 +188,50 @@ export async function runPurchaseMessageJob(deps: RunPurchaseMessageJobDeps = {}
   const getConfig = deps.getConfig ?? getPurchaseMessageConfig
   const empty: PurchaseMessageStats = { eligible: 0, sent: 0, blocked: 0, failed: 0 }
 
-  const cfg = await getConfig(dbClient)
+  const cfg = await getConfig()
   if (!cfg || !cfg.enabled || !isDeliverable(cfg)) return empty
 
   const cutoffIso = new Date(now - graceMs).toISOString()
   const activeSince = cfg.activeSince ?? new Date(0).toISOString()
 
-  const { data: attempts, error: attemptsErr } = await dbClient
-    .from('premium_transactions')
-    .select('user_id, users!inner(geo_country)')
-    .eq('source', 'purchase')
-    .eq('status', 'pending_payment')
-    .eq('users.geo_country', IRAN_COUNTRY)
-    .lte('created_at', cutoffIso)
-    .gte('created_at', activeSince)
-    .order('created_at', { ascending: true })
-    .limit(CANDIDATE_LIMIT)
-  if (attemptsErr) throw attemptsErr
-  const candidateIds = [...new Set((attempts ?? []).map((r: any) => r.user_id).filter(Boolean))]
+  // Country filter on the attempt scan itself (inner join), so non-Iranian
+  // abandoners cannot fill the candidate window.
+  const attempts = await sql<{ user_id: string }[]>`
+    select t.user_id from premium_transactions t
+    join users u on u.id = t.user_id
+    where t.source = 'purchase' and t.status = 'pending_payment'
+      and u.geo_country = ${IRAN_COUNTRY}
+      and t.created_at <= ${cutoffIso} and t.created_at >= ${activeSince}
+    order by t.created_at asc
+    limit ${CANDIDATE_LIMIT}`
+  const candidateIds = [...new Set(attempts.map((r) => r.user_id).filter(Boolean))]
   if (candidateIds.length === 0) return empty
 
-  const { data: paidRows, error: paidErr } = await dbClient
-    .from('premium_transactions').select('user_id')
-    .eq('source', 'purchase').eq('status', 'paid').in('user_id', candidateIds)
-  if (paidErr) throw paidErr
-  const paid = new Set((paidRows ?? []).map((r: any) => r.user_id))
+  const paidRows = await sql<{ user_id: string }[]>`
+    select user_id from premium_transactions
+    where source = 'purchase' and status = 'paid' and user_id = any(${candidateIds}::uuid[])`
+  const paid = new Set(paidRows.map((r) => r.user_id))
 
-  const { data: sentRows, error: sentErr } = await dbClient
-    .from('purchase_message_sends').select('user_id').in('user_id', candidateIds)
-  if (sentErr) throw sentErr
-  const alreadySent = new Set((sentRows ?? []).map((r: any) => r.user_id))
+  const sentRows = await sql<{ user_id: string }[]>`
+    select user_id from purchase_message_sends where user_id = any(${candidateIds}::uuid[])`
+  const alreadySent = new Set(sentRows.map((r) => r.user_id))
 
   const freshIds = candidateIds.filter((id) => !paid.has(id) && !alreadySent.has(id))
   if (freshIds.length === 0) return empty
 
-  const { data: users, error: usersErr } = await dbClient
-    .from('users').select('id, telegram_id, locale, geo_country')
-    .in('id', freshIds).eq('is_seed', false).is('banned_at', null).is('deleted_at', null)
-    .eq('geo_country', IRAN_COUNTRY)
-    .gt('telegram_id', 0).or('allows_write_to_pm.is.null,allows_write_to_pm.eq.true').limit(cap)
-  if (usersErr) throw usersErr
-  const targets = (users ?? []) as Target[]
+  const targets = await sql<Target[]>`
+    select id, telegram_id, locale, geo_country from users
+    where id = any(${freshIds}::uuid[]) and is_seed = false and banned_at is null and deleted_at is null
+      and geo_country = ${IRAN_COUNTRY}
+      and telegram_id > 0 and (allows_write_to_pm is null or allows_write_to_pm = true)
+    limit ${cap}`
 
   const stats: PurchaseMessageStats = { eligible: targets.length, sent: 0, blocked: 0, failed: 0 }
   const deliver = buildDeliver(cfg, deps)
 
   for (let i = 0; i < targets.length; i += batchSize) {
     const batch = targets.slice(i, i + batchSize)
-    await Promise.all(batch.map((t) => deliverToUser(dbClient, deliver, t, stats, deps.log)))
+    await Promise.all(batch.map((t) => deliverToUser(deliver, t, stats, deps.log)))
     if (i + batchSize < targets.length) await sleep(pauseMs)
   }
 

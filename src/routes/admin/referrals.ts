@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify'
-import { db } from '../../db.js'
+import { sql } from '../../db.js'
 import { getReferralConfig, updateReferralConfig } from '../../referrals/config.js'
 
 export async function adminReferralRoutes(app: FastifyInstance) {
@@ -19,33 +19,43 @@ export async function adminReferralRoutes(app: FastifyInstance) {
     return config
   })
 
-  app.get('/referrals/stats', async (_req, reply) => {
-    const [totalQ, qualifiedRowsQ, rewardsQ] = await Promise.all([
-      db.from('referrals').select('id', { count: 'exact', head: true }),
-      db.from('referrals').select('referrer_id').not('qualified_at', 'is', null).limit(10000),
-      db.from('referral_rewards').select('milestone', { count: 'exact', head: true }),
-    ])
-    if (totalQ.error || qualifiedRowsQ.error || rewardsQ.error) {
+  app.get('/referrals/stats', async (req, reply) => {
+    let total: number
+    let qualifiedRows: { referrer_id: string }[]
+    let rewardsGranted: number
+    try {
+      const [[t], q, [r]] = await Promise.all([
+        sql<{ count: number }[]>`select count(*)::int as count from referrals`,
+        sql<{ referrer_id: string }[]>`
+          select referrer_id from referrals where qualified_at is not null limit 10000`,
+        sql<{ count: number }[]>`select count(*)::int as count from referral_rewards`,
+      ])
+      total = t.count
+      qualifiedRows = q
+      rewardsGranted = r.count
+    } catch (err) {
+      req.log.error({ err }, 'referral stats fetch failed')
       return reply.code(500).send({ error: 'stats_fetch_failed' })
     }
     const byReferrer = new Map<string, number>()
-    for (const row of qualifiedRowsQ.data ?? []) {
+    for (const row of qualifiedRows) {
       byReferrer.set(row.referrer_id, (byReferrer.get(row.referrer_id) ?? 0) + 1)
     }
     const top = [...byReferrer.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20)
     let topReferrers: { userId: string; name: string; qualifiedCount: number }[] = []
     if (top.length > 0) {
-      const { data: users } = await db
-        .from('users').select('id, name').in('id', top.map(([id]) => id))
-      const names = new Map((users ?? []).map((u) => [u.id, u.name]))
+      // Name lookup was best-effort (failure → '?').
+      const users = await sql<{ id: string; name: string }[]>`
+        select id, name from users where id = any(${top.map(([id]) => id)}::uuid[])`.catch(() => [])
+      const names = new Map(users.map((u) => [u.id, u.name]))
       topReferrers = top.map(([userId, qualifiedCount]) => ({
         userId, name: names.get(userId) ?? '?', qualifiedCount,
       }))
     }
     return {
-      total: totalQ.count ?? 0,
-      qualified: (qualifiedRowsQ.data ?? []).length,
-      rewardsGranted: rewardsQ.count ?? 0,
+      total,
+      qualified: qualifiedRows.length,
+      rewardsGranted,
       topReferrers,
     }
   })

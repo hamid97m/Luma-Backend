@@ -1,4 +1,4 @@
-import { db } from '../db.js'
+import { sql } from '../db.js'
 
 export const MAX_TICKET_BODY = 2000
 export const MAX_OPEN_TICKETS = 5
@@ -27,27 +27,26 @@ export async function createTicket(userId: string, rawBody: string): Promise<Cre
   if (!body) return { ok: false, error: 'empty_body' }
   if (body.length > MAX_TICKET_BODY) return { ok: false, error: 'body_too_long' }
 
-  const { count } = await db
-    .from('support_tickets')
-    .select('id', { count: 'exact', head: true })
-    .eq('user_id', userId)
-    .eq('status', 'open')
-  if ((count ?? 0) >= MAX_OPEN_TICKETS) return { ok: false, error: 'too_many_open_tickets' }
+  // A failed count used to read as 0 (supabase-js never threw) — keep that.
+  const [{ count }] = await sql<{ count: number }[]>`
+    select count(*)::int as count from support_tickets
+    where user_id = ${userId} and status = 'open'`.catch(() => [{ count: 0 }])
+  if (count >= MAX_OPEN_TICKETS) return { ok: false, error: 'too_many_open_tickets' }
 
   const nowIso = new Date().toISOString()
-  const { data: ticket, error: tErr } = await db
-    .from('support_tickets')
-    .insert({ user_id: userId, status: 'open', last_sender: 'user', last_message_at: nowIso })
-    .select('id, created_at')
-    .single()
-  if (tErr || !ticket) return { ok: false, error: 'create_failed' }
-
-  const { error: mErr } = await db
-    .from('support_messages')
-    .insert({ ticket_id: ticket.id, sender: 'user', body })
-  if (mErr) {
-    // Best-effort cleanup: don't leave a message-less ticket occupying the open-ticket cap.
-    await db.from('support_tickets').delete().eq('id', ticket.id)
+  // Ticket + opening message together: a failed message insert rolls the ticket
+  // back, so no message-less ticket occupies the open-ticket cap.
+  let ticket: { id: string; created_at: string }
+  try {
+    ticket = await sql.begin(async (tx) => {
+      const [t] = await tx<{ id: string; created_at: string }[]>`
+        insert into support_tickets (user_id, status, last_sender, last_message_at)
+        values (${userId}, 'open', 'user', ${nowIso})
+        returning id, created_at`
+      await tx`insert into support_messages (ticket_id, sender, body) values (${t.id}, 'user', ${body})`
+      return t
+    })
+  } catch {
     return { ok: false, error: 'create_failed' }
   }
 

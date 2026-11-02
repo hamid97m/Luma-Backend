@@ -1,5 +1,5 @@
 import type { FastifyBaseLogger } from 'fastify'
-import { db } from '../db.js'
+import { sql } from '../db.js'
 
 // Hidden, normalized location for the discovery ranking. Never sent to clients.
 export type Geo = { city: string | null; country: string | null }
@@ -96,30 +96,33 @@ export async function resolveCity(raw: string): Promise<Geo> {
   const key = cityKey(raw)
   if (!key) return NONE
 
-  const { data: cached } = await db
-    .from('city_lookups')
-    .select('city, country')
-    .eq('key', key)
-    .maybeSingle()
+  // A failed cache read counts as a miss, and a failed cache write is ignored
+  // (as with supabase-js, which reported both without throwing).
+  const [cached] = await sql<{ city: string | null; country: string | null }[]>`
+    select city, country from city_lookups where key = ${key}`.catch(() => [])
   if (cached) return { city: cached.city ?? null, country: cached.country ?? null }
 
   const geo = await askDeepSeek(raw)
-  await db.from('city_lookups').upsert({ key, city: geo.city, country: geo.country })
+  await sql`
+    insert into city_lookups (key, city, country) values (${key}, ${geo.city}, ${geo.country})
+    on conflict (key) do update set city = excluded.city, country = excluded.country`
+    .catch(() => {})
   return geo
 }
 
 /**
- * Resolves `location` and stores it on the user. The `.eq('location', …)`
+ * Resolves `location` and stores it on the user. The `location = …`
  * guard drops a stale result if the user changed city while this ran.
  */
 export async function updateUserGeo(userId: string, location: string): Promise<Geo> {
   const geo = await resolveCity(location)
-  const { error } = await db
-    .from('users')
-    .update({ geo_city: geo.city, geo_country: geo.country })
-    .eq('id', userId)
-    .eq('location', location)
-  if (error) throw new Error(`geo_update_failed: ${error.message}`)
+  try {
+    await sql`
+      update users set geo_city = ${geo.city}, geo_country = ${geo.country}
+      where id = ${userId} and location = ${location}`
+  } catch (error) {
+    throw new Error(`geo_update_failed: ${(error as Error).message}`)
+  }
   return geo
 }
 

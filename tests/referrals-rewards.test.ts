@@ -1,16 +1,11 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-vi.mock('../src/db.js', () => ({ db: { from: vi.fn() } }))
-
-const { getReferralConfig, notifyReferralQualified, notifyReferralReward } = vi.hoisted(() => ({
-  getReferralConfig: vi.fn(),
+const { notifyReferralQualified, notifyReferralReward } = vi.hoisted(() => ({
   notifyReferralQualified: vi.fn(() => Promise.resolve()),
   notifyReferralReward: vi.fn(() => Promise.resolve()),
 }))
-vi.mock('../src/referrals/config.js', () => ({ getReferralConfig }))
 vi.mock('../src/bot.js', () => ({ notifyReferralQualified, notifyReferralReward }))
 
-import { db } from '../src/db.js'
 import { extendPremiumUntil } from '../src/premium/service.js'
 import {
   MILESTONES,
@@ -18,42 +13,24 @@ import {
   evaluateReferralRewards,
   maybeQualifyReferral,
 } from '../src/referrals/rewards.js'
+import { resetDb, createUser, createPhoto, sql } from './helpers/db.js'
+import { failWritesTo } from './helpers/gifts-referrals.js'
 
-// Records every db.from(table).<method>(...args) call and resolves each call
-// to the next queued result for that table (FIFO) — lets a test script the
-// exact sequence of selects/inserts/updates evaluateReferralRewards issues.
-function chainableLogged(result: unknown, log: Array<{ table: string; method: string; args: unknown[] }>, table: string): any {
-  const proxy: any = new Proxy(function () {} as any, {
-    get(_target, prop) {
-      if (prop === 'then') return (resolve: any, reject: any) => Promise.resolve(result).then(resolve, reject)
-      return (...args: unknown[]) => {
-        log.push({ table, method: String(prop), args })
-        return proxy
-      }
-    },
-  })
-  return proxy
+const enable = () => sql`update referral_config set enabled = true`
+
+/** `n` qualified referrals for `referrerId` (plus optional unqualified ones). */
+async function referrals(referrerId: string, qualified: number, unqualified = 0) {
+  for (let i = 0; i < qualified + unqualified; i++) {
+    const u = await createUser({ referred_by: referrerId })
+    await sql`insert into referrals (referrer_id, referred_id, qualified_at)
+      values (${referrerId}, ${u.id}, ${i < qualified ? new Date().toISOString() : null})`
+  }
 }
 
-function makeDb(queues: Record<string, any[]>) {
-  const log: Array<{ table: string; method: string; args: unknown[] }> = []
-  const counters: Record<string, number> = {}
-  vi.mocked(db.from).mockImplementation((table: string) => {
-    const idx = counters[table] ?? 0
-    counters[table] = idx + 1
-    const result = (queues[table] ?? [])[idx] ?? { data: null, error: null, count: null }
-    return chainableLogged(result, log, table)
-  })
-  return log
-}
-
-function inserts(log: ReturnType<typeof makeDb>, table: string) {
-  return log.filter((l) => l.table === table && l.method === 'insert').map((l) => l.args[0])
-}
-
-function updates(log: ReturnType<typeof makeDb>, table: string) {
-  return log.filter((l) => l.table === table && l.method === 'update').map((l) => l.args[0])
-}
+const userRow = async (id: string) =>
+  (await sql`select bonus_swipes, premium_until from users where id = ${id}`)[0]
+const rewardRows = async (id: string) =>
+  (await sql`select milestone from referral_rewards where referrer_id = ${id} order by milestone`).map((r) => r.milestone)
 
 describe('dueMilestones', () => {
   it('returns [] for 0 qualified referrals', () => {
@@ -74,67 +51,60 @@ describe('dueMilestones', () => {
 })
 
 describe('evaluateReferralRewards', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    vi.useFakeTimers()
+  let referrer: Record<string, any>
+
+  beforeEach(async () => {
+    // Fake only Date: postgres.js needs real timers.
+    vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2026-09-13T12:00:00.000Z'))
+    await resetDb()
+    referrer = await createUser({ telegram_id: 555, allows_write_to_pm: true, locale: 'en' })
   })
+  afterEach(() => vi.useRealTimers())
 
   it('no-ops (no db writes) when the referral config is disabled', async () => {
-    getReferralConfig.mockResolvedValue({ enabled: false })
-    await evaluateReferralRewards('referrer-1')
-    expect(db.from).not.toHaveBeenCalled()
+    await referrals(referrer.id, 3)
+    await evaluateReferralRewards(referrer.id)
+    expect(await rewardRows(referrer.id)).toEqual([])
+    expect(await userRow(referrer.id)).toEqual({ bonus_swipes: 0, premium_until: null })
   })
 
-  it('no-ops when the referral config is null', async () => {
-    getReferralConfig.mockResolvedValue(null)
-    await evaluateReferralRewards('referrer-1')
-    expect(db.from).not.toHaveBeenCalled()
+  it('no-ops when the referral config row is missing', async () => {
+    await sql`delete from referral_config`
+    await referrals(referrer.id, 3)
+    await evaluateReferralRewards(referrer.id)
+    expect(await rewardRows(referrer.id)).toEqual([])
+  })
+
+  it('no-ops with zero qualified referrals (unqualified ones do not count)', async () => {
+    await enable()
+    await referrals(referrer.id, 0, 2)
+    await evaluateReferralRewards(referrer.id)
+    expect(await rewardRows(referrer.id)).toEqual([])
   })
 
   it('with 3 qualified and no prior rewards: grants milestones 1 & 3, records tx, notifies', async () => {
-    getReferralConfig.mockResolvedValue({ enabled: true })
-    const log = makeDb({
-      referrals: [{ count: 3, data: null, error: null }],
-      referral_rewards: [
-        { data: [], error: null }, // granted milestones lookup
-        { error: null }, // claim insert for milestone 1
-        { error: null }, // claim insert for milestone 3
-      ],
-      users: [
-        { data: { telegram_id: 555, allows_write_to_pm: true, locale: 'en' }, error: null }, // referrer lookup
-        { data: { bonus_swipes: 0 }, error: null }, // grantBonusSwipes select
-        { data: { id: 'referrer-1' }, error: null }, // grantBonusSwipes guarded update
-        { data: { premium_until: null }, error: null }, // grantPremiumDays select
-        { error: null }, // grantPremiumDays update
-      ],
-      premium_transactions: [{ error: null }],
-    })
+    await enable()
+    await referrals(referrer.id, 3, 1)
 
-    await evaluateReferralRewards('referrer-1')
+    await evaluateReferralRewards(referrer.id)
 
-    expect(inserts(log, 'referral_rewards')).toEqual([
-      { referrer_id: 'referrer-1', milestone: 1 },
-      { referrer_id: 'referrer-1', milestone: 3 },
-    ])
+    expect(await rewardRows(referrer.id)).toEqual([1, 3])
+    expect(await userRow(referrer.id)).toEqual({ bonus_swipes: 20, premium_until: extendPremiumUntil(null, 3) })
 
-    expect(updates(log, 'users')).toEqual([
-      { bonus_swipes: 20 },
-      { premium_until: extendPremiumUntil(null, 3) },
-    ])
-
-    expect(inserts(log, 'premium_transactions')).toEqual([
-      {
-        user_id: 'referrer-1',
-        plan_id: null,
-        plan_title: 'Referral reward',
-        price_stars: 0,
-        duration_days: 3,
-        status: 'paid',
-        source: 'referral',
-        paid_at: new Date().toISOString(),
-      },
-    ])
+    const txs = await sql`
+      select user_id, plan_id, plan_title, price_stars, duration_days, status, source, paid_at
+      from premium_transactions`
+    expect(txs).toEqual([{
+      user_id: referrer.id,
+      plan_id: null,
+      plan_title: 'Referral reward',
+      price_stars: 0,
+      duration_days: 3,
+      status: 'paid',
+      source: 'referral',
+      paid_at: new Date().toISOString(),
+    }])
 
     // Both DMs go out in the referrer's language.
     expect(notifyReferralReward).toHaveBeenCalledTimes(2)
@@ -142,138 +112,174 @@ describe('evaluateReferralRewards', () => {
     expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[1], 'en')
   })
 
-  it('a duplicate-claim insert error (23505) grants nothing for that milestone', async () => {
-    getReferralConfig.mockResolvedValue({ enabled: true })
-    const log = makeDb({
-      referrals: [{ count: 1, data: null, error: null }],
-      referral_rewards: [
-        { data: [], error: null }, // granted milestones lookup
-        { error: { code: '23505', message: 'duplicate key' } }, // claim insert loses the race
-      ],
-      users: [{ data: { telegram_id: 555, allows_write_to_pm: true }, error: null }], // referrer lookup only
-    })
+  it('extends an active premium from its current end, not from now', async () => {
+    await enable()
+    const future = '2026-10-01T00:00:00.000Z'
+    await sql`update users set premium_until = ${future} where id = ${referrer.id}`
+    await sql`insert into referral_rewards (referrer_id, milestone) values (${referrer.id}, 1)`
+    await referrals(referrer.id, 3)
+    await evaluateReferralRewards(referrer.id)
+    expect((await userRow(referrer.id)).premium_until).toBe(extendPremiumUntil(future, 3))
+  })
 
-    await evaluateReferralRewards('referrer-1')
+  it('adds to existing bonus swipes', async () => {
+    await enable()
+    await sql`update users set bonus_swipes = 7 where id = ${referrer.id}`
+    await referrals(referrer.id, 1)
+    await evaluateReferralRewards(referrer.id)
+    expect((await userRow(referrer.id)).bonus_swipes).toBe(27)
+  })
 
-    expect(inserts(log, 'referral_rewards')).toEqual([{ referrer_id: 'referrer-1', milestone: 1 }])
-    // No further users reads/writes (grantBonusSwipes never ran): only the one
-    // referrer lookup select touched the users table.
-    expect(log.filter((l) => l.table === 'users' && l.method === 'select')).toHaveLength(1)
-    expect(updates(log, 'users')).toEqual([])
+  it('a second evaluation grants nothing more', async () => {
+    await enable()
+    await referrals(referrer.id, 3)
+    await evaluateReferralRewards(referrer.id)
+    vi.mocked(notifyReferralReward).mockClear()
+    await evaluateReferralRewards(referrer.id)
+    expect(await userRow(referrer.id)).toEqual({ bonus_swipes: 20, premium_until: extendPremiumUntil(null, 3) })
+    expect(await sql`select id from premium_transactions`).toHaveLength(1)
+    expect(notifyReferralReward).not.toHaveBeenCalled()
+  })
+
+  it('concurrent evaluations (duplicate claim race) grant each milestone exactly once', async () => {
+    await enable()
+    await referrals(referrer.id, 3)
+    await Promise.all([1, 2, 3, 4].map(() => evaluateReferralRewards(referrer.id)))
+    expect(await rewardRows(referrer.id)).toEqual([1, 3])
+    expect(await userRow(referrer.id)).toEqual({ bonus_swipes: 20, premium_until: extendPremiumUntil(null, 3) })
+    expect(await sql`select id from premium_transactions`).toHaveLength(1)
+    expect(notifyReferralReward).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not notify when the referrer blocked the bot', async () => {
+    await enable()
+    await sql`update users set allows_write_to_pm = false where id = ${referrer.id}`
+    await referrals(referrer.id, 1)
+    await evaluateReferralRewards(referrer.id)
+    expect((await userRow(referrer.id)).bonus_swipes).toBe(20)
     expect(notifyReferralReward).not.toHaveBeenCalled()
   })
 
   it('logs (but does not throw or skip the grant/notify) when the premium_transactions audit insert errors', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    getReferralConfig.mockResolvedValue({ enabled: true })
-    makeDb({
-      referrals: [{ count: 3, data: null, error: null }],
-      referral_rewards: [
-        { data: [{ milestone: 1 }], error: null }, // milestone 1 already granted
-        { error: null }, // claim insert for milestone 3
-      ],
-      users: [
-        { data: { telegram_id: 555, allows_write_to_pm: true, locale: 'ar' }, error: null }, // referrer lookup
-        { data: { premium_until: null }, error: null }, // grantPremiumDays select
-        { error: null }, // grantPremiumDays update
-      ],
-      premium_transactions: [{ error: { message: 'insert failed' } }],
-    })
+    await enable()
+    await sql`update users set locale = 'ar' where id = ${referrer.id}`
+    await sql`insert into referral_rewards (referrer_id, milestone) values (${referrer.id}, 1)` // already granted
+    await referrals(referrer.id, 3)
+    const cleanup = await failWritesTo('premium_transactions', 'INSERT')
+    try {
+      await evaluateReferralRewards(referrer.id)
+    } finally {
+      await cleanup()
+    }
 
-    await evaluateReferralRewards('referrer-1')
-
-    expect(errorSpy).toHaveBeenCalledWith('referral premium audit insert failed', { message: 'insert failed' })
+    expect(errorSpy).toHaveBeenCalledWith('referral premium audit insert failed', expect.objectContaining({
+      message: 'injected failure on premium_transactions',
+    }))
     // The reward still grants and notifies despite the audit-row failure.
+    expect((await userRow(referrer.id)).premium_until).toBe(extendPremiumUntil(null, 3))
     expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[1], 'ar')
+    errorSpy.mockRestore()
   })
 
-  it('logs when grantBonusSwipes exhausts both attempts without a successful update', async () => {
+  it('logs when the bonus-swipes grant fails after the claim, and still notifies', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    getReferralConfig.mockResolvedValue({ enabled: true })
-    makeDb({
-      referrals: [{ count: 1, data: null, error: null }],
-      referral_rewards: [
-        { data: [], error: null }, // granted milestones lookup
-        { error: null }, // claim insert for milestone 1
-      ],
-      users: [
-        { data: { telegram_id: 555, allows_write_to_pm: true, locale: null }, error: null }, // referrer lookup (no locale yet)
-        { data: { bonus_swipes: 5 }, error: null }, // attempt 1 select
-        { data: null, error: null }, // attempt 1 guarded update loses the race
-        { data: { bonus_swipes: 5 }, error: null }, // attempt 2 select
-        { data: null, error: null }, // attempt 2 guarded update loses the race
-      ],
-    })
-
-    await evaluateReferralRewards('referrer-1')
+    await enable()
+    await sql`update users set locale = null where id = ${referrer.id}`
+    await referrals(referrer.id, 1)
+    const cleanup = await failWritesTo('users', 'UPDATE')
+    try {
+      await evaluateReferralRewards(referrer.id)
+    } finally {
+      await cleanup()
+    }
 
     // Claim was already inserted (idempotency guard), so the milestone is
     // considered granted even though the underlying swipe increment never
     // landed — the failure must be logged so it isn't silent.
+    expect(await rewardRows(referrer.id)).toEqual([1])
     expect(errorSpy).toHaveBeenCalledWith('referral bonus grant failed after claim', {
-      userId: 'referrer-1',
+      userId: referrer.id,
       amount: MILESTONES[0].rewardAmount,
     })
-    // No behavior change otherwise: still notifies the user of the reward
-    // (null locale → Persian for a referrer who hasn't picked a language).
+    // Still notifies (null locale → Persian for a referrer who hasn't picked a language).
     expect(notifyReferralReward).toHaveBeenCalledWith(555, MILESTONES[0], null)
+    errorSpy.mockRestore()
   })
 })
 
 describe('maybeQualifyReferral', () => {
-  beforeEach(() => vi.clearAllMocks())
+  let referrer: Record<string, any>
+  let subject: Record<string, any>
 
-  it('qualifies once: stamps qualified_at, notifies, and evaluates rewards', async () => {
-    getReferralConfig.mockResolvedValue({ enabled: false }) // evaluateReferralRewards short-circuits here
-    makeDb({
-      users: [
-        { data: { age: 25, name: 'Sara', referred_by: 'referrer-1' }, error: null }, // subject lookup
-        { data: { telegram_id: 777, allows_write_to_pm: true, locale: 'en' }, error: null }, // referrer lookup
-      ],
-      user_photos: [{ count: 2, data: null, error: null }],
-      referrals: [{ data: { referrer_id: 'referrer-1' }, error: null }], // guarded qualify update
-    })
-
-    await maybeQualifyReferral('user-1')
-
-    // The DM goes to the referrer, in the referrer's language (not the referred user's).
-    expect(notifyReferralQualified).toHaveBeenCalledWith(777, 'Sara', 'en')
-    expect(getReferralConfig).toHaveBeenCalledTimes(1) // proves evaluateReferralRewards ran
+  beforeEach(async () => {
+    await resetDb()
+    referrer = await createUser({ telegram_id: 777, allows_write_to_pm: true, locale: 'en' })
+    subject = await createUser({ name: 'Sara', age: 25, referred_by: referrer.id, gender: 'woman', looking_for: 'men' })
+    await sql`insert into referrals (referrer_id, referred_id) values (${referrer.id}, ${subject.id})`
   })
 
-  it('second call is a no-op: guarded update returns null, no notify, no reward evaluation', async () => {
-    makeDb({
-      users: [{ data: { age: 25, name: 'Sara', referred_by: 'referrer-1' }, error: null }],
-      user_photos: [{ count: 2, data: null, error: null }],
-      referrals: [{ data: null, error: null }], // already qualified — guard returns nothing
-    })
+  const qualifiedAt = async () =>
+    (await sql`select qualified_at from referrals where referred_id = ${subject.id}`)[0].qualified_at
 
-    await maybeQualifyReferral('user-1')
+  it('qualifies once: stamps qualified_at and notifies the referrer in their language', async () => {
+    await createPhoto(subject.id, 0)
+    await createPhoto(subject.id, 1)
 
+    await maybeQualifyReferral(subject.id)
+
+    expect(await qualifiedAt()).not.toBeNull()
+    expect(notifyReferralQualified).toHaveBeenCalledWith(777, 'Sara', 'en')
+    expect(await rewardRows(referrer.id)).toEqual([]) // program disabled → no reward
+  })
+
+  it('evaluates rewards after qualifying when the program is enabled', async () => {
+    await enable()
+    await createPhoto(subject.id, 0)
+    await maybeQualifyReferral(subject.id)
+    expect(await rewardRows(referrer.id)).toEqual([1])
+    expect((await userRow(referrer.id)).bonus_swipes).toBe(20)
+  })
+
+  it('second call is a no-op: no notify, no reward evaluation', async () => {
+    await enable()
+    await createPhoto(subject.id, 0)
+    await maybeQualifyReferral(subject.id)
+    const first = await qualifiedAt()
+    vi.mocked(notifyReferralQualified).mockClear()
+    vi.mocked(notifyReferralReward).mockClear()
+
+    await maybeQualifyReferral(subject.id)
+
+    expect(await qualifiedAt()).toBe(first)
     expect(notifyReferralQualified).not.toHaveBeenCalled()
-    expect(getReferralConfig).not.toHaveBeenCalled()
+    expect(notifyReferralReward).not.toHaveBeenCalled()
+  })
+
+  it('concurrent calls qualify (and notify) exactly once', async () => {
+    await createPhoto(subject.id, 0)
+    await Promise.all([maybeQualifyReferral(subject.id), maybeQualifyReferral(subject.id)])
+    expect(notifyReferralQualified).toHaveBeenCalledTimes(1)
   })
 
   it('does nothing for a user with age 0', async () => {
-    makeDb({
-      users: [{ data: { age: 0, name: 'Sara', referred_by: 'referrer-1' }, error: null }],
-    })
-
-    await maybeQualifyReferral('user-1')
-
+    await sql`update users set age = 0 where id = ${subject.id}`
+    await createPhoto(subject.id, 0)
+    await maybeQualifyReferral(subject.id)
+    expect(await qualifiedAt()).toBeNull()
     expect(notifyReferralQualified).not.toHaveBeenCalled()
-    expect(getReferralConfig).not.toHaveBeenCalled()
   })
 
   it('does nothing for a user with 0 photos', async () => {
-    makeDb({
-      users: [{ data: { age: 25, name: 'Sara', referred_by: 'referrer-1' }, error: null }],
-      user_photos: [{ count: 0, data: null, error: null }],
-    })
-
-    await maybeQualifyReferral('user-1')
-
+    await maybeQualifyReferral(subject.id)
+    expect(await qualifiedAt()).toBeNull()
     expect(notifyReferralQualified).not.toHaveBeenCalled()
-    expect(getReferralConfig).not.toHaveBeenCalled()
+  })
+
+  it('does nothing for a user who was not referred', async () => {
+    const loner = await createUser()
+    await createPhoto(loner.id, 0)
+    await maybeQualifyReferral(loner.id)
+    expect(notifyReferralQualified).not.toHaveBeenCalled()
   })
 })

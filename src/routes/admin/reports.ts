@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../../db.js'
+import { sql, isUuid } from '../../db.js'
 
 const PAGE_SIZE = 20
 
@@ -15,22 +15,31 @@ export async function adminReportsRoutes(app: FastifyInstance) {
     const from = (pageNum - 1) * PAGE_SIZE
 
     if (status === 'resolved') {
-      const { data, count, error } = await db
-        .from('reports')
-        .select(
-          'id, reported_id, reason, context, status, created_at, resolved_at, ' +
-          'reported:users!reports_reported_id_fkey(id, name)',
-          { count: 'exact' }
-        )
-        .in('status', ['resolved_banned', 'dismissed'])
-        .order('resolved_at', { ascending: false })
-        .range(from, from + PAGE_SIZE - 1)
-      if (error) return reply.status(500).send({ error: 'reports_fetch_failed' })
-      const total = count ?? 0
+      let data: any[]
+      let total: number
+      try {
+        const [rows, [{ count }]] = await Promise.all([
+          sql`
+            select r.id, r.reported_id, r.reason, r.context, r.status, r.created_at, r.resolved_at,
+                   u.id as reported_user_id, u.name as reported_name
+            from reports r
+            left join users u on u.id = r.reported_id
+            where r.status in ('resolved_banned', 'dismissed')
+            order by r.resolved_at desc
+            limit ${PAGE_SIZE} offset ${from}`,
+          sql<{ count: number }[]>`
+            select count(*)::int as count from reports where status in ('resolved_banned', 'dismissed')`,
+        ])
+        data = rows
+        total = count
+      } catch (err) {
+        req.log.error({ err }, 'reports fetch failed')
+        return reply.status(500).send({ error: 'reports_fetch_failed' })
+      }
       return {
-        items: (data ?? []).map((r: any) => ({
+        items: data.map((r: any) => ({
           id: r.id,
-          reportedUser: { id: r.reported?.id ?? r.reported_id, name: r.reported?.name ?? '' },
+          reportedUser: { id: r.reported_user_id ?? r.reported_id, name: r.reported_name ?? '' },
           reason: r.reason, context: r.context, status: r.status,
           createdAt: r.created_at, resolvedAt: r.resolved_at,
         })),
@@ -39,28 +48,38 @@ export async function adminReportsRoutes(app: FastifyInstance) {
     }
 
     // pending: query the summary view, then hydrate reported users.
-    const { data: rows, count, error } = await db
-      .from('pending_report_summary')
-      .select('reported_id, report_count, reasons, contexts, latest_at', { count: 'exact' })
-      .order('report_count', { ascending: false })
-      .order('latest_at', { ascending: false })
-      .range(from, from + PAGE_SIZE - 1)
-    if (error) return reply.status(500).send({ error: 'reports_fetch_failed' })
-
-    const ids = (rows ?? []).map((r: any) => r.reported_id)
+    let rows: any[]
+    let total: number
     let usersById: Record<string, any> = {}
-    if (ids.length) {
-      const { data: users, error: uErr } = await db
-        .from('users')
-        .select('id, name, banned_at, deleted_at, user_photos(url, position)')
-        .in('id', ids)
-      if (uErr) return reply.status(500).send({ error: 'reports_fetch_failed' })
-      usersById = Object.fromEntries((users ?? []).map((u: any) => [u.id, u]))
+    try {
+      const [summary, [{ count }]] = await Promise.all([
+        // Enum arrays cast to text[] so they arrive as plain string arrays.
+        sql`
+          select reported_id, report_count, reasons::text[] as reasons, contexts::text[] as contexts, latest_at
+          from pending_report_summary
+          order by report_count desc, latest_at desc
+          limit ${PAGE_SIZE} offset ${from}`,
+        sql<{ count: number }[]>`select count(*)::int as count from pending_report_summary`,
+      ])
+      rows = summary
+      total = count
+
+      const ids = rows.map((r: any) => r.reported_id)
+      if (ids.length) {
+        const users = await sql`
+          select u.id, u.name, u.banned_at, u.deleted_at,
+                 coalesce((select json_agg(json_build_object('url', p.url, 'position', p.position))
+                           from user_photos p where p.user_id = u.id), '[]') as user_photos
+          from users u where u.id = any(${ids}::uuid[])`
+        usersById = Object.fromEntries(users.map((u: any) => [u.id, u]))
+      }
+    } catch (err) {
+      req.log.error({ err }, 'reports fetch failed')
+      return reply.status(500).send({ error: 'reports_fetch_failed' })
     }
 
-    const total = count ?? 0
     return {
-      items: (rows ?? []).map((r: any) => {
+      items: rows.map((r: any) => {
         const u = usersById[r.reported_id]
         return {
           reportedUser: {
@@ -83,21 +102,34 @@ export async function adminReportsRoutes(app: FastifyInstance) {
   app.get('/reports/user/:userId', async (req, reply) => {
     const { userId } = req.params as { userId: string }
 
-    const { data: user } = await db
-      .from('users')
-      .select('*, user_photos(url, position)')
-      .eq('id', userId)
-      .single()
+    // Malformed id or a failed lookup → 404, as PostgREST's `data: null` did.
+    let user: any
+    try {
+      ;[user] = isUuid(userId)
+        ? await sql`
+            select u.*,
+                   coalesce((select json_agg(json_build_object('url', p.url, 'position', p.position))
+                             from user_photos p where p.user_id = u.id), '[]') as user_photos
+            from users u where u.id = ${userId}`
+        : []
+    } catch (err) {
+      req.log.error({ err }, 'reported user lookup failed')
+    }
     if (!user) return reply.status(404).send({ error: 'user_not_found' })
 
-    const { data: reports, error } = await db
-      .from('reports')
-      .select('id, reporter_id, context, reason, note, match_id, status, created_at, ' +
-              'reporter:users!reports_reporter_id_fkey(id, name)')
-      .eq('reported_id', userId)
-      .order('status', { ascending: true })   // 'pending' sorts before 'resolved_*'/'dismissed'
-      .order('created_at', { ascending: false })
-    if (error) return reply.status(500).send({ error: 'reports_fetch_failed' })
+    let reports: any[]
+    try {
+      reports = await sql`
+        select r.id, r.reporter_id, r.context, r.reason, r.note, r.match_id, r.status, r.created_at,
+               rep.name as reporter_name
+        from reports r
+        left join users rep on rep.id = r.reporter_id
+        where r.reported_id = ${userId}
+        order by r.status asc, r.created_at desc` // enum order: 'pending' sorts first
+    } catch (err) {
+      req.log.error({ err }, 'reports fetch failed')
+      return reply.status(500).send({ error: 'reports_fetch_failed' })
+    }
 
     const photos = (user.user_photos ?? [])
       .slice().sort((a: any, b: any) => a.position - b.position).map((p: any) => p.url)
@@ -108,10 +140,10 @@ export async function adminReportsRoutes(app: FastifyInstance) {
         bio: user.bio, username: user.username, telegramId: user.telegram_id,
         bannedAt: user.banned_at, deletedAt: user.deleted_at, photos,
       },
-      reports: (reports ?? []).map((r: any) => ({
+      reports: reports.map((r: any) => ({
         id: r.id,
         reporterId: r.reporter_id,
-        reporterName: r.reporter?.name ?? '',
+        reporterName: r.reporter_name ?? '',
         context: r.context, reason: r.reason, note: r.note,
         matchId: r.match_id, status: r.status, createdAt: r.created_at,
       })),
@@ -125,22 +157,25 @@ export async function adminReportsRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'invalid_action' })
     }
 
-    const now = new Date().toISOString()
-    if (action === 'ban') {
-      const { error: banErr } = await db.from('users').update({ banned_at: now }).eq('id', userId)
-      if (banErr) return reply.status(500).send({ error: 'resolve_failed' })
-    }
+    // A malformed id matches no user and no reports: nothing to do (PostgREST "no rows").
+    if (!isUuid(userId)) return { ok: true }
 
-    const { error: resErr } = await db
-      .from('reports')
-      .update({
-        status: action === 'ban' ? 'resolved_banned' : 'dismissed',
-        resolved_by: req.adminId,
-        resolved_at: now,
+    const now = new Date().toISOString()
+    try {
+      // Ban + resolve together, so a failed resolve no longer leaves a half-done ban.
+      await sql.begin(async (tx) => {
+        if (action === 'ban') await tx`update users set banned_at = ${now} where id = ${userId}`
+        await tx`
+          update reports
+          set status = ${action === 'ban' ? 'resolved_banned' : 'dismissed'},
+              resolved_by = ${req.adminId ?? null},
+              resolved_at = ${now}
+          where reported_id = ${userId} and status = 'pending'`
       })
-      .eq('reported_id', userId)
-      .eq('status', 'pending')
-    if (resErr) return reply.status(500).send({ error: 'resolve_failed' })
+    } catch (err) {
+      req.log.error({ err }, 'report resolve failed')
+      return reply.status(500).send({ error: 'resolve_failed' })
+    }
 
     return { ok: true }
   })

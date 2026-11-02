@@ -1,7 +1,8 @@
-import { db } from '../db.js'
+import { sql } from '../db.js'
 import { getReferralConfig } from './config.js'
 import { extendPremiumUntil } from '../premium/service.js'
 import { notifyReferralQualified, notifyReferralReward } from '../bot.js'
+import type { Locale } from '../i18n/index.js'
 
 export interface Milestone {
   count: number
@@ -20,40 +21,44 @@ export function dueMilestones(qualifiedCount: number, granted: number[]): Milest
 }
 
 async function grantBonusSwipes(userId: string, amount: number): Promise<void> {
-  // Optimistic-concurrency increment, same pattern as guardedWindowUpdate in swipeLimit.ts.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const { data: user } = await db.from('users').select('bonus_swipes').eq('id', userId).single()
-    if (!user) return
-    const { data: updated } = await db
-      .from('users')
-      .update({ bonus_swipes: (user.bonus_swipes ?? 0) + amount })
-      .eq('id', userId)
-      .eq('bonus_swipes', user.bonus_swipes ?? 0)
-      .select('id')
-      .maybeSingle()
-    if (updated) return
+  // Single atomic increment (replaces the old read + compare-and-set retry loop, which
+  // could give up under contention). A missing user is a silent no-op, as before.
+  try {
+    await sql`update users set bonus_swipes = coalesce(bonus_swipes, 0) + ${amount} where id = ${userId}`
+  } catch {
+    console.error('referral bonus grant failed after claim', { userId, amount })
   }
-  console.error('referral bonus grant failed after claim', { userId, amount })
 }
 
 async function grantPremiumDays(userId: string, days: number): Promise<void> {
-  const { data: user } = await db.from('users').select('premium_until').eq('id', userId).single()
-  if (!user) return
-  await db
-    .from('users')
-    .update({ premium_until: extendPremiumUntil(user.premium_until ?? null, days) })
-    .eq('id', userId)
-  const { error } = await db.from('premium_transactions').insert({
-    user_id: userId,
-    plan_id: null,
-    plan_title: 'Referral reward',
-    price_stars: 0,
-    duration_days: days,
-    status: 'paid',
-    source: 'referral',
-    paid_at: new Date().toISOString(),
+  // Row lock so a concurrent premium purchase/grant can't read the same premium_until
+  // and overwrite this extension (the old read-then-write could lose one of them).
+  const extended = await sql.begin(async (tx) => {
+    const [user] = await tx<{ premium_until: string | null }[]>`
+      select premium_until from users where id = ${userId} for update`
+    if (!user) return false
+    await tx`
+      update users set premium_until = ${extendPremiumUntil(user.premium_until ?? null, days)}
+      where id = ${userId}`
+    return true
   })
-  if (error) console.error('referral premium audit insert failed', error)
+  if (!extended) return
+  // Audit row is best-effort: its failure is logged and never undoes the grant.
+  try {
+    await sql`
+      insert into premium_transactions ${sql({
+        user_id: userId,
+        plan_id: null,
+        plan_title: 'Referral reward',
+        price_stars: 0,
+        duration_days: days,
+        status: 'paid',
+        source: 'referral',
+        paid_at: new Date().toISOString(),
+      })}`
+  } catch (error) {
+    console.error('referral premium audit insert failed', error)
+  }
 }
 
 export async function evaluateReferralRewards(referrerId: string): Promise<void> {
@@ -61,35 +66,35 @@ export async function evaluateReferralRewards(referrerId: string): Promise<void>
     const config = await getReferralConfig()
     if (!config?.enabled) return
 
-    const { count } = await db
-      .from('referrals')
-      .select('id', { count: 'exact', head: true })
-      .eq('referrer_id', referrerId)
-      .not('qualified_at', 'is', null)
-    const qualifiedCount = count ?? 0
+    const [{ count: qualifiedCount }] = await sql<{ count: number }[]>`
+      select count(*)::int as count from referrals
+      where referrer_id = ${referrerId} and qualified_at is not null`
     if (qualifiedCount === 0) return
 
-    const { data: rewardRows } = await db
-      .from('referral_rewards')
-      .select('milestone')
-      .eq('referrer_id', referrerId)
-    const granted = (rewardRows ?? []).map((r) => r.milestone)
+    const rewardRows = await sql<{ milestone: number }[]>`
+      select milestone from referral_rewards where referrer_id = ${referrerId}`
+    const granted = rewardRows.map((r) => r.milestone)
 
     const due = dueMilestones(qualifiedCount, granted)
     if (due.length === 0) return
 
-    const { data: referrer } = await db
-      .from('users')
-      .select('telegram_id, allows_write_to_pm, locale')
-      .eq('id', referrerId)
-      .single()
+    const [referrer] = await sql<{ telegram_id: number; allows_write_to_pm: boolean | null; locale: Locale | null }[]>`
+      select telegram_id, allows_write_to_pm, locale from users where id = ${referrerId}`
 
     for (const milestone of due) {
-      // Atomic claim: the PK insert is the idempotency guard.
-      const { error: claimError } = await db
-        .from('referral_rewards')
-        .insert({ referrer_id: referrerId, milestone: milestone.count })
-      if (claimError) continue // 23505 duplicate or anything else: never double-grant
+      // Atomic claim: the referral_rewards PK is the idempotency guard — only the caller
+      // whose insert actually lands a row grants the reward.
+      let claimed = false
+      try {
+        const rows = await sql`
+          insert into referral_rewards (referrer_id, milestone) values (${referrerId}, ${milestone.count})
+          on conflict (referrer_id, milestone) do nothing
+          returning milestone`
+        claimed = rows.length === 1
+      } catch {
+        claimed = false
+      }
+      if (!claimed) continue // duplicate or anything else: never double-grant
 
       if (milestone.rewardType === 'swipes') await grantBonusSwipes(referrerId, milestone.rewardAmount)
       else await grantPremiumDays(referrerId, milestone.rewardAmount)
@@ -105,34 +110,23 @@ export async function evaluateReferralRewards(referrerId: string): Promise<void>
 
 export async function maybeQualifyReferral(userId: string): Promise<void> {
   try {
-    const { data: user } = await db
-      .from('users')
-      .select('age, name, referred_by')
-      .eq('id', userId)
-      .single()
-    if (!user?.referred_by || !(user.age > 0)) return
+    const [user] = await sql<{ age: number | null; name: string; referred_by: string | null }[]>`
+      select age, name, referred_by from users where id = ${userId}`
+    if (!user?.referred_by || !((user.age ?? 0) > 0)) return
 
-    const { count: photoCount } = await db
-      .from('user_photos')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', userId)
-    if ((photoCount ?? 0) < 1) return
+    const [{ count: photoCount }] = await sql<{ count: number }[]>`
+      select count(*)::int as count from user_photos where user_id = ${userId}`
+    if (photoCount < 1) return
 
     // Guarded update: qualifies exactly once, even under concurrent photo/profile calls.
-    const { data: qualified } = await db
-      .from('referrals')
-      .update({ qualified_at: new Date().toISOString() })
-      .eq('referred_id', userId)
-      .is('qualified_at', null)
-      .select('referrer_id')
-      .maybeSingle()
+    const [qualified] = await sql<{ referrer_id: string }[]>`
+      update referrals set qualified_at = ${new Date().toISOString()}
+      where referred_id = ${userId} and qualified_at is null
+      returning referrer_id`
     if (!qualified) return
 
-    const { data: referrer } = await db
-      .from('users')
-      .select('telegram_id, allows_write_to_pm, locale')
-      .eq('id', qualified.referrer_id)
-      .single()
+    const [referrer] = await sql<{ telegram_id: number; allows_write_to_pm: boolean | null; locale: Locale | null }[]>`
+      select telegram_id, allows_write_to_pm, locale from users where id = ${qualified.referrer_id}`
     if (referrer && referrer.telegram_id > 0 && referrer.allows_write_to_pm !== false) {
       await notifyReferralQualified(referrer.telegram_id, user.name, referrer.locale ?? null)
     }

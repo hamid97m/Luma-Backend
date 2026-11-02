@@ -1,4 +1,4 @@
-import { db } from '../db.js'
+import { sql } from '../db.js'
 
 type IcebreakerUser = { id: string; icebreaker_prompt: string | null; icebreaker_answer: string | null }
 
@@ -11,16 +11,17 @@ type IcebreakerUser = { id: string; icebreaker_prompt: string | null; icebreaker
  */
 export async function seedIcebreakers(matchId: string, userIds: string[]): Promise<void> {
   try {
-    const { data, error } = await db
-      .from('users')
-      .select('id, icebreaker_prompt, icebreaker_answer')
-      .in('id', userIds)
-    if (error) {
+    let data: IcebreakerUser[]
+    try {
+      data = await sql<IcebreakerUser[]>`
+        select id, icebreaker_prompt, icebreaker_answer from users
+        where id = any(${userIds}::uuid[])`
+    } catch (error) {
       console.error('[icebreakers] users read failed', error)
       return
     }
 
-    const byId = new Map((data ?? []).map((u: IcebreakerUser) => [u.id, u]))
+    const byId = new Map(data.map((u) => [u.id, u]))
     const base = Date.now()
     const rows: Record<string, string>[] = []
     for (const id of userIds) {
@@ -39,8 +40,11 @@ export async function seedIcebreakers(matchId: string, userIds: string[]): Promi
     }
     if (rows.length === 0) return
 
-    const { error: insertError } = await db.from('messages').insert(rows)
-    if (insertError) console.error('[icebreakers] insert failed', insertError)
+    try {
+      await sql`insert into messages ${sql(rows)}`
+    } catch (insertError) {
+      console.error('[icebreakers] insert failed', insertError)
+    }
   } catch (err) {
     console.error('[icebreakers] seeding failed', err)
   }

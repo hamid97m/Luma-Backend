@@ -1,4 +1,4 @@
-import { db } from '../db.js'
+import { sql, isUuid } from '../db.js'
 import { createPremiumInvoiceLink, refundPremiumPayment, notifyPaymentChannel, notifyPremiumPurchased } from '../bot.js'
 import { formatPremiumPaidNotice, formatTonPaysPaidNotice, formatTonPaysGrantFailedNotice } from '../payments/paymentNotify.js'
 import { schedulePurchaseCheckoutFollowup } from '../jobs/purchaseMessage.js'
@@ -63,8 +63,19 @@ export function chargedPrice(priceStars: number, discountPercent: number): numbe
   return Math.max(1, Math.round(priceStars * (1 - discountPercent / 100)))
 }
 
+/** Runs a read whose failure the supabase-js version tolerated (it returned
+ * `data: null` instead of throwing): a query error answers "no rows". */
+async function tolerant<R>(query: () => PromiseLike<R[]>): Promise<R[]> {
+  try {
+    return await query()
+  } catch (err) {
+    console.error('[premium] query failed:', (err as Error)?.message ?? err)
+    return []
+  }
+}
+
 export async function isPremiumEnabled(): Promise<boolean> {
-  const { data } = await db.from('premium_config').select('premium_enabled').eq('id', true).single()
+  const [data] = await tolerant(() => sql`select premium_enabled from premium_config where id = true`)
   return data?.premium_enabled === true
 }
 
@@ -84,18 +95,19 @@ export function resolvePaymentProvider(geoCountry: string | null | undefined): P
 /** Toman-per-Star conversion rate, admin-configurable; falls back to 3000 if
  * the config row or column isn't there. */
 export async function getTomanPerStar(): Promise<number> {
-  const { data } = await db.from('premium_config').select('toman_per_star').eq('id', true).single()
+  const [data] = await tolerant(() => sql`select toman_per_star from premium_config where id = true`)
   return (data?.toman_per_star as number | null | undefined) ?? DEFAULT_TOMAN_PER_STAR
 }
 
 export async function getPremiumStatus(userId: string) {
-  const [{ data: cfg }, { data: me }, { data: plans }] = await Promise.all([
-    db.from('premium_config').select('premium_enabled').eq('id', true).single(),
-    db.from('users').select('premium_until, locale, geo_country').eq('id', userId).single(),
-    db.from('premium_plans')
-      .select('id, title, description, translations, price_stars, discount_percent, discount_ends_at, duration_days')
-      .eq('is_active', true)
-      .order('sort_order', { ascending: true }),
+  const [[cfg], [me], plans] = await Promise.all([
+    tolerant(() => sql`select premium_enabled from premium_config where id = true`),
+    tolerant(() => sql`select premium_until, locale, geo_country from users where id = ${userId}`),
+    tolerant(() => sql`
+      select id, title, description, translations, price_stars, discount_percent, discount_ends_at, duration_days
+      from premium_plans
+      where is_active = true
+      order by sort_order asc`),
   ])
   const locale = (me?.locale as Locale | null) ?? null
   const paymentProvider = resolvePaymentProvider(me?.geo_country ?? null)
@@ -130,6 +142,11 @@ export async function getPremiumStatus(userId: string) {
   }
 }
 
+type PlanRow = {
+  id: string; title: string; description: string; translations: PlanTranslations | null
+  price_stars: number; discount_percent: number | null; discount_ends_at: string | null; duration_days: number
+}
+
 export type PremiumCheckoutResult =
   | { error: string }
   | { transactionId: string; provider: 'stars'; invoiceLink: string }
@@ -138,16 +155,19 @@ export type PremiumCheckoutResult =
 export async function createPremiumCheckout(userId: string, planId: string): Promise<PremiumCheckoutResult> {
   if (!(await isPremiumEnabled())) return { error: 'premium_disabled' }
 
-  const { data: plan } = await db
-    .from('premium_plans')
-    .select('id, title, description, translations, price_stars, discount_percent, discount_ends_at, duration_days')
-    .eq('id', planId).eq('is_active', true)
-    .maybeSingle()
+  // A malformed (non-uuid) plan id can't name a plan — answer plan_unavailable
+  // like PostgREST's "no rows" did, instead of letting Postgres reject the cast.
+  const [plan] = isUuid(planId)
+    ? await tolerant(() => sql<PlanRow[]>`
+        select id, title, description, translations, price_stars, discount_percent, discount_ends_at, duration_days
+        from premium_plans
+        where id = ${planId} and is_active = true`)
+    : []
   if (!plan) return { error: 'plan_unavailable' }
 
   // Invoice copy follows the buyer's language; geo_country decides the payment
   // provider and, for TonPays, telegram_id is who the invoice is addressed to.
-  const { data: buyer } = await db.from('users').select('locale, geo_country, telegram_id').eq('id', userId).maybeSingle()
+  const [buyer] = await tolerant(() => sql`select locale, geo_country, telegram_id from users where id = ${userId}`)
   const locale = (buyer?.locale as Locale | null) ?? null
   const text = planText(plan, locale)
   const t = tFor(locale)
@@ -155,19 +175,21 @@ export async function createPremiumCheckout(userId: string, planId: string): Pro
   // Recompute the discount at checkout time (not what was shown when the paywall loaded) and
   // snapshot the charged amount — an invoice created seconds before expiry is still honored later.
   const chargeStars = discountActive(plan.discount_percent, plan.discount_ends_at)
-    ? chargedPrice(plan.price_stars, plan.discount_percent)
+    ? chargedPrice(plan.price_stars, plan.discount_percent as number)
     : plan.price_stars
 
   if (resolvePaymentProvider(buyer?.geo_country ?? null) === 'tonpays') {
     return createTonPaysCheckout(userId, plan, text.title, chargeStars, (buyer?.telegram_id as number | null) ?? 0)
   }
 
-  const { data: tx, error } = await db.from('premium_transactions').insert({
-    user_id: userId, plan_id: plan.id, plan_title: text.title,
-    price_stars: chargeStars, duration_days: plan.duration_days,
-    status: 'pending_payment', source: 'purchase',
-  }).select('id').single()
-  if (error || !tx) return { error: 'checkout_failed' }
+  const [tx] = await tolerant(() => sql<{ id: string }[]>`
+    insert into premium_transactions ${sql({
+      user_id: userId, plan_id: plan.id, plan_title: text.title,
+      price_stars: chargeStars, duration_days: plan.duration_days,
+      status: 'pending_payment', source: 'purchase',
+    })}
+    returning id`)
+  if (!tx) return { error: 'checkout_failed' }
 
   const invoiceLink = await createPremiumInvoiceLink(
     tx.id, text.title, text.description || t.premium.invoiceDescriptionFallback(plan.duration_days), chargeStars,
@@ -209,20 +231,23 @@ async function createTonPaysCheckout(
   const priceToman = chargeStars * (await getTomanPerStar())
   const orderId = generateTonPaysOrderId()
 
-  const { data: tx, error } = await db.from('premium_transactions').insert({
-    user_id: userId, plan_id: plan.id, plan_title: planTitle,
-    price_stars: chargeStars, price_toman: priceToman, duration_days: plan.duration_days,
-    provider: 'tonpays', tonpays_order_id: orderId,
-    status: 'pending_payment', source: 'purchase',
-  }).select('id').single()
-  if (error || !tx) return { error: 'checkout_failed' }
+  const [tx] = await tolerant(() => sql<{ id: string }[]>`
+    insert into premium_transactions ${sql({
+      user_id: userId, plan_id: plan.id, plan_title: planTitle,
+      price_stars: chargeStars, price_toman: priceToman, duration_days: plan.duration_days,
+      provider: 'tonpays', tonpays_order_id: orderId,
+      status: 'pending_payment', source: 'purchase',
+    })}
+    returning id`)
+  if (!tx) return { error: 'checkout_failed' }
 
   const create = () => createTelegramInvoice({ amountToman: priceToman, orderId, buyerChatId })
 
   // The new attempt row never got an invoice, so dropping it is unconditional
   // (no paid-race to guard against) — unlike the old row's cancel below.
+  // Errors were ignored under supabase-js (it never threw); keep it best-effort.
   const dropNewRow = () =>
-    db.from('premium_transactions').update({ status: 'canceled' }).eq('id', tx.id)
+    tolerant(() => sql`update premium_transactions set status = 'canceled' where id = ${tx.id}`)
 
   let invoice: TonPaysInvoice
   try {
@@ -233,14 +258,13 @@ async function createTonPaysCheckout(
       return { error: 'checkout_failed' }
     }
 
-    const { data: oldRow } = await db
-      .from('premium_transactions')
-      .select('id, plan_id, price_toman, tonpays_invoice_id, tonpays_final_amount')
-      .eq('user_id', userId).eq('provider', 'tonpays').eq('status', 'pending_payment')
-      .neq('id', tx.id)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
+    const [oldRow] = await tolerant(() => sql`
+      select id, plan_id, price_toman, tonpays_invoice_id, tonpays_final_amount
+      from premium_transactions
+      where user_id = ${userId} and provider = 'tonpays' and status = 'pending_payment'
+        and id <> ${tx.id}
+      order by created_at desc
+      limit 1`)
 
     if (oldRow && oldRow.plan_id === plan.id && oldRow.price_toman === priceToman) {
       // Same purchase already has a live invoice at TonPays — this attempt never
@@ -304,8 +328,9 @@ async function createTonPaysCheckout(
       // the SELECT above and this UPDATE, and clobbering `paid` back to
       // `canceled` would make handleTonPaysPaid's claim unmatchable forever —
       // money in, premium never granted. Same pattern as the sweep.
-      await db.from('premium_transactions').update({ status: 'canceled' })
-        .eq('id', oldRow.id).eq('status', 'pending_payment')
+      await tolerant(() => sql`
+        update premium_transactions set status = 'canceled'
+        where id = ${oldRow.id} and status = 'pending_payment'`)
     } else {
       // No pending row of ours carries an invoice, yet TonPays insists this
       // buyer already has one (it allows exactly one per buyer). Without
@@ -322,11 +347,13 @@ async function createTonPaysCheckout(
     }
   }
 
-  await db.from('premium_transactions').update({
-    tonpays_invoice_id: invoice.invoiceId,
-    tonpays_final_amount: invoice.finalAmount,
-    tonpays_status: invoice.status,
-  }).eq('id', tx.id)
+  await tolerant(() => sql`
+    update premium_transactions set ${sql({
+      tonpays_invoice_id: invoice.invoiceId,
+      tonpays_final_amount: invoice.finalAmount,
+      tonpays_status: invoice.status,
+    })}
+    where id = ${tx.id}`)
 
   schedulePurchaseCheckoutFollowup(userId)
 
@@ -352,16 +379,15 @@ async function createTonPaysCheckout(
  */
 async function recoverUntrackedPendingInvoice(userId: string, newTxId: string, upstreamMessage: string): Promise<void> {
   const since = new Date(Date.now() - TONPAYS_PENDING_RECOVERY_WINDOW_MS).toISOString()
-  const { data: stray } = await db
-    .from('premium_transactions')
-    .select('id, tonpays_invoice_id')
-    .eq('user_id', userId).eq('provider', 'tonpays')
-    .not('tonpays_invoice_id', 'is', null)
-    .gte('created_at', since)
-    .neq('id', newTxId)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
+  const [stray] = await tolerant(() => sql`
+    select id, tonpays_invoice_id
+    from premium_transactions
+    where user_id = ${userId} and provider = 'tonpays'
+      and tonpays_invoice_id is not null
+      and created_at >= ${since}
+      and id <> ${newTxId}
+    order by created_at desc
+    limit 1`)
 
   const strayInvoiceId = (stray?.tonpays_invoice_id as string | null | undefined) ?? null
   if (!strayInvoiceId) {
@@ -384,34 +410,66 @@ async function recoverUntrackedPendingInvoice(userId: string, newTxId: string, u
 }
 
 export async function validatePremiumPreCheckout(transactionId: string, totalAmount: number, currency: string) {
-  const { data: tx } = await db
-    .from('premium_transactions').select('status, price_stars, user_id').eq('id', transactionId).maybeSingle()
+  // The id rides in the invoice payload; a malformed one can't be ours (→ unknown tx).
+  const [tx] = isUuid(transactionId)
+    ? await tolerant(() => sql`select status, price_stars, user_id from premium_transactions where id = ${transactionId}`)
+    : []
   // Unknown tx → no buyer to look up, so the rejection falls back to Persian.
   if (!tx) return { ok: false as const, reason: tFor(null).premium.checkoutUnavailable }
-  const { data: buyer } = await db.from('users').select('locale').eq('id', tx.user_id).maybeSingle()
+  const [buyer] = await tolerant(() => sql`select locale from users where id = ${tx.user_id}`)
   const t = tFor((buyer?.locale as Locale | null) ?? null)
   if (tx.status !== 'pending_payment') return { ok: false as const, reason: t.premium.checkoutAlreadyProcessed }
   if (currency !== 'XTR' || totalAmount !== tx.price_stars) return { ok: false as const, reason: t.premium.checkoutPriceMismatch }
   return { ok: true as const }
 }
 
+type GrantUser = { premium_until: string | null; name: string | null; locale: string | null; telegram_id: number }
+
+/**
+ * Adds `durationDays` of premium to a user, extending from the later of now /
+ * their current expiry (`extendPremiumUntil`). Shared by the Stars and TonPays
+ * grant paths.
+ *
+ * Read and write run in one transaction with the user row locked
+ * (`for update`), so two grants for the same buyer landing at once (a Stars
+ * and a TonPays payment, or two stacked purchases) serialize instead of both
+ * extending from the same old expiry and losing one purchase's days.
+ *
+ * Mirrors the old two-call contract: `user` is null when the row is missing
+ * (or the read failed); `error` carries the message when the write failed —
+ * on any failure nothing is written.
+ */
+async function grantPremiumTime(userId: string, durationDays: number): Promise<{ user: GrantUser | null; error: string | null }> {
+  let user: GrantUser | null = null
+  try {
+    await sql.begin(async (q) => {
+      const [row] = await q<GrantUser[]>`
+        select premium_until, name, locale, telegram_id from users where id = ${userId} for update`
+      if (!row) return
+      user = row
+      await q`
+        update users set premium_until = ${extendPremiumUntil(row.premium_until ?? null, durationDays)}
+        where id = ${userId}`
+    })
+    return { user, error: null }
+  } catch (err) {
+    return { user, error: (err as Error)?.message ?? String(err) }
+  }
+}
+
 export async function handlePremiumPaid(transactionId: string, chargeId: string, buyerTelegramId: number, amountStars: number) {
+  if (!isUuid(transactionId)) return // can't be one of ours (unknown)
   // Idempotency: only a still-pending row proceeds (guards Telegram update replays).
-  const { data: tx } = await db
-    .from('premium_transactions')
-    .update({ status: 'paid', paid_at: new Date().toISOString(), telegram_payment_charge_id: chargeId })
-    .eq('id', transactionId).eq('status', 'pending_payment')
-    .select('id, user_id, duration_days').maybeSingle()
+  // One conditional UPDATE … RETURNING — the claim must stay a single statement.
+  const [tx] = await tolerant(() => sql<{ id: string; user_id: string; duration_days: number }[]>`
+    update premium_transactions
+    set status = 'paid', paid_at = ${new Date().toISOString()}, telegram_payment_charge_id = ${chargeId}
+    where id = ${transactionId} and status = 'pending_payment'
+    returning id, user_id, duration_days`)
   if (!tx) return // already handled or unknown
 
-  const { data: user } = await db.from('users').select('premium_until, name, locale').eq('id', tx.user_id).single()
-  if (!user) { await failAndRefund(tx.id, buyerTelegramId, chargeId); return }
-
-  const { error: updErr } = await db
-    .from('users')
-    .update({ premium_until: extendPremiumUntil(user.premium_until ?? null, tx.duration_days) })
-    .eq('id', tx.user_id)
-  if (updErr) { await failAndRefund(tx.id, buyerTelegramId, chargeId); return }
+  const { user, error: grantErr } = await grantPremiumTime(tx.user_id, tx.duration_days)
+  if (!user || grantErr) { await failAndRefund(tx.id, buyerTelegramId, chargeId); return }
 
   // Confirmed grant — post an ops notice (best-effort; never blocks the payment).
   notifyPaymentChannel(formatPremiumPaidNotice({
@@ -432,7 +490,7 @@ export async function handlePremiumPaid(transactionId: string, chargeId: string,
 async function failAndRefund(txId: string, buyerTelegramId: number, chargeId: string) {
   try {
     await refundPremiumPayment(buyerTelegramId, chargeId)
-    await db.from('premium_transactions').update({ status: 'refunded' }).eq('id', txId)
+    await sql`update premium_transactions set status = 'refunded' where id = ${txId}`
   } catch (e) {
     console.error('[premium] refund failed:', (e as Error)?.message)
   }
@@ -453,31 +511,30 @@ async function failAndRefund(txId: string, buyerTelegramId: number, chargeId: st
 export async function handleTonPaysPaid(
   invoiceId: string,
 ): Promise<'granted' | 'already' | 'not_found' | 'grant_failed'> {
-  // Idempotency: only a still-pending row proceeds (guards duplicate webhook deliveries).
-  const { data: tx } = await db
-    .from('premium_transactions')
-    .update({ status: 'paid', paid_at: new Date().toISOString() })
-    .eq('tonpays_invoice_id', invoiceId).eq('status', 'pending_payment')
-    .select('id, user_id, duration_days, price_toman, tonpays_final_amount').maybeSingle()
+  // Idempotency: only a still-pending row proceeds (guards duplicate webhook
+  // deliveries and the webhook/poll/sweep races). One conditional
+  // UPDATE … RETURNING — the claim must stay a single statement.
+  const [tx] = await tolerant(() => sql<{
+    id: string; user_id: string; duration_days: number; price_toman: number | null; tonpays_final_amount: number | null
+  }[]>`
+    update premium_transactions
+    set status = 'paid', paid_at = ${new Date().toISOString()}
+    where tonpays_invoice_id = ${invoiceId} and status = 'pending_payment'
+    returning id, user_id, duration_days, price_toman, tonpays_final_amount`)
 
   if (!tx) {
     // Either this invoice was already processed (a replay) or we've never
     // heard of it — distinguish the two so callers can treat them differently.
-    const { data: existing } = await db
-      .from('premium_transactions').select('id').eq('tonpays_invoice_id', invoiceId).maybeSingle()
+    const [existing] = await tolerant(() => sql`
+      select id from premium_transactions where tonpays_invoice_id = ${invoiceId}`)
     return existing ? 'already' : 'not_found'
   }
 
-  const amountToman = (tx.tonpays_final_amount as number | null) ?? (tx.price_toman as number)
+  const amountToman = tx.tonpays_final_amount ?? (tx.price_toman as number)
 
-  const { data: user } = await db.from('users').select('premium_until, name, locale, telegram_id').eq('id', tx.user_id).single()
+  const { user, error: grantErr } = await grantPremiumTime(tx.user_id, tx.duration_days)
   if (!user) return markGrantFailed(tx.id, invoiceId, 'user row not found', { buyerName: null, amountToman })
-
-  const { error: updErr } = await db
-    .from('users')
-    .update({ premium_until: extendPremiumUntil(user.premium_until ?? null, tx.duration_days) })
-    .eq('id', tx.user_id)
-  if (updErr) return markGrantFailed(tx.id, invoiceId, updErr.message, { buyerName: user.name ?? null, amountToman })
+  if (grantErr) return markGrantFailed(tx.id, invoiceId, grantErr, { buyerName: user.name ?? null, amountToman })
 
   // Confirmed grant — post an ops notice (best-effort; never blocks the payment).
   // Amount shown is the exact transfer TonPays confirmed (final_amount, which
@@ -509,7 +566,7 @@ async function markGrantFailed(
   notice: { buyerName: string | null; amountToman: number },
 ): Promise<'grant_failed'> {
   console.error(`[tonpays] grant failed for invoice ${invoiceId} (tx ${txId}): ${reason}`)
-  await db.from('premium_transactions').update({ status: 'paid_grant_failed' }).eq('id', txId)
+  await tolerant(() => sql`update premium_transactions set status = 'paid_grant_failed' where id = ${txId}`)
   notifyPaymentChannel(formatTonPaysGrantFailedNotice({
     buyerName: notice.buyerName,
     amountToman: notice.amountToman,
@@ -569,10 +626,12 @@ export type PremiumTransactionStatus = {
  * unbounded.
  */
 export async function getPremiumTransactionStatus(txId: string, userId: string): Promise<PremiumTransactionStatus | null> {
-  const { data } = await db
-    .from('premium_transactions')
-    .select('status, user_id, provider, tonpays_invoice_id, tonpays_status')
-    .eq('id', txId).maybeSingle()
+  // Client-supplied id: a malformed one is simply "not found", not a 500.
+  const [data] = isUuid(txId)
+    ? await tolerant(() => sql`
+        select status, user_id, provider, tonpays_invoice_id, tonpays_status
+        from premium_transactions where id = ${txId}`)
+    : []
   if (!data || data.user_id !== userId) return null
 
   const provider = ((data.provider as PaymentProvider | null) ?? 'stars')
@@ -607,9 +666,9 @@ export async function getPremiumTransactionStatus(txId: string, userId: string):
           // Guard on status='pending_payment': a webhook grant can land between
           // the row read above and this UPDATE, and clobbering `paid` back to
           // `canceled` would make handleTonPaysPaid's claim unmatchable forever.
-          await db.from('premium_transactions')
-            .update({ status: 'canceled', tonpays_status: check.status })
-            .eq('id', txId).eq('status', 'pending_payment')
+          await tolerant(() => sql`
+            update premium_transactions set status = 'canceled', tonpays_status = ${check.status}
+            where id = ${txId} and status = 'pending_payment'`)
           status = 'canceled'
         }
       } catch {
@@ -694,8 +753,10 @@ export async function submitTonPaysRefundCard(
  * both 404 unless the tx belongs to `userId` and is a tonpays row — never
  * leaking whether a foreign/stars tx id exists. */
 async function getOwnedTonPaysTx(txId: string, userId: string) {
-  const { data } = await db
-    .from('premium_transactions').select('user_id, provider, tonpays_invoice_id').eq('id', txId).maybeSingle()
+  const [data] = isUuid(txId)
+    ? await tolerant(() => sql`
+        select user_id, provider, tonpays_invoice_id from premium_transactions where id = ${txId}`)
+    : []
   if (!data || data.user_id !== userId || data.provider !== 'tonpays') return null
   return data
 }

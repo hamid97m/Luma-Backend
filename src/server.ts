@@ -5,7 +5,7 @@ import rateLimit from '@fastify/rate-limit'
 import { verifyInitData } from './auth.js'
 import { getBotUsername } from './bot.js'
 import { WEBHOOK_ROUTE_PREFIX } from './webhookRoute.js'
-import { db } from './db.js'
+import { sql } from './db.js'
 import type { TelegramUser } from './types.js'
 import { authRoutes } from './routes/auth.js'
 import { profileRoutes } from './routes/profile.js'
@@ -96,11 +96,12 @@ export async function buildApp(): Promise<FastifyInstance> {
 
     req.telegramUser = tgUser
 
-    const { data } = await db
-      .from('users')
-      .select('id, deleted_at, banned_at, paused_at, last_active')
-      .eq('telegram_id', tgUser.id)
-      .single()
+    const [data] = await sql<{
+      id: string; deleted_at: string | null; banned_at: string | null
+      paused_at: string | null; last_active: string | null
+    }[]>`
+      select id, deleted_at, banned_at, paused_at, last_active
+      from users where telegram_id = ${tgUser.id}`
 
     if (!data) return reply.status(401).send({ error: 'user_not_found' })
     if (data.deleted_at) return reply.status(401).send({ error: 'account_deleted' })
@@ -115,12 +116,10 @@ export async function buildApp(): Promise<FastifyInstance> {
       // Clearing notified_offline_at here means the very first request after
       // a period of inactivity is what "coming back online" resets against —
       // no separate heartbeat/reset job needed for the offline-notification throttle.
-      db.from('users')
-        .update({ last_active: new Date().toISOString(), notified_offline_at: null })
-        .eq('id', data.id)
-        .then(({ error }) => {
-          if (error) req.log.warn({ err: error }, 'failed to update last_active')
-        })
+      sql`
+        update users set last_active = now(), notified_offline_at = null
+        where id = ${data.id}`
+        .catch((err) => req.log.warn({ err }, 'failed to update last_active'))
     }
   })
 

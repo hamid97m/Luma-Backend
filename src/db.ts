@@ -42,6 +42,14 @@ export const sql = postgres(process.env.DATABASE_URL ?? 'postgres://localhost:54
 
 export type Sql = typeof sql
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** PostgREST answered "no rows" for a malformed uuid filter; Postgres throws
+ *  22P02 instead. Guard client-supplied ids with this to keep 404s as 404s. */
+export function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_RE.test(value)
+}
+
 /** Drop keys whose value is `undefined` — PostgREST silently ignored them (JSON
  *  has no undefined), postgres.js throws. Use for `sql(obj)` inserts/updates
  *  built from optional fields; never turn undefined into null (that would wipe

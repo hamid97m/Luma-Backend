@@ -5,6 +5,7 @@ vi.mock('../src/bot.js', () => ({ notifyMatch: vi.fn(), notifyNewMessage: vi.fn(
 
 import { buildApp } from '../src/server.js'
 import { chatHub } from '../src/realtime/hub.js'
+import { typingTargets } from '../src/realtime/typing.js'
 import { startChatListener } from '../src/realtime/listener.js'
 import { AUTH, authAs } from './helpers/auth.js'
 import { resetDb, createUser, createMatch, insertRow, sql } from './helpers/db.js'
@@ -32,6 +33,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await resetDb()
+  typingTargets.clear()
   app = await buildApp()
   await app.listen({ port: 0, host: '127.0.0.1' })
   const addr = app.server.address() as { port: number }
@@ -47,6 +49,14 @@ afterEach(async () => {
   await app.close()
 })
 
+
+async function until(pred: () => boolean, ms = 2000) {
+  const end = Date.now() + ms
+  while (!pred()) {
+    if (Date.now() > end) throw new Error('timed out')
+    await new Promise((r) => setTimeout(r, 10))
+  }
+}
 
 async function open(headers: Record<string, string> = AUTH) {
   const ctrl = new AbortController()
@@ -128,6 +138,25 @@ describe('GET /events', () => {
     expect(evs[0].data).toMatchObject({ matchId: match.id, message: { id: m.id, senderId: other.id, body: 'salam', type: 'text', readAt: null } })
     expect(evs[1].data.message).toMatchObject({ id: m.id, body: 'edited' })
     expect(evs[2].data).toEqual({ matchId: match.id, messageId: m.id })
+  })
+
+  it('POST /typing reaches the counterpart\'s stream as `typing`, not the typer\'s', async () => {
+    const mine = await open()
+    await mine.reader!.until((t) => t.includes('event: ready'))
+    authAs(other)
+    const theirs = await open()
+    await theirs.reader!.until((t) => t.includes('event: ready'))
+    await until(() => chatHub.streamCount(other.id) === 1)
+
+    authAs(me)
+    const res = await fetch(`${base}/matches/${match.id}/typing`, { method: 'POST', headers: AUTH })
+    expect(res.status).toBe(200)
+    const text = await theirs.reader!.until((t) => t.includes('event: typing'))
+    expect(parse(text).filter((e) => e.event === 'typing')).toEqual([
+      { event: 'typing', data: { matchId: match.id, userId: me.id } },
+    ])
+    await new Promise((r) => setTimeout(r, 200))
+    expect(mine.reader!.text).not.toContain('event: typing')
   })
 
   it('withholds events when the pair is blocked', async () => {

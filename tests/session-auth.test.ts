@@ -19,6 +19,11 @@ describe('session tokens', () => {
     expect(verifySessionToken(jwt.sign({ userId: 'u-1' }, 'other-secret'))).toBeNull()
   })
 
+  it('rejects a token signed with another algorithm', () => {
+    const token = jwt.sign({ userId: 'u-1' }, process.env.USER_JWT_SECRET!, { algorithm: 'HS512' })
+    expect(verifySessionToken(token)).toBeNull()
+  })
+
   it('rejects a token without a userId', () => {
     expect(verifySessionToken(jwt.sign({ adminId: 'a' }, process.env.USER_JWT_SECRET!))).toBeNull()
   })

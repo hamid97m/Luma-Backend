@@ -10,7 +10,7 @@ export function signSessionToken(userId: string): string {
 /** The user id inside a valid, unexpired token; null otherwise. */
 export function verifySessionToken(token: string): string | null {
   try {
-    const decoded = jwt.verify(token, process.env.USER_JWT_SECRET!)
+    const decoded = jwt.verify(token, process.env.USER_JWT_SECRET!, { algorithms: ['HS256'] })
     if (typeof decoded !== 'object' || decoded === null) return null
     const { userId } = decoded as jwt.JwtPayload & { userId?: unknown }
     return typeof userId === 'string' && userId ? userId : null

@@ -4,7 +4,7 @@ vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
 vi.mock('../src/bot.js', () => ({ notifyMatch: vi.fn(), notifyNewMessage: vi.fn().mockResolvedValue(undefined) }))
 
 import { buildApp } from '../src/server.js'
-import { chatHub } from '../src/realtime/hub.js'
+import { chatHub, loadCounterparts } from '../src/realtime/hub.js'
 import { typingTargets } from '../src/realtime/typing.js'
 import { startChatListener } from '../src/realtime/listener.js'
 import { AUTH, authAs } from './helpers/auth.js'
@@ -20,7 +20,10 @@ let other: Record<string, any>
 let match: Record<string, any>
 const controllers: AbortController[] = []
 
+const GRACE_MS = 150
+
 beforeAll(async () => {
+  chatHub.setPresenceGraceMs(GRACE_MS)
   startChatListener({ info: () => {}, warn: () => {} })
   // Let the LISTEN land before any test inserts.
   const end = Date.now() + 3000
@@ -190,5 +193,104 @@ describe('GET /events', () => {
     let ended = false
     await first.reader!.until(() => false, 1000).then(() => { ended = true }, () => {})
     expect(ended).toBe(true)
+  })
+})
+
+describe('presence over GET /events', () => {
+  const presence = (text: string) => parse(text).filter((e) => e.event === 'presence')
+
+  /** Open a stream as `user` and wait for `ready`. */
+  async function connect(user: Record<string, any>) {
+    authAs(user)
+    const s = await open()
+    await s.reader!.until((t) => t.includes('event: ready'))
+    return s
+  }
+
+  it('the counterpart sees me come online, then go offline after the grace period', async () => {
+    const theirs = await connect(other)
+    const mine = await connect(me)
+
+    let text = await theirs.reader!.until((t) => presence(t).length >= 1)
+    expect(presence(text)).toEqual([{ event: 'presence', data: { userId: me.id, online: true } }])
+
+    mine.ctrl.abort()
+    await until(() => chatHub.streamCount(me.id) === 0)
+    expect(chatHub.isOnline(me.id)).toBe(true) // grace
+    await new Promise((r) => setTimeout(r, GRACE_MS / 3))
+    expect(presence(theirs.reader!.text)).toHaveLength(1)
+
+    text = await theirs.reader!.until((t) => presence(t).length >= 2)
+    expect(presence(text)[1]).toEqual({ event: 'presence', data: { userId: me.id, online: false } })
+    expect(chatHub.isOnline(me.id)).toBe(false)
+    expect(presence(mine.reader!.text).filter((e) => e.data.userId === me.id)).toEqual([]) // never about myself
+  })
+
+  it('a newly opened stream gets the online counterparts right after `ready`', async () => {
+    const third = await createUser({ name: 'Third' })
+    await createMatch(third.id, me.id)
+    await connect(other) // online
+    // `third` is matched but offline; nobody else is visible.
+    const mine = await connect(me)
+    const text = await mine.reader!.until((t) => presence(t).length >= 1)
+    await new Promise((r) => setTimeout(r, 200))
+    const evs = parse(mine.reader!.text).map((e) => e.event)
+    expect(evs.indexOf('ready')).toBeLessThan(evs.indexOf('presence'))
+    expect(presence(text)).toEqual([{ event: 'presence', data: { userId: other.id, online: true } }])
+    expect(presence(mine.reader!.text)).toHaveLength(1)
+  })
+
+  it('the snapshot includes a counterpart still inside the grace period', async () => {
+    const theirs = await connect(other)
+    theirs.ctrl.abort()
+    await until(() => chatHub.streamCount(other.id) === 0)
+    expect(chatHub.isOnline(other.id)).toBe(true)
+    const mine = await connect(me)
+    const text = await mine.reader!.until((t) => presence(t).length >= 1)
+    expect(presence(text)[0]).toEqual({ event: 'presence', data: { userId: other.id, online: true } })
+  })
+
+  it('GET /matches reports the counterpart online while their stream is open', async () => {
+    await connect(other)
+    authAs(me)
+    const res = await fetch(`${base}/matches`, { headers: AUTH })
+    const [row] = (await res.json()).matches
+    expect(row.user).toMatchObject({ id: other.id, online: true })
+  })
+
+  it('sends no presence across a block (transition or snapshot)', async () => {
+    await insertRow('blocks', { blocker_id: me.id, blocked_id: other.id })
+    const theirs = await connect(other)
+    const mine = await connect(me)
+    await new Promise((r) => setTimeout(r, 300))
+    expect(presence(theirs.reader!.text)).toEqual([])
+    expect(presence(mine.reader!.text)).toEqual([])
+  })
+})
+
+// `me`, `other` and their match come from the file-level beforeEach.
+describe('loadCounterparts', () => {
+  it('lists the other user of each match, either column order', async () => {
+    const third = await createUser({ name: 'Third' })
+    await createMatch(third.id, me.id)
+    expect((await loadCounterparts(me.id)).sort()).toEqual([other.id, third.id].sort())
+    expect(await loadCounterparts(other.id)).toEqual([me.id])
+  })
+
+  it('excludes deleted counterparts and blocks either way', async () => {
+    const gone = await createUser({ name: 'Gone', deleted_at: new Date().toISOString() })
+    const blocker = await createUser({ name: 'Blocker' })
+    const blocked = await createUser({ name: 'Blocked' })
+    await createMatch(me.id, gone.id)
+    await createMatch(me.id, blocker.id)
+    await createMatch(me.id, blocked.id)
+    await insertRow('blocks', { blocker_id: blocker.id, blocked_id: me.id })
+    await insertRow('blocks', { blocker_id: me.id, blocked_id: blocked.id })
+    expect(await loadCounterparts(me.id)).toEqual([other.id])
+  })
+
+  it('returns nobody for a deleted user', async () => {
+    await sql`update users set deleted_at = now() where id = ${me.id}`
+    expect(await loadCounterparts(me.id)).toEqual([])
   })
 })

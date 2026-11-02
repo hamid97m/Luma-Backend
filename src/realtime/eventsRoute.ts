@@ -7,7 +7,7 @@ export const HEARTBEAT_MS = 25_000 // Cloudflare idles a silent connection out a
 /**
  * GET /events — one Server-Sent Events stream per open app (auth = the usual
  * initData preHandler). Events: ready, resync, message, message_updated,
- * message_deleted (see hub.ts). Exempt from the global rate limit; the hub caps
+ * message_deleted, typing, presence (see hub.ts). Exempt from the global rate limit; the hub caps
  * concurrent streams per user instead.
  */
 export function eventsRoutes(hub: ChatHub = chatHub) {
@@ -62,6 +62,7 @@ export function eventsRoutes(hub: ChatHub = chatHub) {
 
       write('retry: 3000\n\n')
       write(formatSse('ready', {}))
+      hub.sendPresenceSnapshot(userId, stream)
     })
   }
 }

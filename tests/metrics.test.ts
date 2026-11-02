@@ -4,12 +4,16 @@ import net from 'node:net'
 import type { FastifyBaseLogger } from 'fastify'
 
 import { WEBHOOK_ROUTE_PREFIX } from '../src/webhookRoute.js'
-import { registry, registerHttpMetrics, trackJob, startMetricsServer } from '../src/metrics.js'
+import { registry, registerHttpMetrics, trackJob, startMetricsServer, initJobMetrics } from '../src/metrics.js'
+import { fakeLikerRunFailed } from '../src/jobs/fakeLiker.js'
 import { buildApp } from '../src/server.js'
 import { resetDb } from './helpers/db.js'
 
 const makeLog = () =>
-  ({ error: vi.fn(), info: vi.fn(), warn: vi.fn() }) as unknown as FastifyBaseLogger & { error: ReturnType<typeof vi.fn> }
+  ({ error: vi.fn(), info: vi.fn(), warn: vi.fn() }) as unknown as FastifyBaseLogger & {
+    error: ReturnType<typeof vi.fn>
+    warn: ReturnType<typeof vi.fn>
+  }
 
 describe('metrics', () => {
   it('records matched routes by pattern', async () => {
@@ -58,8 +62,44 @@ describe('metrics', () => {
     expect(ok).not.toContain('t_fail')
   })
 
+  it('initJobMetrics exposes zero failures and a boot-time last success', async () => {
+    initJobMetrics(['init_x'])
+    const out = await registry.metrics()
+    expect(out).toContain('luma_job_failures_total{job="init_x"} 0')
+    const m = out.match(/luma_job_last_success_timestamp_seconds\{job="init_x"\} ([\d.e+]+)/)
+    expect(m).not.toBeNull()
+    expect(Math.abs(Number(m![1]) - Date.now() / 1000)).toBeLessThan(5)
+  })
+
+  it('initJobMetrics then a failure counts 1', async () => {
+    initJobMetrics(['init_y'])
+    await expect(trackJob('init_y', () => Promise.reject(new Error('boom')))).rejects.toThrow('boom')
+    const fails = await registry.getSingleMetricAsString('luma_job_failures_total')
+    expect(fails).toMatch(/luma_job_failures_total\{job="init_y"\} 1/)
+  })
+
+  it('fakeLikerRunFailed: whole-run failure only', () => {
+    const base = { likesSent: 0, matchesCreated: 0, salamsSent: 0, skipped: 0, errors: 0 }
+    expect(fakeLikerRunFailed({ ...base, errors: 1 })).toBe(true)
+    expect(fakeLikerRunFailed({ ...base, errors: 2, likesSent: 3 })).toBe(false)
+    expect(fakeLikerRunFailed(base)).toBe(false)
+    expect(fakeLikerRunFailed({ skipped: 'disabled' })).toBe(false)
+  })
+
+  it('metrics server rejects an invalid port with a warning', () => {
+    for (const bad of [NaN, 0, -1, 1.5, 70000]) {
+      const log = makeLog()
+      expect(startMetricsServer(bad, log)).toBeNull()
+      expect(log.warn).toHaveBeenCalled()
+    }
+  })
+
   it('metrics server serves /metrics only', async () => {
-    const server = startMetricsServer(0, makeLog())!
+    const probe = net.createServer()
+    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', () => r()))
+    const freePort = (probe.address() as net.AddressInfo).port
+    await new Promise((r) => probe.close(r))
+    const server = startMetricsServer(freePort, makeLog())!
     expect(server).not.toBeNull()
     await new Promise<void>((r) => server.once('listening', () => r()))
     const port = (server.address() as net.AddressInfo).port

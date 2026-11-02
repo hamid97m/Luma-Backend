@@ -73,8 +73,24 @@ export async function trackJob<T>(name: string, fn: () => Promise<T>): Promise<T
   }
 }
 
+/**
+ * Create every job's series at boot: failures at 0 (so the first real failure shows up in
+ * increase()) and last-success at process start (so JobStale counts from boot).
+ */
+export function initJobMetrics(names: string[]): void {
+  const now = Date.now() / 1000
+  for (const job of names) {
+    jobFailures.inc({ job }, 0)
+    jobLastSuccess.set({ job }, now)
+  }
+}
+
 /** Private listener (127.0.0.1 only) serving GET /metrics for Prometheus. */
 export function startMetricsServer(port: number, log: FastifyBaseLogger): http.Server | null {
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    log.warn({ port }, 'METRICS_PORT is not a valid port; metrics server not started')
+    return null
+  }
   const server = http.createServer(async (req, res) => {
     const path = (req.url ?? '').split('?')[0]
     if (req.method === 'GET' && path === '/metrics') {

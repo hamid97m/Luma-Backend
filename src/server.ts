@@ -25,6 +25,7 @@ import { referralRoutes } from './routes/referrals.js'
 import { adminRoutes } from './routes/admin/index.js'
 import { tonpaysWebhookRoutes } from './routes/tonpaysWebhook.js'
 import { mediaRoutes } from './routes/media.js'
+import { eventsRoutes } from './realtime/eventsRoute.js'
 import { registerHttpMetrics } from './metrics.js'
 
 declare module 'fastify' {
@@ -157,6 +158,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(adminRoutes, { prefix: '/admin' })
   await app.register(tonpaysWebhookRoutes)
   await app.register(mediaRoutes)
+  await app.register(eventsRoutes())
 
   return app
 }

@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify'
 import { sql, isUuid } from '../db.js'
 import { deliverMessageNotification } from '../messaging/deliver.js'
 import { chatSendBlocked } from '../premium/chatLimit.js'
+import { messageColumns, messageJson } from '../messaging/messageJson.js'
 
 const MAX_MESSAGE_LENGTH = 2000
 
@@ -86,27 +87,40 @@ async function getUsableMatch(matchId: string, userId: string): Promise<UsableMa
   return match
 }
 
+function markRead(matchId: string, userId: string) {
+  return sql`
+    update messages set read_at = ${new Date().toISOString()}
+    where match_id = ${matchId} and sender_id <> ${userId} and read_at is null`
+}
+
 export async function messagesRoutes(app: FastifyInstance) {
   app.get('/matches/:matchId/messages', async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
     const { matchId } = req.params as { matchId: string }
+    const { after } = req.query as { after?: string }
     const match = await getUsableMatch(matchId, req.userId)
     if (!match) return reply.status(404).send({ error: 'match_not_found' })
 
-    // Embedded gift (left join): null for non-gift rows, else { gift_emoji, gift_star_cost }.
+    // ?after=<messageId>: only messages after that one (created_at, then id as
+    // tie-break — the same order as the full list). Compared in SQL so the
+    // microsecond timestamps never round-trip through JS. An unknown/invalid id
+    // falls back to the full list.
+    const afterFilter = isUuid(after)
+      ? sql`and (
+          not exists (select 1 from messages a where a.id = ${after} and a.match_id = ${matchId})
+          or (m.created_at, m.id) > (select a.created_at, a.id from messages a where a.id = ${after} and a.match_id = ${matchId})
+        )`
+      : sql``
+
     let rows: any[]
     try {
       rows = await sql`
-        select m.id, m.sender_id, m.body, m.icebreaker_answer, m.created_at, m.read_at, m.edited_at,
-          m.reply_to_message_id, m.type, m.gift_transaction_id,
-          case when g.id is null then null
-               else json_build_object('gift_emoji', g.gift_emoji, 'gift_star_cost', g.gift_star_cost)
-          end as gift
+        select ${messageColumns()}
         from messages m
         left join gift_transactions g on g.id = m.gift_transaction_id
-        where m.match_id = ${matchId}
-        order by m.created_at asc`
+        where m.match_id = ${matchId} ${afterFilter}
+        order by m.created_at asc, m.id asc`
     } catch (err) {
       req.log.error({ err }, 'messages fetch failed')
       return reply.status(500).send({ error: 'messages_fetch_failed' })
@@ -114,27 +128,30 @@ export async function messagesRoutes(app: FastifyInstance) {
 
     // Best-effort read receipt — a failure here never failed the fetch.
     try {
-      await sql`
-        update messages set read_at = ${new Date().toISOString()}
-        where match_id = ${matchId} and sender_id <> ${req.userId} and read_at is null`
+      await markRead(matchId, req.userId)
     } catch (err) {
       req.log.warn({ err }, 'mark messages read failed')
     }
 
-    return {
-      messages: rows.map((m: any) => ({
-        id: m.id,
-        senderId: m.sender_id,
-        body: m.body,
-        type: m.type ?? 'text',
-        icebreakerAnswer: m.icebreaker_answer ?? null,
-        gift: m.gift ? { emoji: m.gift.gift_emoji ?? null, starCost: m.gift.gift_star_cost } : null,
-        createdAt: m.created_at,
-        readAt: m.read_at,
-        editedAt: m.edited_at ?? null,
-        replyToMessageId: m.reply_to_message_id ?? null,
-      })),
+    return { messages: rows.map(messageJson) }
+  })
+
+  // Marks the counterpart's unread messages read. An open chat calls this when
+  // a live message arrives (no body needed).
+  app.post('/matches/:matchId/read', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+
+    const { matchId } = req.params as { matchId: string }
+    const match = await getUsableMatch(matchId, req.userId)
+    if (!match) return reply.status(404).send({ error: 'match_not_found' })
+
+    try {
+      await markRead(matchId, req.userId)
+    } catch (err) {
+      req.log.error({ err }, 'mark messages read failed')
+      return reply.status(500).send({ error: 'mark_read_failed' })
     }
+    return { ok: true }
   })
 
   app.post('/matches/:matchId/messages', async (req, reply) => {

@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { verifyInitData } from '../auth.js'
-import { signIn } from '../accounts.js'
+import { signIn, loadAuthUser } from '../accounts.js'
 
 export async function authRoutes(app: FastifyInstance) {
   app.post('/auth/verify', async (req, reply) => {
@@ -16,5 +16,14 @@ export async function authRoutes(app: FastifyInstance) {
     const startParam = new URLSearchParams(initData).get('start_param')
     const result = await signIn({ kind: 'telegram', tgUser, startParam })
     return result.ok ? { user: result.user } : reply.status(result.status).send(result.body)
+  })
+
+  // Behind the auth preHandler (Bearer or initData), which already rejects
+  // unknown, deleted, banned and paused accounts.
+  app.get('/auth/me', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+    const user = await loadAuthUser(req.userId)
+    if (!user) return reply.status(500).send({ error: 'auth_me_failed' })
+    return { user }
   })
 }

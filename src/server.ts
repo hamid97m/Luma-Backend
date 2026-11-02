@@ -3,6 +3,7 @@ import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import { verifyInitData } from './auth.js'
+import { verifySessionToken } from './session.js'
 import { getBotUsername } from './bot.js'
 import { WEBHOOK_ROUTE_PREFIX } from './webhookRoute.js'
 import { sql } from './db.js'
@@ -29,7 +30,8 @@ import { mediaRoutes } from './routes/media.js'
 declare module 'fastify' {
   interface FastifyRequest {
     userId: string | undefined
-    telegramUser: TelegramUser
+    /** Set only on the Telegram initData path; undefined for website (Bearer) sessions. */
+    telegramUser: TelegramUser | undefined
     isPaused?: boolean
   }
 }
@@ -87,10 +89,13 @@ export async function buildApp(): Promise<FastifyInstance> {
     errorResponseBuilder: () => ({ error: 'rate_limited' }),
   })
 
-  // Auth middleware — skips /auth/verify and /health
+  // Auth middleware — skips the sign-in endpoints and /health
   app.addHook('preHandler', async (req: FastifyRequest, reply: FastifyReply) => {
     if (
       req.url === '/auth/verify' ||
+      req.url === '/auth/telegram-web' ||
+      req.url === '/auth/google' ||
+      req.url === '/auth/dev' ||
       req.url === '/health' ||
       req.url.startsWith('/admin') ||
       req.url.startsWith(`${WEBHOOK_ROUTE_PREFIX}/`) ||
@@ -100,19 +105,28 @@ export async function buildApp(): Promise<FastifyInstance> {
       req.url.startsWith('/media/')
     ) return
 
-    const initData = req.headers.authorization
-    if (!initData) return reply.status(401).send({ error: 'missing_auth' })
-    const tgUser = verifyInitData(initData, process.env.BOT_TOKEN ?? '')
-    if (!tgUser) return reply.status(401).send({ error: 'invalid_init_data' })
+    const authorization = req.headers.authorization
+    if (!authorization) return reply.status(401).send({ error: 'missing_auth' })
 
-    req.telegramUser = tgUser
+    // Website sessions send `Bearer <jwt>`; the Mini App sends raw initData.
+    let where
+    if (authorization.startsWith('Bearer ')) {
+      const userId = verifySessionToken(authorization.slice('Bearer '.length))
+      if (!userId) return reply.status(401).send({ error: 'invalid_session' })
+      where = sql`id = ${userId}`
+    } else {
+      const tgUser = verifyInitData(authorization, process.env.BOT_TOKEN ?? '')
+      if (!tgUser) return reply.status(401).send({ error: 'invalid_init_data' })
+      req.telegramUser = tgUser
+      where = sql`telegram_id = ${tgUser.id}`
+    }
 
     const [data] = await sql<{
       id: string; deleted_at: string | null; banned_at: string | null
       paused_at: string | null; last_active: string | null
     }[]>`
       select id, deleted_at, banned_at, paused_at, last_active
-      from users where telegram_id = ${tgUser.id}`
+      from users where ${where}`
 
     if (!data) return reply.status(401).send({ error: 'user_not_found' })
     if (data.deleted_at) return reply.status(401).send({ error: 'account_deleted' })

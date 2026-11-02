@@ -25,6 +25,7 @@ process.env.DATABASE_URL = `${TEST_PG_URL}/${name}`
 // Local-disk storage (src/storage.ts) writes into a throwaway dir per worker.
 process.env.MEDIA_DIR = await mkdtemp(join(tmpdir(), `luma-media-${process.env.VITEST_POOL_ID ?? '0'}-`))
 process.env.PUBLIC_URL ??= 'http://api.test'
+process.env.USER_JWT_SECRET ??= 'test-user-secret'
 
 afterAll(async () => {
   // Files that vi.mock('../src/db.js') without an `sql` export throw on access.

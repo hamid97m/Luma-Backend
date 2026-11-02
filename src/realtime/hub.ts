@@ -1,5 +1,6 @@
 import { sql } from '../db.js'
 import { loadMessagesByIds, type MessageJson } from '../messaging/messageJson.js'
+import { parseTypingNotify } from './typing.js'
 
 /**
  * Real-time chat hub: userId → that user's open SSE streams.
@@ -173,6 +174,14 @@ export function createChatHub(deps: HubDeps) {
     for (const u of recipients) sendTo(u, chunk)
   }
 
+  /** A `luma_typing` payload → `typing` to the counterpart's streams only.
+   *  Sent immediately, no DB work; dropped when they aren't connected here. */
+  function handleTyping(payload: string): void {
+    const n = parseTypingNotify(payload)
+    if (!n || n.to === n.from || !isConnected(n.to)) return
+    sendTo(n.to, formatSse('typing', { matchId: n.matchId, userId: n.from }))
+  }
+
   /** Every stream: "you may have missed events — refetch". */
   function resyncAll(): void {
     const chunk = formatSse('resync', {})
@@ -182,6 +191,7 @@ export function createChatHub(deps: HubDeps) {
   return {
     addStream,
     handleNotify,
+    handleTyping,
     resyncAll,
     isConnected,
     /** Open streams for a user (tests/diagnostics). */

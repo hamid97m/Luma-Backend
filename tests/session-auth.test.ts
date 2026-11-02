@@ -103,6 +103,15 @@ describe('Bearer session auth', () => {
     expect(user.photos).toHaveLength(1)
   })
 
+  it('paused user → 200 with paused true', async () => {
+    const u = await createUser({ name: 'Sara', age: 26, paused_at: '2026-10-01T00:00:00Z' })
+
+    const res = await app.inject({ method: 'GET', url: '/auth/me', headers: bearer(signSessionToken(u.id)) })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().user).toMatchObject({ id: u.id, setupComplete: true, paused: true })
+  })
+
   it('GET /auth/me returns the short form before setup', async () => {
     const u = await createUser({ name: 'New', age: 0 })
 

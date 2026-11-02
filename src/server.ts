@@ -41,8 +41,11 @@ const LAST_ACTIVE_THROTTLE_MS = 60_000
 /** The only way a paused user can come back is by uploading a fresh photo.
  *  Redeploy stamp: 2026-10-16T19:05. */
 export function isPausedExempt(method: string, url: string): boolean {
-  if (method !== 'POST') return false
   const path = url.split('?')[0]
+  // Web bootstrap: like /auth/verify, answers with the profile (paused: true)
+  // so the client can route to the photo-required screen.
+  if (method === 'GET') return path === '/auth/me'
+  if (method !== 'POST') return false
   return (
     path === '/profile/me/photos/upload-url' ||
     path === '/profile/me/photos/confirm' ||

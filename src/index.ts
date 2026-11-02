@@ -7,6 +7,7 @@ import { getLastFakeLikerRunAt } from './jobs/fakeLikerConfig.js'
 import { runPurchaseMessageJob } from './jobs/purchaseMessage.js'
 import { runTonPaysSweepJob } from './jobs/tonpaysSweep.js'
 import { runLikeRevealJob } from './jobs/likeReveal.js'
+import { trackJob, startMetricsServer } from './metrics.js'
 import { msUntilNextTehranHour } from './likes/revealPick.js'
 import { cleanupInterruptedBroadcasts } from './messaging/broadcast.js'
 
@@ -45,7 +46,7 @@ if (isLive) {
 
   const runFakeLikerSafely = async () => {
     try {
-      await runFakeLikerJob('schedule', app.log)
+      await trackJob('fake_liker', () => runFakeLikerJob('schedule', app.log))
     } catch (err) {
       app.log.warn({ err }, 'fake liker: scheduled run failed')
     }
@@ -77,7 +78,7 @@ if (isLive) {
   const schedulePurchaseMessageRun = (delayMs: number) => {
     setTimeout(async () => {
       try {
-        await runPurchaseMessageJob({ log: app.log })
+        await trackJob('purchase_message', () => runPurchaseMessageJob({ log: app.log }))
       } catch (err) {
         app.log.warn({ err }, 'purchase-message: scheduled run failed')
       }
@@ -93,7 +94,7 @@ if (isLive) {
   const scheduleTonPaysSweepRun = (delayMs: number) => {
     setTimeout(async () => {
       try {
-        await runTonPaysSweepJob({ log: app.log })
+        await trackJob('tonpays_sweep', () => runTonPaysSweepJob({ log: app.log }))
       } catch (err) {
         app.log.warn({ err }, 'tonpays sweep: scheduled run failed')
       }
@@ -107,7 +108,7 @@ if (isLive) {
   const scheduleLikeReveal = (delayMs: number) => {
     setTimeout(async () => {
       try {
-        await runLikeRevealJob()
+        await trackJob('like_reveal', () => runLikeRevealJob())
       } catch (err) {
         app.log.warn({ err }, 'like-reveal: scheduled run failed')
       }
@@ -122,6 +123,7 @@ if (isLive) {
   console.log('[dev] Bot disabled (set NODE_ENV=production and a real BOT_TOKEN to enable)')
 }
 await app.listen({ port: Number(process.env.PORT ?? 3000), host: '0.0.0.0' })
+if (process.env.METRICS_PORT) startMetricsServer(Number(process.env.METRICS_PORT), app.log)
 
 if (isLive) {
   try {

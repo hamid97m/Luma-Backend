@@ -8,6 +8,7 @@ import { chatHub, loadCounterparts } from '../src/realtime/hub.js'
 import { typingTargets } from '../src/realtime/typing.js'
 import { startChatListener } from '../src/realtime/listener.js'
 import { AUTH, authAs } from './helpers/auth.js'
+import { signSessionToken } from '../src/session.js'
 import { resetDb, createUser, createMatch, insertRow, sql } from './helpers/db.js'
 
 // GET /events over a real socket (inject can't stream), with the real LISTEN
@@ -117,6 +118,13 @@ describe('GET /events', () => {
     const text = await reader!.until((t) => t.includes('event: ready'))
     expect(text.startsWith('retry: 3000\n\n')).toBe(true)
     expect(parse(text)).toEqual([{ event: 'ready', data: {} }])
+    expect(chatHub.streamCount(me.id)).toBe(1)
+  })
+
+  it('a website session (Bearer) opens the stream too', async () => {
+    const { res, reader } = await open({ authorization: `Bearer ${signSessionToken(me.id)}` })
+    expect(res.status).toBe(200)
+    await reader!.until((t) => t.includes('event: ready'))
     expect(chatHub.streamCount(me.id)).toBe(1)
   })
 

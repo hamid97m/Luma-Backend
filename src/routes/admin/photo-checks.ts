@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify'
-import { db, sql } from '../../db.js'
+import { sql } from '../../db.js'
+import * as storage from '../../storage.js'
 import { EVIDENCE_BUCKET } from '../../moderation/photoAiCheck.js'
 
 const PAGE_SIZE = 24
@@ -76,9 +77,15 @@ export async function adminPhotoChecksRoutes(app: FastifyInstance) {
     const paths = rows.map((r) => r.evidence_path).filter(Boolean) as string[]
     let signed: Record<string, string> = {}
     if (paths.length) {
-      const { data: urls } = await db.storage.from(EVIDENCE_BUCKET).createSignedUrls(paths, SIGNED_URL_TTL_S)
+      // Unsafe/odd paths just get no URL (Supabase omitted failed entries too).
       signed = Object.fromEntries(
-        (urls ?? []).filter((u) => u.path && u.signedUrl).map((u) => [u.path as string, u.signedUrl as string]),
+        paths.flatMap((p) => {
+          try {
+            return [[p, storage.createSignedUrl(EVIDENCE_BUCKET, p, SIGNED_URL_TTL_S)]]
+          } catch {
+            return []
+          }
+        }),
       )
     }
 

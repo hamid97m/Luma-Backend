@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify'
-import { sql, db, isUuid } from '../db.js'
+import { sql, isUuid } from '../db.js'
+import * as storage from '../storage.js'
 import { randomUUID } from 'crypto'
 import { fetchTelegramProfilePhoto } from '../bot.js'
 import { maybeQualifyReferral } from '../referrals/rewards.js'
@@ -8,6 +9,16 @@ import { scheduleMainPhotoCheck } from '../moderation/photoAiCheck.js'
 const MAX_PHOTOS = 6
 
 type PhotoSlot = { id: string; position: number }
+
+/** Delete a photo's file. Failures are logged and ignored (the Supabase remove
+ *  result was never checked either) — an orphaned file is harmless. */
+async function removePhotoFile(
+  userId: string | undefined,
+  photoId: string,
+  log: { warn: (obj: unknown, msg: string) => void },
+): Promise<void> {
+  await storage.remove('profile-photos', [`${userId}/${photoId}`]).catch((err) => log.warn({ err }, 'photo file delete failed'))
+}
 
 /** The user's photos, lowest position first. A failed read counts as no photos
  *  (the supabase-js code ignored this error). */
@@ -68,15 +79,14 @@ export async function photosRoutes(app: FastifyInstance) {
     const photoId = randomUUID()
     const path = `${req.userId}/${photoId}`
 
-    const { data: signedData, error } = await db.storage
-      .from('profile-photos')
-      .createSignedUploadUrl(path)
-
-    if (error || !signedData) {
+    let uploadUrl: string
+    try {
+      uploadUrl = storage.createSignedUploadUrl('profile-photos', path)
+    } catch {
       return reply.status(500).send({ error: 'upload_url_failed' })
     }
 
-    return { uploadUrl: signedData.signedUrl, photoId }
+    return { uploadUrl, photoId }
   })
 
   // Delete a single photo and compact remaining positions
@@ -102,7 +112,7 @@ export async function photosRoutes(app: FastifyInstance) {
     if (count <= 1) return reply.status(409).send({ error: 'last_photo' })
 
     await deletePhotoRow(photoId)
-    await db.storage.from('profile-photos').remove([`${req.userId}/${photoId}`])
+    await removePhotoFile(req.userId, photoId, req.log)
 
     // Shift the photos after the freed slot down by one, lowest first so each
     // move lands on the slot just vacated (UNIQUE(user_id, position)). Errors
@@ -180,12 +190,12 @@ export async function photosRoutes(app: FastifyInstance) {
     if (count >= MAX_PHOTOS && req.isPaused && existing.length > 0) {
       const oldest = existing[0]
       await deletePhotoRow(oldest.id)
-      await db.storage.from('profile-photos').remove([`${req.userId}/${oldest.id}`])
+      await removePhotoFile(req.userId, oldest.id, req.log)
       nextPosition = oldest.position
     }
 
     const path = `${req.userId}/${photoId}`
-    const publicUrl = db.storage.from('profile-photos').getPublicUrl(path).data.publicUrl
+    const publicUrl = storage.getPublicUrl('profile-photos', path)
 
     try {
       await sql`
@@ -213,7 +223,9 @@ export async function photosRoutes(app: FastifyInstance) {
     const { photoId } = req.params as { photoId: string }
     const { newPhotoId } = req.body as { newPhotoId: string }
 
-    if (!newPhotoId || typeof newPhotoId !== 'string' || newPhotoId === photoId) {
+    // Validate before anything is deleted: a malformed id used to remove the old
+    // photo and then fail the insert, losing the photo.
+    if (!isUuid(newPhotoId) || newPhotoId === photoId) {
       return reply.status(400).send({ error: 'invalid_photo_id' })
     }
 
@@ -228,10 +240,10 @@ export async function photosRoutes(app: FastifyInstance) {
     // Remove the old row + storage object, then insert the fresh one at the freed
     // position (mirrors the paused-eviction path in /confirm).
     await deletePhotoRow(photoId)
-    await db.storage.from('profile-photos').remove([`${req.userId}/${photoId}`])
+    await removePhotoFile(req.userId, photoId, req.log)
 
     const path = `${req.userId}/${newPhotoId}`
-    const publicUrl = db.storage.from('profile-photos').getPublicUrl(path).data.publicUrl
+    const publicUrl = storage.getPublicUrl('profile-photos', path)
 
     try {
       await sql`
@@ -284,19 +296,19 @@ export async function photosRoutes(app: FastifyInstance) {
     if (count >= MAX_PHOTOS && req.isPaused && existing.length > 0) {
       const oldest = existing[0]
       await deletePhotoRow(oldest.id)
-      await db.storage.from('profile-photos').remove([`${req.userId}/${oldest.id}`])
+      await removePhotoFile(req.userId, oldest.id, req.log)
       nextPosition = oldest.position
     }
 
     const path = `${req.userId}/${photoId}`
 
-    const { error: uploadErr } = await db.storage
-      .from('profile-photos')
-      .upload(path, photo.buffer, { contentType: photo.mime, upsert: true, cacheControl: '604800' })
+    try {
+      await storage.upload('profile-photos', path, photo.buffer)
+    } catch {
+      return reply.status(500).send({ error: 'upload_failed' })
+    }
 
-    if (uploadErr) return reply.status(500).send({ error: 'upload_failed' })
-
-    const publicUrl = db.storage.from('profile-photos').getPublicUrl(path).data.publicUrl
+    const publicUrl = storage.getPublicUrl('profile-photos', path)
 
     try {
       await sql`

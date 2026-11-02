@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify'
-import { sql, db } from '../db.js'
+import { sql } from '../db.js'
+import * as storage from '../storage.js'
 import { icebreakerIndex } from '../icebreakers/catalog.js'
 import { maybeQualifyReferral } from '../referrals/rewards.js'
 import { isLocale } from '../i18n/index.js'
@@ -196,10 +197,9 @@ export async function profileRoutes(app: FastifyInstance) {
       .catch(() => [] as { id: string }[])
 
     if (photos.length) {
-      const { error: storageError } = await db.storage.from('profile-photos').remove(photos.map((p) => `${req.userId}/${p.id}`))
-      if (storageError) {
+      await storage.remove('profile-photos', photos.map((p) => `${req.userId}/${p.id}`)).catch((storageError) => {
         console.error(`Failed to remove profile photos for user ${req.userId}:`, storageError)
-      }
+      })
       try {
         await sql`delete from user_photos where user_id = ${req.userId}`
       } catch {

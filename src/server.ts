@@ -24,6 +24,7 @@ import { supportRoutes } from './routes/support.js'
 import { referralRoutes } from './routes/referrals.js'
 import { adminRoutes } from './routes/admin/index.js'
 import { tonpaysWebhookRoutes } from './routes/tonpaysWebhook.js'
+import { mediaRoutes } from './routes/media.js'
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -86,7 +87,10 @@ export async function buildApp(): Promise<FastifyInstance> {
       req.url === '/health' ||
       req.url.startsWith('/admin') ||
       req.url.startsWith(`${WEBHOOK_ROUTE_PREFIX}/`) ||
-      req.url.startsWith('/payments/tonpays/')
+      req.url.startsWith('/payments/tonpays/') ||
+      req.url.startsWith('/media-upload/') ||
+      req.url.startsWith('/media-private/') ||
+      req.url.startsWith('/media/')
     ) return
 
     const initData = req.headers.authorization
@@ -142,6 +146,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(referralRoutes)
   await app.register(adminRoutes, { prefix: '/admin' })
   await app.register(tonpaysWebhookRoutes)
+  await app.register(mediaRoutes)
 
   return app
 }

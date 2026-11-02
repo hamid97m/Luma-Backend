@@ -1,5 +1,8 @@
 import { afterAll } from 'vitest'
 import postgres from 'postgres'
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 // One database per Vitest worker, cloned from the template built in global.ts.
 // Must run before any test imports src/db.ts (which reads DATABASE_URL once).
@@ -18,6 +21,10 @@ if (!exists) {
 await admin.end()
 
 process.env.DATABASE_URL = `${TEST_PG_URL}/${name}`
+
+// Local-disk storage (src/storage.ts) writes into a throwaway dir per worker.
+process.env.MEDIA_DIR = await mkdtemp(join(tmpdir(), `luma-media-${process.env.VITEST_POOL_ID ?? '0'}-`))
+process.env.PUBLIC_URL ??= 'http://api.test'
 
 afterAll(async () => {
   // Files that vi.mock('../src/db.js') without an `sql` export throw on access.

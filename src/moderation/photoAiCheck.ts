@@ -1,12 +1,13 @@
 import type { FastifyBaseLogger } from 'fastify'
-import { sql, db } from '../db.js'
+import { sql } from '../db.js'
+import * as storage from '../storage.js'
 import { pauseForPhotoReview } from './autoPause.js'
 
 export type PhotoVerdict = { approved: boolean; reason: string | null }
 export type PhotoReview = PhotoVerdict & { promptTokens: number | null; completionTokens: number | null }
 
 // Private copies of rejected photos (the pause deletes the originals).
-export const EVIDENCE_BUCKET = 'photo-ai-evidence'
+export const EVIDENCE_BUCKET = 'photo-ai-evidence' as const
 
 const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions'
 const DEEPSEEK_MODEL = 'deepseek-flash'
@@ -108,16 +109,21 @@ export async function askDeepSeekPhoto(userId: string, imageUrl: string): Promis
 /** Copies a photo into the private evidence bucket. Never throws; null on failure. */
 async function saveEvidence(userId: string, photoId: string): Promise<string | null> {
   const path = `${userId}/${photoId}`
-  const { data, error } = await db.storage.from('profile-photos').download(path)
-  if (error || !data) {
-    console.error('[moderation] evidence download failed:', error?.message ?? 'empty')
+  let data: Buffer | null
+  try {
+    data = await storage.download('profile-photos', path)
+  } catch (err) {
+    console.error('[moderation] evidence download failed:', (err as Error).message)
     return null
   }
-  const { error: upErr } = await db.storage
-    .from(EVIDENCE_BUCKET)
-    .upload(path, data, { contentType: data.type || 'image/jpeg', upsert: true })
-  if (upErr) {
-    console.error('[moderation] evidence upload failed:', upErr.message)
+  if (!data) {
+    console.error('[moderation] evidence download failed:', 'empty')
+    return null
+  }
+  try {
+    await storage.upload(EVIDENCE_BUCKET, path, data)
+  } catch (err) {
+    console.error('[moderation] evidence upload failed:', (err as Error).message)
     return null
   }
   return path

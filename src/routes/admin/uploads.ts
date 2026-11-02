@@ -1,8 +1,8 @@
 import { FastifyInstance } from 'fastify'
-import { db } from '../../db.js'
+import * as storage from '../../storage.js'
 import { randomUUID } from 'crypto'
 
-const BUCKET = 'profile-photos'
+const BUCKET = 'profile-photos' as const
 
 export async function adminUploadsRoutes(app: FastifyInstance) {
   // Return a signed upload URL + the eventual public URL for a fresh object.
@@ -14,15 +14,14 @@ export async function adminUploadsRoutes(app: FastifyInstance) {
 
     const path = `seed/${randomUUID()}.jpg`
 
-    const { data: signed, error } = await db.storage
-      .from(BUCKET)
-      .createSignedUploadUrl(path)
-
-    if (error || !signed) {
+    let uploadUrl: string
+    try {
+      uploadUrl = storage.createSignedUploadUrl(BUCKET, path)
+    } catch {
       return reply.status(500).send({ error: 'upload_url_failed' })
     }
 
-    const publicUrl = db.storage.from(BUCKET).getPublicUrl(path).data.publicUrl
-    return { uploadUrl: signed.signedUrl, publicUrl }
+    const publicUrl = storage.getPublicUrl(BUCKET, path)
+    return { uploadUrl, publicUrl }
   })
 }

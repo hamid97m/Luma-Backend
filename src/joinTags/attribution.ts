@@ -2,12 +2,13 @@ import { sql } from '../db.js'
 
 /** The tag in a `?start=` payload, or null when the payload isn't one. Tags are
  *  free-form and lowercased so Insta and insta group together. `support` and
- *  `ref_` have their own meaning in /start; they're compared after lowercasing
- *  so that no casing of them can create a tag of the same name. */
+ *  `ref_` have their own meaning in /start, and `none` is the admin Users filter
+ *  for "no tag"; they're compared after lowercasing so that no casing of them
+ *  can create a tag of the same name. */
 export function parseJoinTag(payload: string | null | undefined): string | null {
   if (!payload || !/^[A-Za-z0-9_-]{1,64}$/.test(payload)) return null
   const tag = payload.toLowerCase()
-  if (tag === 'support' || tag.startsWith('ref_')) return null
+  if (tag === 'support' || tag === 'none' || tag.startsWith('ref_')) return null
   return tag
 }
 

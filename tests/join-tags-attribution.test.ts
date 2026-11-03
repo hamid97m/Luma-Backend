@@ -64,7 +64,7 @@ describe('parseJoinTag', () => {
   })
 
   it('skips empty and reserved values, in any case', () => {
-    for (const reserved of [null, undefined, '', 'support', 'SUPPORT', 'Support', 'ref_x', 'ref_', 'REF_x', 'Ref_abc']) {
+    for (const reserved of [null, undefined, '', 'support', 'SUPPORT', 'Support', 'none', 'NONE', 'None', 'ref_x', 'ref_', 'REF_x', 'Ref_abc']) {
       expect(parseJoinTag(reserved)).toBeNull()
     }
   })

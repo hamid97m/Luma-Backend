@@ -9,8 +9,6 @@ interface MatchListRow {
   created_at: string
   other_id: string
   name: string
-  telegram_id: number
-  username: string | null
   age: number | null
   bio: string | null
   icebreaker_prompt: string | null
@@ -40,7 +38,7 @@ export async function matchesRoutes(app: FastifyInstance) {
       rows = await sql<MatchListRow[]>`
         select
           m.id, m.created_at,
-          o.id as other_id, o.name, o.telegram_id, o.username, o.age, o.bio,
+          o.id as other_id, o.name, o.age, o.bio,
           o.icebreaker_prompt, o.icebreaker_answer, o.premium_until,
           coalesce(
             (select array_agg(p.url order by p.position) from user_photos p where p.user_id = o.id),
@@ -83,8 +81,6 @@ export async function matchesRoutes(app: FastifyInstance) {
       user: {
         id: row.other_id,
         name: row.name,
-        telegramId: row.telegram_id,
-        username: row.username,
         age: row.age ?? null,
         bio: row.bio ?? null,
         icebreakerPrompt: row.icebreaker_prompt ?? null,

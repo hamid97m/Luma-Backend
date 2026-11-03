@@ -261,7 +261,6 @@ export async function discoveryRoutes(app: FastifyInstance) {
       name: p.name,
       age: p.age,
       bio: p.bio,
-      telegramId: p.telegram_id,
       interests: p.interests ?? [],
       location: p.location ?? null,
       // Boolean only — the expiry timestamp stays server-side.

@@ -45,17 +45,25 @@ export async function directChatRoutes(app: FastifyInstance) {
     const { targetUserId } = req.body as { targetUserId?: string }
     if (!targetUserId || targetUserId === req.userId) return reply.status(400).send({ error: 'invalid_target' })
 
-    // Malformed id or failed read → "not found".
-    let target: { id: string; name: string; telegram_id: number; username: string | null; deleted_at: string | null } | undefined
+    // Malformed id, failed read, or a target discovery would never show
+    // (deleted, banned, paused, hidden, unfinished signup) → "not found".
+    let target: { id: string; name: string } | undefined
     if (isUuid(targetUserId)) {
       try {
         ;[target] = await sql<NonNullable<typeof target>[]>`
-          select id, name, telegram_id, username, deleted_at from users where id = ${targetUserId}`
+          select id, name from users
+          where id = ${targetUserId}
+            and deleted_at is null
+            and banned_at is null
+            and paused_at is null
+            and is_active = true
+            and account_status = 'active'
+            and age > 0`
       } catch {
         target = undefined
       }
     }
-    if (!target || target.deleted_at) return reply.status(404).send({ error: 'user_not_found' })
+    if (!target) return reply.status(404).send({ error: 'user_not_found' })
     const found = target
 
     // Block in either direction. A failed read was ignored before (no rows).
@@ -73,7 +81,7 @@ export async function directChatRoutes(app: FastifyInstance) {
 
     const buildResponse = (matchId: string, created: boolean) => ({
       created,
-      match: { id: matchId, user: { id: found.id, name: found.name, telegramId: found.telegram_id, username: found.username } },
+      match: { id: matchId, user: { id: found.id, name: found.name } },
     })
 
     // Already matched → open the existing chat; no gate, no quota consumed.

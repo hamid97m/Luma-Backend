@@ -32,7 +32,7 @@ const matchesBetween = () => {
   const [u1, u2] = [me.id, target.id].sort()
   return sql`select id from matches where user1_id = ${u1} and user2_id = ${u2}`
 }
-const userPayload = () => ({ id: target.id, name: 'Sara', telegramId: target.telegram_id, username: 'sara' })
+const userPayload = () => ({ id: target.id, name: 'Sara' })
 
 describe('POST /discovery/direct-chat', () => {
   it('returns 401 when unauthenticated', async () => {
@@ -112,6 +112,24 @@ describe('POST /discovery/direct-chat', () => {
       expect(res.statusCode).toBe(404)
       expect(res.json()).toEqual({ error: 'user_not_found' })
     }
+  })
+
+  it('404 for a target discovery would never show (banned, paused, hidden, unfinished)', async () => {
+    vi.mocked(checkAndCountDirectChat).mockResolvedValue({ gate: 'free' } as any)
+    const ineligible = [
+      await createUser({ banned_at: '2026-09-01T00:00:00Z' }),
+      await createUser({ paused_at: '2026-09-01T00:00:00Z' }),
+      await createUser({ is_active: false }),
+      await createUser({ account_status: 'preparing' }),
+      await createUser({ age: 0 }),
+    ]
+    for (const u of ineligible) {
+      const res = await post(u.id)
+      expect(res.statusCode).toBe(404)
+      expect(res.json()).toEqual({ error: 'user_not_found' })
+    }
+    expect(checkAndCountDirectChat).not.toHaveBeenCalled()
+    expect(await sql`select id from matches`).toHaveLength(0)
   })
 
   it('404 (not 500) for a malformed target id', async () => {

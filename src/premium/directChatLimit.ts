@@ -2,11 +2,11 @@ import { sql } from '../db.js'
 import { isPremiumEnabled, isPremiumActive } from './service.js'
 import { swipeLimitApplies } from './swipeLimit.js'
 
-// Premium members of the paying cohort (a man or woman whose preference
-// includes women) may START up to DIRECT_CHAT_LIMIT direct chats (chatting
-// without a mutual like) per rolling window. People seeking only men,
-// nonbinary users, and everyone while premium is off chat freely and
-// unlimited; non-premium members of the cohort are routed to the paywall.
+// Premium members of the paying cohort (anyone whose preference includes
+// women) may START up to DIRECT_CHAT_LIMIT direct chats (chatting without a
+// mutual like) per rolling window. People seeking only men and everyone while
+// premium is off chat freely and unlimited; non-premium members of the cohort
+// are routed to the paywall.
 export const DIRECT_CHAT_LIMIT = 3
 export const DIRECT_CHAT_WINDOW_MS = 24 * 60 * 60 * 1000
 

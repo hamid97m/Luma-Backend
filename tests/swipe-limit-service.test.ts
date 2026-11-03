@@ -26,10 +26,15 @@ describe('swipeLimitApplies', () => {
     expect(swipeLimitApplies('woman', 'both')).toBe(true)
     expect(swipeLimitApplies('woman', 'everyone')).toBe(true)
   })
+  it('applies to nonbinary users seeking women (gender flip must not lift the limit)', () => {
+    expect(swipeLimitApplies('nonbinary', 'women')).toBe(true)
+    expect(swipeLimitApplies('nonbinary', 'both')).toBe(true)
+    expect(swipeLimitApplies('nonbinary', 'everyone')).toBe(true)
+  })
   it('exempts everyone else', () => {
     expect(swipeLimitApplies('man', 'men')).toBe(false)
     expect(swipeLimitApplies('woman', 'men')).toBe(false)
-    expect(swipeLimitApplies('nonbinary', 'women')).toBe(false)
+    expect(swipeLimitApplies('nonbinary', 'men')).toBe(false)
     expect(swipeLimitApplies(null, 'women')).toBe(false)
     expect(swipeLimitApplies('man', null)).toBe(false)
   })

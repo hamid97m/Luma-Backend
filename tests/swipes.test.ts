@@ -131,7 +131,7 @@ describe('POST /swipes — mutual like', () => {
     expect([m.user1_id, m.user2_id]).toEqual([me.id, target.id].sort())
     expect(res.json()).toEqual({
       matched: true,
-      match: { id: m.id, user: { id: target.id, name: 'Sara', telegramId: target.telegram_id, username: null } },
+      match: { id: m.id, user: { id: target.id, name: 'Sara' } },
     })
     // Only the OTHER user (the earlier liker, away from the app) is DM'd — the
     // active swiper already sees the match live in-app. Ali has no icebreaker →
@@ -197,7 +197,7 @@ describe('POST /swipes — mutual like', () => {
       expect(res.statusCode).toBe(200)
       const body = res.json()
       expect(body.matched).toBe(true)
-      expect(body.match.user).toEqual({ id: target.id, name: '', telegramId: 0, username: null })
+      expect(body.match.user).toEqual({ id: target.id, name: '' })
       const m = (await sql`select id from matches`)[0]
       expect(body.match.id).toBe(m.id)
       expect(seedIcebreakers).toHaveBeenCalledWith(m.id, [target.id, me.id])

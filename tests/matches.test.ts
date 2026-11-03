@@ -60,7 +60,7 @@ describe('GET /matches', () => {
     expect(row.id).toBe(m.id)
     expect(row.matchedAt).toBe('2026-01-01T00:00:00.000Z')
     expect(row.user).toEqual({
-      id: sara.id, name: 'Sara', telegramId: sara.telegram_id, username: null, age: 24, bio: 'Coffee person',
+      id: sara.id, name: 'Sara', age: 24, bio: 'Coffee person',
       icebreakerPrompt: 'My perfect Sunday', icebreakerAnswer: 'Hiking then pancakes',
       photos: ['https://img/0', 'https://img/1'], premium: false, online: false,
     })

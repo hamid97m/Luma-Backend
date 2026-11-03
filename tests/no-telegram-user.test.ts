@@ -105,7 +105,8 @@ describe('matching with a web-only user', () => {
     })
     await settle()
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toMatchObject({ matched: true, match: { user: { id: web.id, telegramId: null } } })
+    expect(res.json()).toMatchObject({ matched: true, match: { user: { id: web.id } } })
+    expect(res.json().match.user).not.toHaveProperty('telegramId')
     expect(notifyMatch).not.toHaveBeenCalled()
   })
 

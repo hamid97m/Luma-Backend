@@ -100,7 +100,7 @@ export async function swipesRoutes(app: FastifyInstance) {
     // Both users and their photos in one round trip (was two sequential reads).
     // A failure keeps the old minimal-response path rather than 500ing the match.
     type MatchUser = {
-      id: string; name: string; telegram_id: number | null; username: string | null
+      id: string; name: string; telegram_id: number | null
       allows_write_to_pm: boolean | null; locale: Locale | null
       icebreaker_prompt: string | null; icebreaker_answer: string | null
       primary_photo: string | null
@@ -108,7 +108,7 @@ export async function swipesRoutes(app: FastifyInstance) {
     let users: MatchUser[] | null = null
     try {
       users = await sql<MatchUser[]>`
-        select u.id, u.name, u.telegram_id, u.username, u.allows_write_to_pm, u.locale,
+        select u.id, u.name, u.telegram_id, u.allows_write_to_pm, u.locale,
                u.icebreaker_prompt, u.icebreaker_answer,
                (select p.url from user_photos p where p.user_id = u.id
                 order by p.position asc limit 1) as primary_photo
@@ -119,7 +119,7 @@ export async function swipesRoutes(app: FastifyInstance) {
 
     if (!users || users.length < 2) {
       // Match was created, but we can't build the response — return minimal success
-      return { matched: true, ...swipeLimit, match: { id: match.id, user: { id: targetUserId, name: '', telegramId: 0, username: null } } }
+      return { matched: true, ...swipeLimit, match: { id: match.id, user: { id: targetUserId, name: '' } } }
     }
 
     const me = users.find((u) => u.id === req.userId)!
@@ -156,7 +156,7 @@ export async function swipesRoutes(app: FastifyInstance) {
       ...swipeLimit,
       match: {
         id: match.id,
-        user: { id: them.id, name: them.name, telegramId: them.telegram_id, username: them.username },
+        user: { id: them.id, name: them.name },
       },
     }
   })

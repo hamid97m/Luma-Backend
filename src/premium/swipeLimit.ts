@@ -1,18 +1,20 @@
 import { sql } from '../db.js'
 import { isPremiumEnabled, isPremiumActive } from './service.js'
 
-// Free men and women whose preference includes women get SWIPE_LIMIT swipes
-// (likes AND passes) per 4-hour window; the window starts at their first
-// counted swipe and fully refills when it ends. Everyone else — men seeking
-// only men, women seeking only men, nonbinary users, premium members, and
-// everyone while the premium toggle is off — is unlimited.
+// Free users whose preference includes women get SWIPE_LIMIT swipes (likes AND
+// passes) per 4-hour window; the window starts at their first counted swipe and
+// fully refills when it ends. Everyone else — people seeking only men, premium
+// members, and everyone while the premium toggle is off — is unlimited.
+// The cohort is keyed on looking_for, not gender: gender is self-declared and
+// editable, so exempting nonbinary let a free man lift every limit by
+// switching gender while still seeing women.
 export const SWIPE_LIMIT = 20
 export const SWIPE_WINDOW_MS = 4 * 60 * 60 * 1000
 
 const SEEKS_WOMEN = ['women', 'both', 'everyone']
 
 export function swipeLimitApplies(gender: string | null, lookingFor: string | null): boolean {
-  if (gender !== 'man' && gender !== 'woman') return false
+  if (!gender) return false
   return SEEKS_WOMEN.includes(lookingFor ?? '')
 }
 

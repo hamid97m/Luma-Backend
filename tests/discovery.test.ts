@@ -70,7 +70,6 @@ describe('GET /discovery', () => {
       name: 'Sara',
       age: 27,
       bio: 'سلام',
-      telegramId: sara.telegram_id,
       interests: [],
       location: null,
       nearby: false,

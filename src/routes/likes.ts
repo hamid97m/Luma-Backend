@@ -71,7 +71,6 @@ export async function likesRoutes(app: FastifyInstance) {
       bio: l.bio,
       location: l.location,
       interests: l.interests,
-      telegramId: l.telegramId,
       photos: photosByUser.get(l.id) ?? [],
       likedAt: l.likedAt,
       premium: l.premium === true,

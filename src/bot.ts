@@ -12,6 +12,7 @@ import {
 import { tFor, mapTelegramLang, LOCALES, type Locale } from './i18n/index.js'
 import type { MessageButton } from './messaging/messageButton.js'
 import { parseRefCode, stashReferralClaim } from './referrals/attribution.js'
+import { parseJoinTag, recordJoinTagStart } from './joinTags/attribution.js'
 
 let _bot: Bot | null = null
 
@@ -116,6 +117,8 @@ function registerHandlers(bot: Bot): void {
     if (ctx.match === 'support') return promptSupport(ctx)
     const refCode = parseRefCode(typeof ctx.match === 'string' ? ctx.match : null)
     if (refCode && ctx.from) await stashReferralClaim(ctx.from.id, refCode)
+    const joinTag = parseJoinTag(typeof ctx.match === 'string' ? ctx.match : null)
+    if (joinTag && ctx.from) await recordJoinTagStart(ctx.from.id, joinTag)
     await clearPending(ctx)
     await sendStart(ctx)
   })

@@ -2,6 +2,7 @@ import { sql } from './db.js'
 import { getBotUsername } from './bot.js'
 import { getProfileWithPhotos } from './routes/profile.js'
 import { captureReferralAttribution } from './referrals/attribution.js'
+import { captureJoinTag } from './joinTags/attribution.js'
 import type { TelegramUser } from './types.js'
 
 export type Identity =
@@ -148,6 +149,8 @@ export async function signIn(identity: Identity): Promise<SignInResult> {
 
   if (identity.kind === 'telegram') {
     await captureReferralAttribution(created.id, identity.tgUser.id, identity.startParam ?? null)
+    // Telegram kind = Mini App and Login Widget; a Google account has no Telegram id.
+    await captureJoinTag(created.id, identity.tgUser.id)
   }
 
   return { ok: true, userId: created.id, user: await buildAuthUser({ ...created, age: 0, locale: null }) }

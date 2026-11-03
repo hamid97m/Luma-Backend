@@ -111,6 +111,21 @@ describe('POST /auth/telegram-web', () => {
     expect(google.headers['x-ratelimit-remaining']).toBe('297')
   })
 
+  it('behind the local nginx, each visitor IP gets its own sign-in bucket', async () => {
+    const payload = signWidget({ id: 778, first_name: 'Reza', auth_date: now() })
+    const post = (ip: string) =>
+      app.inject({
+        method: 'POST', url: '/auth/telegram-web', payload,
+        remoteAddress: '127.0.0.1', headers: { 'x-forwarded-for': ip },
+      })
+
+    const a = await post('203.0.113.1')
+    const b = await post('203.0.113.2')
+
+    expect(a.headers['x-ratelimit-remaining']).toBe('299')
+    expect(b.headers['x-ratelimit-remaining']).toBe('299')
+  })
+
   it('tampered field → 401 invalid_telegram_login', async () => {
     const payload = signWidget({ id: 4242, first_name: 'Sara', auth_date: now() })
 

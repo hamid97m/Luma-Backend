@@ -59,6 +59,10 @@ export function isPausedExempt(method: string, url: string): boolean {
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
+    // nginx on the same host is the only proxy: trust X-Forwarded-For from
+    // loopback only, so req.ip is the visitor (per-IP rate limits) and a
+    // direct hit on :3000 can't spoof it.
+    trustProxy: '127.0.0.1',
     logger: process.env.NODE_ENV === 'test'
       ? false
       : { level: process.env.LOG_LEVEL ?? 'warn' },

@@ -23,6 +23,7 @@ import { reportsRoutes } from './routes/reports.js'
 import { blockRoutes } from './routes/block.js'
 import { supportRoutes } from './routes/support.js'
 import { referralRoutes } from './routes/referrals.js'
+import { signupEventsRoutes } from './routes/signupEvents.js'
 import { adminRoutes } from './routes/admin/index.js'
 import { tonpaysWebhookRoutes } from './routes/tonpaysWebhook.js'
 import { mediaRoutes } from './routes/media.js'
@@ -87,6 +88,9 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(cors, {
     origin: corsOrigins.length ? corsOrigins : '*',
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+    // Cache preflights: the signup page_hidden event fires as the webview closes,
+    // when a fresh preflight may never finish.
+    maxAge: 600,
   })
 
   await app.register(rateLimit, {
@@ -120,6 +124,7 @@ export async function buildApp(): Promise<FastifyInstance> {
       req.url === '/auth/google' ||
       req.url === '/auth/dev' ||
       req.url === '/health' ||
+      req.url.split('?')[0] === '/signup-events' ||
       req.url.startsWith('/admin') ||
       req.url.startsWith(`${WEBHOOK_ROUTE_PREFIX}/`) ||
       req.url.startsWith('/payments/tonpays/') ||
@@ -188,6 +193,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(blockRoutes)
   await app.register(supportRoutes)
   await app.register(referralRoutes)
+  await app.register(signupEventsRoutes)
   await app.register(adminRoutes, { prefix: '/admin' })
   await app.register(tonpaysWebhookRoutes)
   await app.register(mediaRoutes)

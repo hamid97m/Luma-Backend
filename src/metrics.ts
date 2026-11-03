@@ -36,6 +36,18 @@ const jobDuration = new Histogram({
   registers: [registry],
 })
 
+const signupEvents = new Counter({
+  name: 'luma_signup_events_total',
+  help: 'Accepted signup-funnel events',
+  labelNames: ['name', 'step'] as const,
+  registers: [registry],
+})
+
+/** Both labels are allowlisted by the route, so cardinality stays bounded. */
+export function countSignupEvent(name: string, step: string | null): void {
+  signupEvents.inc({ name, step: step ?? '' })
+}
+
 /** Route label: the Telegram webhook path embeds a secret, so collapse it. */
 function routeLabel(url: string | undefined): string {
   if (!url) return 'unmatched'

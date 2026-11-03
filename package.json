@@ -18,11 +18,11 @@
     "test:db:up": "docker start luma-pg-test 2>/dev/null || docker run -d --name luma-pg-test -e POSTGRES_PASSWORD=luma -p 54329:5432 postgres:16-alpine"
   },
   "dependencies": {
-    "@fastify/cors": "^9.0.0",
-    "@fastify/rate-limit": "^9.0.0",
+    "@fastify/cors": "^11.4.0",
+    "@fastify/rate-limit": "^10.3.0",
     "bcryptjs": "^3.0.3",
     "dotenv": "^17.4.2",
-    "fastify": "^4.28.0",
+    "fastify": "^5.12.8",
     "google-auth-library": "^11.3.2",
     "grammy": "^1.31.0",
     "jsonwebtoken": "^9.0.3",

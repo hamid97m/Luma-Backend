@@ -196,6 +196,14 @@ async function likeTargetAndMatch(
  * records a `fake_liker_runs` row (except when disabled / already-running, which
  * return early without a run row).
  */
+/**
+ * The job catches its own errors and returns stats. A run counts as failed as a whole only when
+ * it hit errors and sent nothing; per-item errors alongside sent likes are not a job failure.
+ */
+export function fakeLikerRunFailed(result: RunStats | { skipped: string }): boolean {
+  return 'errors' in result && result.errors > 0 && result.likesSent === 0
+}
+
 export async function runFakeLikerJob(
   trigger: 'schedule' | 'manual',
   logger: JobLogger = console,

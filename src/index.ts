@@ -2,12 +2,12 @@ import 'dotenv/config'
 import { buildApp } from './server.js'
 import { mountWebhook, initWebhook, initStandbyBot } from './bot.js'
 import { isStandby } from './appMode.js'
-import { runFakeLikerJob, setNextScheduledRunAt } from './jobs/fakeLiker.js'
+import { runFakeLikerJob, setNextScheduledRunAt, fakeLikerRunFailed } from './jobs/fakeLiker.js'
 import { getLastFakeLikerRunAt } from './jobs/fakeLikerConfig.js'
 import { runPurchaseMessageJob } from './jobs/purchaseMessage.js'
 import { runTonPaysSweepJob } from './jobs/tonpaysSweep.js'
 import { runLikeRevealJob } from './jobs/likeReveal.js'
-import { trackJob, startMetricsServer } from './metrics.js'
+import { trackJob, startMetricsServer, initJobMetrics } from './metrics.js'
 import { msUntilNextTehranHour } from './likes/revealPick.js'
 import { cleanupInterruptedBroadcasts } from './messaging/broadcast.js'
 import { startChatListener } from './realtime/listener.js'
@@ -51,10 +51,18 @@ const isLive = process.env.NODE_ENV === 'production' && !isStandby()
 if (isLive) {
   // Route must be registered before app.listen(); initWebhook (below) runs after.
   mountWebhook(app)
+  initJobMetrics(['fake_liker', 'purchase_message', 'tonpays_sweep', 'like_reveal'])
 
   const runFakeLikerSafely = async () => {
     try {
-      await trackJob('fake_liker', () => runFakeLikerJob('schedule', app.log))
+      await trackJob('fake_liker', async () => {
+        const result = await runFakeLikerJob('schedule', app.log)
+        // The job swallows its own errors; surface a whole-run failure to the metrics.
+        if (fakeLikerRunFailed(result)) {
+          throw new Error(`fake liker: run failed (errors=${'errors' in result ? result.errors : 0})`)
+        }
+        return result
+      })
     } catch (err) {
       app.log.warn({ err }, 'fake liker: scheduled run failed')
     }

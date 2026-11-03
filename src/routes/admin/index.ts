@@ -13,6 +13,7 @@ import { adminModerationRoutes } from './moderation.js'
 import { adminUploadsRoutes } from './uploads.js'
 import { adminBroadcastsRoutes } from './broadcasts.js'
 import { adminReferralRoutes } from './referrals.js'
+import { adminJoinTagRoutes } from './join-tags.js'
 import { adminPhotoChecksRoutes } from './photo-checks.js'
 
 declare module 'fastify' {
@@ -53,5 +54,6 @@ export async function adminRoutes(app: FastifyInstance) {
   await app.register(adminUploadsRoutes)
   await app.register(adminBroadcastsRoutes)
   await app.register(adminReferralRoutes)
+  await app.register(adminJoinTagRoutes)
   await app.register(adminPhotoChecksRoutes)
 }

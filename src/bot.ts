@@ -1,6 +1,6 @@
 import { Bot, Context, InlineKeyboard, webhookCallback } from 'grammy'
 import { createHash } from 'crypto'
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { sql } from './db.js'
 import { WEBHOOK_ROUTE_PREFIX } from './webhookRoute.js'
 import { isStandby, standbyBotGuard } from './appMode.js'
@@ -170,10 +170,28 @@ export function mountWebhook(app: FastifyInstance): void {
   const bot = getBot()
   registerHandlers(bot)
   const handler = webhookCallback(bot, 'fastify', { secretToken: webhookSecretToken() })
+  // grammy rethrows handler errors under webhooks (bot.catch only covers
+  // polling). Unhandled, Fastify answers 500 and Telegram redelivers the same
+  // update forever (e.g. a reply to a user who blocked the bot → 403). Log it
+  // and acknowledge with 200 so one bad update can't loop.
   app.post(
     webhookPath(),
     { config: { rateLimit: false }, logLevel: 'silent' },
-    handler as never,
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        await (handler as (req: FastifyRequest, rep: FastifyReply) => Promise<unknown>)(request, reply)
+      } catch (err) {
+        const update = request.body as { update_id?: number; message?: { chat?: { id?: number } } } | undefined
+        const kind = update ? Object.keys(update).filter((k) => k !== 'update_id').join(',') : 'unknown'
+        const cause = (err as { error?: unknown })?.error ?? err
+        console.error(
+          `[bot] webhook update ${update?.update_id ?? '?'} (${kind}, chat ${update?.message?.chat?.id ?? '-'}) failed:`,
+          (cause as Error)?.message ?? cause,
+        )
+        if (!reply.sent) return reply.code(200).send('')
+      }
+      return reply
+    },
   )
 }
 

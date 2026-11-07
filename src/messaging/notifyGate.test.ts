@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { shouldNotifyOffline, OFFLINE_THRESHOLD_MS, type NotifyRecipient } from './notifyGate.js'
+import { shouldNotifyOffline, OFFLINE_THRESHOLD_MS, NOTIFY_COOLDOWN_MS, type NotifyRecipient } from './notifyGate.js'
 
 const NOW = 1_700_000_000_000
 const base: NotifyRecipient = {
@@ -25,6 +25,40 @@ describe('shouldNotifyOffline', () => {
 
   it('does NOT notify if already notified this offline stretch', () => {
     expect(shouldNotifyOffline({ ...base, notified_offline_at: new Date(NOW).toISOString() }, NOW)).toBe(false)
+  })
+
+  describe('per-gender throttle', () => {
+    const woman = { ...base, gender: 'woman' }
+    const man = { ...base, gender: 'man' }
+    const justNotified = new Date(NOW - 60_000).toISOString()
+    const notifiedLongAgo = new Date(NOW - NOTIFY_COOLDOWN_MS - 1000).toISOString()
+
+    it('woman: at most one DM per 4h while she stays offline', () => {
+      expect(shouldNotifyOffline({ ...woman, notified_offline_at: justNotified }, NOW)).toBe(false)
+      expect(shouldNotifyOffline({ ...woman, notified_offline_at: new Date(NOW - NOTIFY_COOLDOWN_MS + 1000).toISOString() }, NOW)).toBe(false)
+    })
+
+    it('woman: gets another DM once the last one is older than 4h', () => {
+      expect(shouldNotifyOffline({ ...woman, notified_offline_at: notifiedLongAgo }, NOW)).toBe(true)
+    })
+
+    it('man: no throttle — every message while offline is a DM', () => {
+      expect(shouldNotifyOffline({ ...man, notified_offline_at: justNotified }, NOW)).toBe(true)
+    })
+
+    it('man: still no DM while online', () => {
+      expect(shouldNotifyOffline({ ...man, last_active: new Date(NOW - 60_000).toISOString() }, NOW)).toBe(false)
+    })
+
+    it('nonbinary / unknown gender: throttled like a woman', () => {
+      expect(shouldNotifyOffline({ ...base, gender: 'nonbinary', notified_offline_at: justNotified }, NOW)).toBe(false)
+      expect(shouldNotifyOffline({ ...base, gender: null, notified_offline_at: justNotified }, NOW)).toBe(false)
+      expect(shouldNotifyOffline({ ...base, gender: 'nonbinary', notified_offline_at: notifiedLongAgo }, NOW)).toBe(true)
+    })
+
+    it('exposes a 4h cooldown', () => {
+      expect(NOTIFY_COOLDOWN_MS).toBe(4 * 60 * 60 * 1000)
+    })
   })
 
   it('does NOT notify if the recipient declined PM (allows_write_to_pm === false)', () => {

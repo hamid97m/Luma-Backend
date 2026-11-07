@@ -532,7 +532,7 @@ export async function runFakeLikerJob(
       }
 
       const { data: realUsers } = await attempt(sql`
-        select id, telegram_id, deleted_at, banned_at, last_active, notified_offline_at, allows_write_to_pm, locale
+        select id, telegram_id, deleted_at, banned_at, last_active, notified_offline_at, allows_write_to_pm, locale, gender
         from users where id = any(${[...realIds]}::uuid[])`)
       const realMap = new Map((realUsers ?? []).map((u: any) => [u.id, u]))
 
@@ -586,7 +586,7 @@ export async function runFakeLikerJob(
 
           // Offline-notify the real user (shared delivery logic).
           void deliverMessageNotification(
-            { id: realId, telegram_id: real.telegram_id, last_active: real.last_active, notified_offline_at: real.notified_offline_at, allows_write_to_pm: real.allows_write_to_pm, locale: realLocale },
+            { id: realId, telegram_id: real.telegram_id, last_active: real.last_active, notified_offline_at: real.notified_offline_at, allows_write_to_pm: real.allows_write_to_pm, locale: realLocale, gender: real.gender ?? null },
             fakeId,
             fake.name,
             seedGreeting,

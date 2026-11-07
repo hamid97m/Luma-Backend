@@ -6,6 +6,7 @@ export interface FakeChatUser {
   last_active: string | null
   notified_offline_at: string | null
   allows_write_to_pm: boolean | null
+  gender?: string | null
 }
 
 /**

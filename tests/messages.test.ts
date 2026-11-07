@@ -251,15 +251,34 @@ describe('POST /matches/:matchId/messages', () => {
       expect(notifyNewMessage).not.toHaveBeenCalled()
     })
 
-    it('does not notify again when the recipient was already notified during this offline stretch', async () => {
-      const stamp = STALE()
-      await setup({ last_active: STALE(), notified_offline_at: stamp })
+    it('woman: does not notify again when already notified in the last 4h of this offline stretch', async () => {
+      const stamp = STALE() // minutes ago — well inside the 4h cooldown
+      await setup({ gender: 'woman', last_active: STALE(), notified_offline_at: stamp })
       const res = await send({ body: 'hi' })
       expect(res.statusCode).toBe(200)
       await settle()
       expect(notifyNewMessage).not.toHaveBeenCalled()
       const [row] = await sql`select notified_offline_at from users where id = ${other.id}`
       expect(row.notified_offline_at).toBe(new Date(stamp).toISOString())
+    })
+
+    it('woman: notifies again once the previous DM is older than 4h', async () => {
+      const stamp = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString()
+      await setup({ gender: 'woman', last_active: STALE(), notified_offline_at: stamp })
+      const res = await send({ body: 'hi' })
+      expect(res.statusCode).toBe(200)
+      await settle()
+      expect(notifyNewMessage).toHaveBeenCalledTimes(1)
+      const [row] = await sql`select notified_offline_at from users where id = ${other.id}`
+      expect(new Date(row.notified_offline_at).getTime()).toBeGreaterThan(new Date(stamp).getTime())
+    })
+
+    it('man: is notified for every message while offline, even if just notified', async () => {
+      await setup({ gender: 'man', last_active: STALE(), notified_offline_at: STALE() })
+      const res = await send({ body: 'hi' })
+      expect(res.statusCode).toBe(200)
+      await settle()
+      expect(notifyNewMessage).toHaveBeenCalledTimes(1)
     })
   })
 })

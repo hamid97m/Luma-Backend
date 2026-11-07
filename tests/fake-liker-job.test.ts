@@ -907,9 +907,14 @@ describe('runFakeLikerJob — salam notification gating', () => {
     expect(notifyNewMessage).not.toHaveBeenCalled()
   })
 
-  it('does not notify when the user was already notified this offline stretch', async () => {
-    await runWithReal({ last_active: STALE, notified_offline_at: STALE, telegram_id: 777 })
+  it('woman: does not notify when already notified within 4h of this offline stretch', async () => {
+    await runWithReal({ gender: 'woman', looking_for: 'women', last_active: STALE, notified_offline_at: STALE, telegram_id: 777 })
     expect(notifyNewMessage).not.toHaveBeenCalled()
+  })
+
+  it('man: is notified even when already notified this offline stretch (no throttle)', async () => {
+    await runWithReal({ gender: 'man', last_active: STALE, notified_offline_at: STALE, telegram_id: 777 })
+    expect(notifyNewMessage).toHaveBeenCalledTimes(1)
   })
 })
 

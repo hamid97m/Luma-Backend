@@ -230,7 +230,7 @@ export async function messagesRoutes(app: FastifyInstance) {
     const me = match.user1_id === req.userId ? match.user1 : match.user2
 
     void deliverMessageNotification(
-      { id: other.id, telegram_id: other.telegram_id, last_active: other.last_active, notified_offline_at: other.notified_offline_at, allows_write_to_pm: other.allows_write_to_pm, locale: other.locale ?? null },
+      { id: other.id, telegram_id: other.telegram_id, last_active: other.last_active, notified_offline_at: other.notified_offline_at, allows_write_to_pm: other.allows_write_to_pm, locale: other.locale ?? null, gender: other.gender ?? null },
       req.userId,
       me.name,
       trimmed,

@@ -9,7 +9,7 @@ const MESSAGES_PAGE_SIZE = 50
 // Participant columns, flattened per side (u1_* / u2_*) and rebuilt into the
 // `user1` / `user2` objects the old embedded select returned. Built in JS (not
 // json_build_object) so timestamps keep the ISO format of the type parser.
-const USER_COLS = ['id', 'name', 'is_seed', 'telegram_id', 'last_active', 'notified_offline_at', 'allows_write_to_pm'] as const
+const USER_COLS = ['id', 'name', 'is_seed', 'telegram_id', 'last_active', 'notified_offline_at', 'allows_write_to_pm', 'gender'] as const
 
 const participantCols = (alias: 'u1' | 'u2') => sql.unsafe(
   USER_COLS.map((c) => `${alias}.${c} as ${alias}_${c}`).join(', ') +
@@ -86,6 +86,7 @@ function fakeChatUser(u: any): FakeChatUser {
     id: u?.id, name: u?.name ?? '', is_seed: !!u?.is_seed,
     telegram_id: u?.telegram_id ?? null, last_active: u?.last_active ?? null,
     notified_offline_at: u?.notified_offline_at ?? null, allows_write_to_pm: u?.allows_write_to_pm ?? null,
+    gender: u?.gender ?? null,
   }
 }
 
@@ -252,7 +253,7 @@ export async function adminChatsRoutes(app: FastifyInstance) {
       {
         id: picked.recipient.id, telegram_id: picked.recipient.telegram_id,
         last_active: picked.recipient.last_active, notified_offline_at: picked.recipient.notified_offline_at,
-        allows_write_to_pm: picked.recipient.allows_write_to_pm,
+        allows_write_to_pm: picked.recipient.allows_write_to_pm, gender: picked.recipient.gender,
       },
       picked.fake.id, picked.fake.name, trimmed, matchId, req.log,
     )

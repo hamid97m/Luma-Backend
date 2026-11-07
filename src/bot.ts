@@ -466,10 +466,18 @@ export async function notifyNewMessage(
     // Telegram caps photo captions at 1024 chars; a long message body would
     // otherwise make sendPhoto fail. Truncate — this is just a notification nudge.
     const photoCaption = caption.length > 1024 ? `${caption.slice(0, 1023)}…` : caption
-    await bot.api.sendPhoto(toTelegramId, senderPhoto, { caption: photoCaption, reply_markup: keyboard })
-  } else {
-    await bot.api.sendMessage(toTelegramId, caption, { reply_markup: keyboard })
+    try {
+      await bot.api.sendPhoto(toTelegramId, senderPhoto, { caption: photoCaption, reply_markup: keyboard })
+      return
+    } catch (err) {
+      // 403 = the user blocked the bot; a text DM would fail the same way, so
+      // surface it. Anything else (Telegram couldn't fetch the photo URL, bad
+      // file, …) must not cost the user the notification: fall back to text.
+      if ((err as { error_code?: number })?.error_code === 403) throw err
+      console.warn('[bot] sendPhoto failed, sending text notification instead:', (err as Error)?.message ?? err)
+    }
   }
+  await bot.api.sendMessage(toTelegramId, caption, { reply_markup: keyboard })
 }
 
 /** DM a recipient that someone sent them a gift as an intro. */

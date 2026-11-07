@@ -108,7 +108,7 @@ describe('askDeepSeekPhoto', () => {
 
 const MAIN_BYTES = Buffer.from('main-photo-bytes')
 
-/** A checkable man (unless overridden) with one main photo, its file on disk
+/** A checkable user (unless overridden) with one main photo, its file on disk
  *  unless `withFile` is false. */
 async function setup(user: Record<string, unknown> = {}, withFile = true) {
   const u = await createUser({ ...MAN, ...user })
@@ -136,11 +136,9 @@ describe('checkMainPhoto', () => {
     fetchMock.mockReset()
   })
 
-  it('skips women, unfinished sign-ups, seeds and paused users without calling DeepSeek', async () => {
+  it('skips unfinished sign-ups, seeds and paused users without calling DeepSeek', async () => {
     const skipped = [
-      { gender: 'woman', looking_for: 'men' },
-      { gender: 'nonbinary' },
-      // every account is created as 'man' with age 0 before onboarding saves
+      // every account is created with age 0 before onboarding saves the profile
       { age: 0 },
       { is_seed: true },
       { paused_at: '2026-01-01T00:00:00Z' },
@@ -156,7 +154,16 @@ describe('checkMainPhoto', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('skips a man without photos', async () => {
+  it('checks women and non-binary users too', async () => {
+    for (const [i, user] of [{ gender: 'woman', looking_for: 'men' }, { gender: 'nonbinary' }].entries()) {
+      const { u } = await setup({ telegram_id: 300 + i, ...user })
+      fetchMock.mockImplementationOnce(async () => deepSeekReply('{"approved":true,"reason":null}'))
+      expect(await checkMainPhoto(u.id), JSON.stringify(user)).toEqual({ approved: true, reason: null })
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('skips a user without photos', async () => {
     const u = await createUser(MAN)
     expect(await checkMainPhoto(u.id)).toBeNull()
     expect(fetchMock).not.toHaveBeenCalled()
@@ -247,7 +254,7 @@ describe('checkMainPhoto', () => {
   it('does not pause when the main photo changed while DeepSeek was answering', async () => {
     const { u, main } = await setup()
     fetchMock.mockImplementationOnce(async () => {
-      // He swaps his main photo mid-review.
+      // They swap their main photo mid-review.
       await sql`update user_photos set position = 1 where id = ${main.id}`
       await createPhoto(u.id, 0)
       return deepSeekReply('{"approved":false,"reason":"no_face"}')
@@ -258,10 +265,10 @@ describe('checkMainPhoto', () => {
     expect(await pausedAt(u.id)).toBeNull()
   })
 
-  it('does not pause when he switched gender while DeepSeek was answering', async () => {
+  it('does not pause when the account was deleted while DeepSeek was answering', async () => {
     const { u } = await setup()
     fetchMock.mockImplementationOnce(async () => {
-      await sql`update users set gender = 'woman' where id = ${u.id}`
+      await sql`update users set deleted_at = now() where id = ${u.id}`
       return deepSeekReply('{"approved":false,"reason":"no_face"}')
     })
 

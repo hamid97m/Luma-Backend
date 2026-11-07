@@ -13,7 +13,7 @@ const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions'
 const DEEPSEEK_MODEL = 'deepseek-flash'
 const TIMEOUT_MS = 30_000
 // Hard spend ceiling per process per UTC day (~$0.0003 per call). Over the cap
-// the check is skipped uncached; the man's next photo change retries it.
+// the check is skipped uncached; the user's next photo change retries it.
 const DEFAULT_DAILY_LIMIT = 1000
 
 export const REJECT_REASONS = ['no_face', 'not_real_person', 'celebrity_or_stock', 'nudity', 'contact_or_ad'] as const
@@ -38,13 +38,13 @@ function takeDailySlot(userId: string): boolean {
 // Photo ids with a DeepSeek call in flight; repeat triggers wait on it.
 const inFlight = new Map<string, Promise<PhotoVerdict>>()
 
-const SYSTEM_PROMPT = `You review the main profile photo of a man on a dating app. Other users see this photo first, so it must show the real user.
+const SYSTEM_PROMPT = `You review the main profile photo of a user on a dating app. Other users see this photo first, so it must show the real user.
 Reply with a JSON object only, exactly: {"approved": boolean, "reason": string | null}
 Reject (approved false) only when the photo clearly breaks one of these rules, with reason set to the rule's code:
 - "no_face": no clearly visible human face — back of the head, too far away, face hidden by a mask, emoji or sticker, or too dark or blurry to see the face.
 - "not_real_person": not a real photo of a person — cartoon, drawing, anime, AI-generated art, logo, meme, landscape, object, animal or a screenshot.
 - "celebrity_or_stock": a recognizable celebrity, athlete or public figure, or a professional stock, model or advertising photo.
-- "nudity": nudity or sexual content. Being shirtless at a beach or gym is fine; exposed genitals, underwear-only shots or sexual poses are not.
+- "nudity": nudity or sexual content. Swimwear at a beach or pool and gym clothes are fine; exposed genitals or nipples, underwear-only shots or sexual poses are not.
 - "contact_or_ad": a visible phone number, social-media handle or ID, URL, QR code, or advertising text.
 Sunglasses, hats, filters, selfies and casual or low-quality photos are fine. If you are unsure, approve.
 When approved, reason is null.`
@@ -137,19 +137,17 @@ async function mainPhoto(userId: string): Promise<{ id: string; url: string } | 
   return data ?? null
 }
 
-async function isCheckableMan(userId: string): Promise<boolean> {
+async function isCheckableUser(userId: string): Promise<boolean> {
   let user
   try {
     ;[user] = await sql`
-      select gender, age, is_seed, paused_at, banned_at, deleted_at from users where id = ${userId}`
+      select age, is_seed, paused_at, banned_at, deleted_at from users where id = ${userId}`
   } catch (error) {
     throw new Error(`photo_check_user_failed: ${(error as Error).message}`)
   }
-  // New accounts are created as gender 'man' with age 0; the real gender only
-  // lands with the onboarding profile save.
-  return Boolean(
-    user && user.gender === 'man' && user.age > 0 && !user.is_seed && !user.paused_at && !user.banned_at && !user.deleted_at,
-  )
+  // New accounts are created with age 0; the real profile only lands with the
+  // onboarding profile save, so age 0 means sign-up is unfinished.
+  return Boolean(user && user.age > 0 && !user.is_seed && !user.paused_at && !user.banned_at && !user.deleted_at)
 }
 
 async function review(userId: string, photo: { id: string; url: string }): Promise<PhotoVerdict> {
@@ -184,12 +182,13 @@ function reviewOnce(userId: string, photo: { id: string; url: string }): Promise
 }
 
 /**
- * AI-reviews a man's main (position 0) photo once per photo, and pauses him
- * for photo review when it is rejected. Anyone else, and approved photos, are
- * skipped. Returns the verdict, or null when nothing was checked.
+ * AI-reviews a user's main (position 0) photo once per photo, and pauses them
+ * for photo review when it is rejected. Seed, paused, banned, deleted and
+ * unfinished accounts, and approved photos, are skipped. Returns the verdict,
+ * or null when nothing was checked.
  */
 export async function checkMainPhoto(userId: string): Promise<PhotoVerdict | null> {
-  if (!(await isCheckableMan(userId))) return null
+  if (!(await isCheckableUser(userId))) return null
 
   const photo = await mainPhoto(userId)
   if (!photo) return null
@@ -207,9 +206,9 @@ export async function checkMainPhoto(userId: string): Promise<PhotoVerdict | nul
   // because the photo briefly stopped being main.
   const verdict: PhotoVerdict = done ? { approved: false, reason: done.reason } : await reviewOnce(userId, photo)
 
-  // The call takes seconds; if he swapped his main photo or changed his
-  // profile meanwhile, this verdict must not pause him.
-  if (!verdict.approved && (await mainPhoto(userId))?.id === photo.id && (await isCheckableMan(userId))) {
+  // The call takes seconds; if they swapped their main photo or the account
+  // changed state meanwhile, this verdict must not pause them.
+  if (!verdict.approved && (await mainPhoto(userId))?.id === photo.id && (await isCheckableUser(userId))) {
     await pauseForPhotoReview(userId)
   }
   return verdict

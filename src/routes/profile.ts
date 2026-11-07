@@ -141,8 +141,9 @@ export async function profileRoutes(app: FastifyInstance) {
     if (!user) return reply.status(500).send({ error: 'update_failed' })
 
     if ('location' in updates) scheduleUserGeo(req.userId, user.location, req.log)
-    // Onboarding uploads the first photo before gender is saved.
-    if ('gender' in updates) scheduleMainPhotoCheck(req.userId, req.log)
+    // Onboarding uploads the first photo before the profile (age) is saved,
+    // and the check skips accounts whose sign-up is unfinished.
+    if ('age' in updates || 'gender' in updates) scheduleMainPhotoCheck(req.userId, req.log)
 
     const photos = await listPhotos(req.userId)
 

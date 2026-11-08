@@ -61,8 +61,19 @@ export async function initPush(): Promise<void> {
   }
 }
 
+/** Credential problem (key revoked/broken, token exchange rejected) as opposed
+ *  to a network error talking to FCM. Treated like a 401/403: no retry. */
+export class PushAuthError extends Error {}
+
 async function defaultTransport(body: object): Promise<{ status: number; json: any }> {
-  const client = await authClient!.getClient()
+  let client
+  try {
+    client = await authClient!.getClient()
+    const token = await client.getAccessToken()
+    if (!token?.token) throw new Error('no access token')
+  } catch (err) {
+    throw new PushAuthError((err as Error).message)
+  }
   const res = await client.request({
     url: `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`,
     method: 'POST',
@@ -113,6 +124,10 @@ async function sendOne(token: string, p: PushPayload): Promise<Outcome> {
       }
       return classify(status, json)
     } catch (err) {
+      if (err instanceof PushAuthError) {
+        console.error('[push] credential error:', err.message)
+        return 'config'
+      }
       console.error('[push] transport error:', (err as Error).message)
       if (attempt === 0) {
         await sleep(RETRY_DELAY_MS)

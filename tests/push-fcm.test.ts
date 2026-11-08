@@ -5,7 +5,7 @@ import path from 'node:path'
 import { generateKeyPairSync } from 'node:crypto'
 import { resetDb, createUser, sql } from './helpers/db.js'
 import {
-  initPush, isPushConfigured, sendPushToTokens, sendPushToUser, __setPushTransportForTests,
+  initPush, isPushConfigured, sendPushToTokens, sendPushToUser, __setPushTransportForTests, PushAuthError,
   type PushPayload,
 } from '../src/push/fcm.js'
 import { registry } from '../src/metrics.js'
@@ -142,6 +142,24 @@ describe('sendPushToTokens', () => {
     const after = await registry.getSingleMetricAsString('luma_push_config_errors_total')
     expect(after).not.toBe(before)
     expect(after).toMatch(/luma_push_config_errors_total \d+/)
+  })
+
+  it('a credential error from token acquisition stops the batch without retry', async () => {
+    let calls = 0
+    __setPushTransportForTests(async () => { calls++; throw new PushAuthError('invalid_grant') })
+    const tokens = Array.from({ length: 30 }, (_, i) => `a${i}`)
+    for (const t of tokens) await addToken(t)
+    const count = async () => Number(
+      (await registry.getSingleMetricAsString('luma_push_config_errors_total')).match(/luma_push_config_errors_total (\d+)/)?.[1] ?? 0)
+    const before = await count()
+    const r = await sendPushToTokens(tokens, payload)
+    expect(await count()).toBe(before + 1)
+    expect(calls).toBeLessThanOrEqual(10)
+    expect(r.ok).toEqual([])
+    expect(r.dead).toEqual([])
+    expect([...r.failed].sort()).toEqual([...tokens].sort())
+    const kept = await sql`select count(*)::int as n from user_devices where push_token is not null`
+    expect(kept[0].n).toBe(30)
   })
 
   it('does nothing in standby', async () => {

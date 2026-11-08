@@ -1,6 +1,7 @@
 import http from 'node:http'
 import type { FastifyBaseLogger, FastifyInstance } from 'fastify'
 import { WEBHOOK_ROUTE_PREFIX } from './webhookRoute.js'
+import type { PushType } from './push/fcm.js'
 import { Registry, Histogram, Gauge, Counter, collectDefaultMetrics } from 'prom-client'
 
 export const registry = new Registry()
@@ -135,7 +136,7 @@ const pushSent = new Counter({
 })
 
 /** `type` is the PushType union, so cardinality stays bounded. */
-export function countPushSent(type: string, result: 'ok' | 'dead' | 'failed'): void {
+export function countPushSent(type: PushType, result: 'ok' | 'dead' | 'failed'): void {
   pushSent.inc({ type, result })
 }
 

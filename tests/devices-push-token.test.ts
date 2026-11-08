@@ -47,12 +47,20 @@ describe('push token endpoints', () => {
 
   it('PUT with empty, oversized or non-string token is 400 invalid_token', async () => {
     const u = await createUser({ telegram_id: null, email: 'a@b.co' })
-    for (const t of ['', 'x'.repeat(4097), 123, undefined]) {
+    for (const t of ['', 'x'.repeat(1025), 123, undefined]) {
       const res = await put(u.id, t)
       expect(res.statusCode).toBe(400)
       expect(res.json()).toEqual({ error: 'invalid_token' })
     }
-    expect((await put(u.id, 'x'.repeat(4096))).statusCode).toBe(204)
+    expect((await put(u.id, 'x'.repeat(1024))).statusCode).toBe(204)
+  })
+
+  it('PUT without X-Client-Version keeps the stored app version', async () => {
+    const u = await createUser({ telegram_id: null, email: 'a@b.co' })
+    expect((await put(u.id, 'T1')).statusCode).toBe(204)
+    expect((await put(u.id, 'T2', { 'x-device-id': 'dev-1', 'x-client-platform': 'android' })).statusCode).toBe(204)
+    const [row] = await sql`select app_version, push_token from user_devices where user_id = ${u.id}`
+    expect(row).toEqual({ app_version: '1.2.3', push_token: 'T2' })
   })
 
   it('moves a token between users on the same device', async () => {

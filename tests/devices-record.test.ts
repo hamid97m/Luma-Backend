@@ -8,7 +8,7 @@ import { verifyInitData } from '../src/auth.js'
 import { verifyGoogleIdToken } from '../src/googleAuth.js'
 import { signSessionToken } from '../src/session.js'
 import { parseClientInfo } from '../src/devices/clientInfo.js'
-import { resetDeviceThrottle } from '../src/devices/record.js'
+import { resetDeviceThrottle, upsertDevice } from '../src/devices/record.js'
 import { resetDb, createUser, sql } from './helpers/db.js'
 
 const HEADERS = {
@@ -79,6 +79,18 @@ describe('device recording', () => {
       await new Promise((r) => setTimeout(r, 20))
     }
     throw new Error('last_seen_at was not refreshed after throttle reset')
+  })
+
+  it('an upsert without app version / user agent keeps the stored values', async () => {
+    const u = await createUser({ telegram_id: null, email: 'a@b.co' })
+    const base = { deviceId: 'dev-1', platform: 'android', deviceModel: null, os: null } as const
+    await upsertDevice(u.id, { ...base, appVersion: '1.2.3', userAgent: 'LumaAndroid/1.2.3' } as any)
+    await upsertDevice(u.id, { ...base, appVersion: null, userAgent: null } as any)
+    const [row] = await sql`select app_version, user_agent from user_devices where user_id = ${u.id}`
+    expect(row).toEqual({ app_version: '1.2.3', user_agent: 'LumaAndroid/1.2.3' })
+    await upsertDevice(u.id, { ...base, appVersion: '1.3.0', userAgent: 'LumaAndroid/1.3.0' } as any)
+    const [next] = await sql`select app_version, user_agent from user_devices where user_id = ${u.id}`
+    expect(next).toEqual({ app_version: '1.3.0', user_agent: 'LumaAndroid/1.3.0' })
   })
 
   it('POST /auth/google records the device', async () => {

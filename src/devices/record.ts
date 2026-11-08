@@ -10,10 +10,10 @@ export async function upsertDevice(userId: string, info: ClientInfo): Promise<vo
     insert into user_devices (user_id, device_id, platform, app_version, device_model, os, user_agent)
     values (${userId}, ${info.deviceId}, ${info.platform}, ${info.appVersion}, ${info.deviceModel}, ${info.os}, ${info.userAgent})
     on conflict (user_id, device_id) do update set
-      platform = excluded.platform, app_version = excluded.app_version,
+      platform = excluded.platform, app_version = coalesce(excluded.app_version, user_devices.app_version),
       device_model = coalesce(excluded.device_model, user_devices.device_model),
       os = coalesce(excluded.os, user_devices.os),
-      user_agent = excluded.user_agent, last_seen_at = now()`
+      user_agent = coalesce(excluded.user_agent, user_devices.user_agent), last_seen_at = now()`
 }
 
 /** Fire-and-forget, at most one upsert per user+device per 5 minutes. Never throws. */

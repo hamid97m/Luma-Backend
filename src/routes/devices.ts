@@ -2,7 +2,7 @@ import { FastifyInstance } from 'fastify'
 import { parseClientInfo } from '../devices/clientInfo.js'
 import { setPushToken, clearPushToken } from '../devices/pushToken.js'
 
-const MAX_TOKEN = 4096
+const MAX_TOKEN = 1024 // btree index row limit; real FCM tokens are ~160 chars
 
 export async function devicesRoutes(app: FastifyInstance) {
   const authKind = (req: { headers: { authorization?: string } }) =>

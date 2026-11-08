@@ -21,6 +21,7 @@ import { giftsRoutes } from './routes/gifts.js'
 import { premiumRoutes } from './routes/premium.js'
 import { reportsRoutes } from './routes/reports.js'
 import { blockRoutes } from './routes/block.js'
+import { devicesRoutes } from './routes/devices.js'
 import { supportRoutes } from './routes/support.js'
 import { referralRoutes } from './routes/referrals.js'
 import { signupEventsRoutes } from './routes/signupEvents.js'
@@ -197,6 +198,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(premiumRoutes)
   await app.register(reportsRoutes)
   await app.register(blockRoutes)
+  await app.register(devicesRoutes)
   await app.register(supportRoutes)
   await app.register(referralRoutes)
   await app.register(signupEventsRoutes)

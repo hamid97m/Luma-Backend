@@ -47,7 +47,7 @@ function toLiker(r: LikerRow): IncomingLiker {
 
 /**
  * Like-swipes aimed at `userId` whose swiper still qualifies as an incoming liker:
- * not deleted/banned/paused, not already swiped by me (either direction), not
+ * not deleted/banned/paused (nor a wiped, re-opened deleted account), not already swiped by me (either direction), not
  * blocked either way, not a matched partner (they belong in Matches, not Likes).
  * `swiperId` narrows to one pair.
  */
@@ -61,6 +61,9 @@ function likerQuery(userId: string, swiperId: string | null, limit: number) {
       and s.direction = 'like'
       ${swiperId !== null ? sql`and s.swiper_id = ${swiperId}` : sql``}
       and u.deleted_at is null and u.banned_at is null and u.paused_at is null
+      -- A deleted account that reopens the app gets deleted_at cleared but keeps
+      -- its wiped profile (blank name, age 0) — still gone as far as Likes goes.
+      and u.age > 0 and btrim(u.name) <> ''
       and not exists (
         select 1 from swipes mine where mine.swiper_id = ${userId} and mine.swiped_id = s.swiper_id)
       and not exists (

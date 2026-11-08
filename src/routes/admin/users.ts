@@ -1,9 +1,12 @@
 import { FastifyInstance } from 'fastify'
 import { sql, isUuid } from '../../db.js'
 import { sendBroadcastMessage, forwardBroadcastMessage } from '../../bot.js'
-import { notifyUserPaused } from '../../notify/userNotify.js'
+import { notifyUserPaused, notifyUserText } from '../../notify/userNotify.js'
+import { sendPushToUser, isPushConfigured } from '../../push/fcm.js'
+import { appLink } from '../../push/links.js'
+import { isStandby } from '../../appMode.js'
 import { deleteAllPhotosForUser } from '../../photos/deleteAllPhotosForUser.js'
-import { validateButton } from '../../messaging/messageButton.js'
+import { validateButton, type MessageButton } from '../../messaging/messageButton.js'
 import { parseChannelMessageLink } from '../../messaging/channelLink.js'
 import { scheduleUserGeo } from '../../geo/resolveCity.js'
 import { isLocale, type Locale } from '../../i18n/index.js'
@@ -188,7 +191,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     if (!user) return reply.status(404).send({ error: 'user_not_found' })
 
     try {
-      const [photos, [counts], matchRows] = await Promise.all([
+      const [photos, [counts], matchRows, deviceRows] = await Promise.all([
         sql<{ url: string }[]>`select url, position from user_photos where user_id = ${id} order by position asc`,
         sql<{ swipes_given: number; likes_received: number; messages_sent: number }[]>`
           select
@@ -203,7 +206,23 @@ export async function adminUsersRoutes(app: FastifyInstance) {
           left join users o on o.id = case when m.user1_id = ${id} then m.user2_id else m.user1_id end
           where m.user1_id = ${id} or m.user2_id = ${id}
           order by m.created_at desc`,
+        sql<any[]>`
+          select device_id, platform, app_version, device_model, os, user_agent,
+                 push_token is not null as has_push, push_token_at, first_seen_at, last_seen_at
+          from user_devices where user_id = ${id} order by last_seen_at desc limit 50`,
       ])
+      const devices = deviceRows.map((d) => ({
+        deviceId: d.device_id,
+        platform: d.platform,
+        appVersion: d.app_version ?? null,
+        deviceModel: d.device_model ?? null,
+        os: d.os ?? null,
+        userAgent: d.user_agent ?? null,
+        hasPush: d.has_push,
+        pushTokenAt: d.push_token_at ?? null,
+        firstSeenAt: d.first_seen_at,
+        lastSeenAt: d.last_seen_at,
+      }))
       const swipesGiven = counts.swipes_given
       const likesReceived = counts.likes_received
       const messagesSent = counts.messages_sent
@@ -230,6 +249,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
         },
         counts: { swipesGiven, likesReceived, matches: matches.length, messagesSent },
         matches,
+        devices,
       }
     } catch (err) {
       req.log.error({ err }, 'user detail fetch failed')
@@ -432,34 +452,38 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     return setPaused(id, null, reply)
   })
 
-  // Send a one-off bot DM to a single user (admin override: reaches opted-out
-  // and paused/banned users; only seed/fake users with no real Telegram chat
-  // are rejected).
+  // Send a one-off message to a single user. Text goes push-first (bot DM
+  // fallback); forward is bot-only. Admin override: reaches opted-out and
+  // paused/banned users; seed/fake users with no real Telegram chat and no push
+  // token are rejected.
   app.post('/users/:id/message', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const body = req.body as { kind?: string; text?: string; link?: string; button?: unknown }
+    const body = req.body as { kind?: string; text?: string; title?: string; link?: string; button?: unknown }
     const isForward = body.kind === 'forward'
 
-    // Validate the payload (per kind) and build the per-user delivery closure
-    // before we touch the DB, so a bad request never does a pointless lookup.
-    let deliver: (telegramId: number) => Promise<void>
+    // Validate the payload (per kind) before we touch the DB, so a bad request
+    // never does a pointless lookup.
+    let forwardTo: { chatId: string | number; messageId: number } | null = null
+    let text = ''
+    let button: MessageButton | undefined
     if (isForward) {
-      const parsed = parseChannelMessageLink(body.link ?? '')
-      if (!parsed) return reply.status(400).send({ error: 'invalid_link' })
-      deliver = (telegramId) => forwardBroadcastMessage(telegramId, parsed.chatId, parsed.messageId)
+      forwardTo = parseChannelMessageLink(body.link ?? '')
+      if (!forwardTo) return reply.status(400).send({ error: 'invalid_link' })
     } else {
-      const trimmed = (body.text ?? '').trim()
-      if (!trimmed) return reply.status(400).send({ error: 'empty_message' })
-      if (trimmed.length > 4096) return reply.status(400).send({ error: 'message_too_long' })
+      text = (body.text ?? '').trim()
+      if (!text) return reply.status(400).send({ error: 'empty_message' })
+      if (text.length > 4096) return reply.status(400).send({ error: 'message_too_long' })
       const btn = validateButton(body.button)
       if (!btn.ok) return reply.status(400).send({ error: btn.error })
-      deliver = (telegramId) => sendBroadcastMessage(telegramId, trimmed, btn.button)
+      button = btn.button
     }
+    const title = typeof body.title === 'string' ? body.title.trim().slice(0, 100) : ''
 
-    let user: { telegram_id: number | null; is_seed: boolean } | undefined
+    let user: { id: string; telegram_id: number | null; is_seed: boolean; locale: string | null } | undefined
     try {
       ;[user] = isUuid(id)
-        ? await sql<{ telegram_id: number | null; is_seed: boolean }[]>`select telegram_id, is_seed from users where id = ${id}`
+        ? await sql<{ id: string; telegram_id: number | null; is_seed: boolean; locale: string | null }[]>`
+            select id, telegram_id, is_seed, locale from users where id = ${id}`
         : []
     } catch (err) {
       req.log.error({ err }, 'user lookup failed')
@@ -468,12 +492,26 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     if (!user) return reply.status(404).send({ error: 'user_not_found' })
     // Fakes (negative) and website-only users (null telegram_id) can't get bot DMs.
     const telegramId = user.telegram_id
-    if (user.is_seed || telegramId === null || telegramId <= 0) {
-      return reply.status(400).send({ error: 'not_messageable' })
-    }
+    const telegramOk = !user.is_seed && telegramId !== null && telegramId > 0
 
     try {
-      await deliver(telegramId)
+      if (forwardTo) {
+        if (!telegramOk) return reply.status(400).send({ error: 'not_messageable' })
+        await forwardBroadcastMessage(telegramId as number, forwardTo.chatId, forwardTo.messageId)
+        return { ok: true }
+      }
+      let hasToken = false
+      if (isPushConfigured() && !isStandby()) {
+        const rows = await sql`select 1 from user_devices where user_id = ${user.id} and push_token is not null limit 1`
+        hasToken = rows.length > 0
+      }
+      if (!telegramOk && !hasToken) return reply.status(400).send({ error: 'not_messageable' })
+      // allows_write_to_pm null: the admin override ignores the user's DM opt-out.
+      const via = await notifyUserText(
+        { id: user.id, telegram_id: telegramOk ? telegramId : null, allows_write_to_pm: null, locale: user.locale },
+        { type: 'admin_message', title, text, button },
+      )
+      if (via === 'none') return reply.status(400).send({ error: 'not_messageable' })
       return { ok: true }
     } catch (err: any) {
       // 403 = the user has blocked the bot. Surface it; leave allows_write_to_pm as-is.
@@ -481,6 +519,40 @@ export async function adminUsersRoutes(app: FastifyInstance) {
         return reply.status(409).send({ error: 'user_blocked_bot' })
       }
       req.log.error({ err }, 'admin user message send failed')
+      return reply.status(502).send({ error: 'send_failed' })
+    }
+  })
+
+  // Test push to a single user's registered devices (Android dev testing).
+  app.post('/users/:id/push', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const b = (req.body ?? {}) as { title?: unknown; body?: unknown }
+    const title = typeof b.title === 'string' ? b.title.trim() : ''
+    const text = typeof b.body === 'string' ? b.body.trim() : ''
+    if (!title || title.length > 100 || !text || text.length > 500) {
+      return reply.status(400).send({ error: 'invalid_push' })
+    }
+    if (isStandby()) return reply.status(503).send({ error: 'standby' })
+    if (!isPushConfigured()) return reply.status(503).send({ error: 'push_not_configured' })
+
+    let rows: { id: string; has_token: boolean }[] = []
+    try {
+      rows = isUuid(id)
+        ? await sql<{ id: string; has_token: boolean }[]>`
+            select u.id, exists (select 1 from user_devices d where d.user_id = u.id and d.push_token is not null) as has_token
+            from users u where u.id = ${id}`
+        : []
+    } catch (err) {
+      req.log.error({ err }, 'user lookup failed')
+      return reply.status(500).send({ error: 'user_fetch_failed' })
+    }
+    if (!rows[0]) return reply.status(404).send({ error: 'user_not_found' })
+    if (!rows[0].has_token) return reply.status(409).send({ error: 'no_push_device' })
+    try {
+      const r = await sendPushToUser(id, { type: 'test', title, body: text, link: appLink() })
+      return { sent: r.sent, dead: r.dead, failed: r.failed }
+    } catch (err) {
+      req.log.error({ err }, 'admin test push failed')
       return reply.status(502).send({ error: 'send_failed' })
     }
   })

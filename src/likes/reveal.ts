@@ -1,5 +1,5 @@
 import { sql } from '../db.js'
-import { notifyNewLike } from '../bot.js'
+import { notifyUserLike } from '../notify/userNotify.js'
 import { isEligibleRevealLiker, pickRevealCandidate, tehranDate, type RevealCandidate } from './revealPick.js'
 
 export type RevealResult = { applies: false } | { applies: true; swiperId: string | null }
@@ -9,7 +9,7 @@ type Viewer = {
   gender: string
   is_seed: boolean | null
   geo_city: string | null
-  telegram_id: number
+  telegram_id: number | null
   allows_write_to_pm: boolean | null
   locale: string | null
 }
@@ -185,19 +185,20 @@ export async function ensureDailyReveal(
     return { applies: true, swiperId: raced?.swiper_id ?? null }
   }
 
-  if (viewer.telegram_id > 0 && viewer.allows_write_to_pm !== false) {
-    const notify = (async () => {
-      try {
-        await notifyNewLike(viewer.telegram_id, names.get(picked.id) ?? '', (viewer.locale as 'fa' | 'en' | 'ar' | null) ?? null)
-        await sql`
-          update like_reveals set notified_at = ${new Date().toISOString()}
-          where user_id = ${userId} and revealed_on = ${today}`
-      } catch (err) {
-        console.error(err)
-      }
-    })()
-    if (waitForNotify) await notify
-  }
+  // Push first, else a bot DM when Telegram allows it. notified_at is stamped
+  // only when one of them actually went out.
+  const notify = (async () => {
+    try {
+      const sent = await notifyUserLike(viewer, names.get(picked.id) ?? '', 'like_reveal')
+      if (sent === 'none') return
+      await sql`
+        update like_reveals set notified_at = ${new Date().toISOString()}
+        where user_id = ${userId} and revealed_on = ${today}`
+    } catch (err) {
+      console.error(err)
+    }
+  })()
+  if (waitForNotify) await notify
   return { applies: true, swiperId: picked.id }
 }
 

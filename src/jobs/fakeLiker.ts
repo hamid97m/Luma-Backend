@@ -1,5 +1,5 @@
 import { sql } from '../db.js'
-import { notifyMatch, notifyNewLike } from '../bot.js'
+import { notifyUserMatch, notifyUserLike } from '../notify/userNotify.js'
 import { getFakeLikerConfig } from './fakeLikerConfig.js'
 import { deliverMessageNotification } from '../messaging/deliver.js'
 import { effectiveLocale, tFor, type Locale } from '../i18n/index.js'
@@ -154,8 +154,8 @@ async function likeTargetAndMatch(
     return
   }
   if (!reverse) {
-    if (target.gender !== 'woman' && (target.telegram_id ?? 0) > 0 && target.allows_write_to_pm !== false) {
-      notifyNewLike(target.telegram_id as number, fake.name, target.locale ?? null)
+    if (target.gender !== 'woman') {
+      notifyUserLike({ ...target, locale: target.locale ?? null }, fake.name, 'like')
         .catch((err) => logger.warn({ err }, 'fake liker: new-like notify failed'))
     }
     return
@@ -176,18 +176,13 @@ async function likeTargetAndMatch(
 
   await seedIcebreakers(match.id, [fake.id, target.id])
 
-  // Notify the real user only (fakes have a negative sentinel telegram_id).
-  if ((target.telegram_id ?? 0) > 0 && target.allows_write_to_pm !== false) {
-    notifyMatch([{
-      telegramId: target.telegram_id as number,
-      matchName: fake.name,
-      matchPhoto: fakePhoto(fake.id),
-      locale: target.locale ?? null,
-      matchId: match.id,
-      question: ownerQuestion(fake, target.locale),
-    }])
-      .catch((err) => logger.warn({ err }, 'fake liker: match notify failed'))
-  }
+  // Notify the real user (push first, else bot DM; a fake target gets nothing).
+  void notifyUserMatch({ ...target, locale: target.locale ?? null }, {
+    matchName: fake.name,
+    matchPhoto: fakePhoto(fake.id),
+    matchId: match.id,
+    question: ownerQuestion(fake, target.locale),
+  })
 }
 
 /**

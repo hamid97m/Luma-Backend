@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { sql, isUuid } from '../db.js'
-import { notifyMatch, notifyNewLike } from '../bot.js'
+import { notifyUserMatch, notifyUserLike } from '../notify/userNotify.js'
 import { checkAndCountSwipe } from '../premium/swipeLimit.js'
 import { seedIcebreakers } from '../icebreakers/seed.js'
 import { ownerQuestion } from '../icebreakers/question.js'
@@ -74,8 +74,9 @@ export async function swipesRoutes(app: FastifyInstance) {
         from users where id = any(${[req.userId, targetUserId]}::uuid[])`
       const me = pair.find((u: { id: string }) => u.id === req.userId)
       const target = pair.find((u: { id: string }) => u.id === targetUserId)
-      if (me && target && target.gender !== 'woman' && (target.telegram_id ?? 0) > 0 && target.allows_write_to_pm !== false) {
-        notifyNewLike(target.telegram_id as number, me.name, target.locale ?? null).catch(console.error)
+      // Push first, bot DM fallback (fakes / no-Telegram users without a token get nothing).
+      if (me && target && target.gender !== 'woman') {
+        notifyUserLike(target, me.name, 'like').catch(console.error)
       }
       return { matched: false, ...swipeLimit }
     }
@@ -127,29 +128,19 @@ export async function swipesRoutes(app: FastifyInstance) {
 
     const primaryPhoto = (userId: string) => users!.find((u) => u.id === userId)?.primary_photo ?? null
 
-    // Only DM the OTHER user (the earlier liker, who's away from the app). The
-    // current swiper already sees the match live in-app (match popup / chat
+    // Only notify the OTHER user (the earlier liker, who's away from the app).
+    // The current swiper already sees the match live in-app (match popup / chat
     // opens), so a "someone liked you" push to themselves is redundant and
     // reads backwards — as if they were the one who got liked.
-    // Fire-and-forget. Telegram rejects DMs from bots the user hasn't granted
-    // write access to (never pressed Start / declined the popup), so skip
-    // anyone with an explicit false — null means unknown, still worth trying.
-    // Website-only users (null telegram_id) and fakes (negative) can't get DMs.
-    const recipients = [
-      { user: them, matchName: me.name, matchPhoto: primaryPhoto(me.id) },
-    ]
-      .filter((r) => r.user.allows_write_to_pm !== false && (r.user.telegram_id ?? 0) > 0)
-      .map((r) => ({
-        telegramId: r.user.telegram_id as number,
-        matchName: r.matchName,
-        matchPhoto: r.matchPhoto,
-        locale: r.user.locale ?? null,
-        matchId: match.id,
-        // The swiper's own icebreaker, asked in the recipient's language.
-        question: ownerQuestion(me, r.user.locale),
-      }))
-
-    if (recipients.length > 0) notifyMatch(recipients).catch(console.error)
+    // Fire-and-forget; never throws. Push first, else a bot DM when Telegram
+    // allows it (see deliverToUser).
+    void notifyUserMatch(them, {
+      matchName: me.name,
+      matchPhoto: primaryPhoto(me.id),
+      matchId: match.id,
+      // The swiper's own icebreaker, asked in the recipient's language.
+      question: ownerQuestion(me, them.locale),
+    })
 
     return {
       matched: true,

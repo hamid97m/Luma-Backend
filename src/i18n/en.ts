@@ -42,6 +42,19 @@ export const en = {
       'Your profile photo was reported as fake. Replace it with a real photo of yourself, or we will block your account.',
     fallbackName: 'Someone',
   },
+  push: {
+    // Push notification titles. message/match/like titles are the other person's name.
+    title: {
+      app: 'Luma',
+      gift: 'New gift 🎁',
+      referralQualified: 'Invite accepted',
+      referralReward: 'Reward unlocked 🎉',
+      premiumPurchased: 'Premium is active ⭐',
+      accountPaused: 'Profile hidden',
+      photoWarning: 'Check your photo',
+      supportReply: 'Support replied',
+    },
+  },
   referral: {
     qualified: (name: string) => `${name} joined Luma with your invite link 🎉 Thanks for spreading the word!`,
     rewardSwipes: (n: number) => `Referral reward: you got ${n} extra discovery swipes! 🔥`,

@@ -43,6 +43,19 @@ export const fa = {
       'عکس پروفایلت جعلی گزارش شده. آن را با یک عکس واقعی از خودت عوض کن، وگرنه حسابت را مسدود می‌کنیم.',
     fallbackName: 'یک نفر',
   },
+  push: {
+    // Push notification titles. message/match/like titles are the other person's name.
+    title: {
+      app: 'لوما',
+      gift: 'هدیه جدید 🎁',
+      referralQualified: 'دعوتت پذیرفته شد',
+      referralReward: 'جایزه گرفتی 🎉',
+      premiumPurchased: 'پریمیوم فعال شد ⭐',
+      accountPaused: 'پروفایلت پنهان شد',
+      photoWarning: 'عکست را بررسی کن',
+      supportReply: 'پشتیبانی پاسخ داد',
+    },
+  },
   referral: {
     qualified: (name: string) => `${name} با لینک دعوت تو عضو لوما شد 🎉 مرسی که لوما رو معرفی می‌کنی!`,
     rewardSwipes: (n: number) => `جایزه دعوت از دوستان: ${n} دیسکاوری اضافه گرفتی! 🔥`,

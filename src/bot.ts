@@ -240,7 +240,7 @@ export async function initStandbyBot(): Promise<void> {
 }
 
 /** Mini-app URL that opens straight into a match's chat (screen=matches + chat=<id>). */
-function chatUrl(matchId: string): string {
+export function chatUrl(matchId: string): string {
   return `${process.env.WEB_URL!}?screen=matches&chat=${encodeURIComponent(matchId)}`
 }
 

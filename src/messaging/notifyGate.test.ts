@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { shouldNotifyOffline, OFFLINE_THRESHOLD_MS, NOTIFY_COOLDOWN_MS, type NotifyRecipient } from './notifyGate.js'
+import { shouldNotifyOffline, canBotDm, isOfflineAndCool, OFFLINE_THRESHOLD_MS, NOTIFY_COOLDOWN_MS, type NotifyRecipient } from './notifyGate.js'
 
 const NOW = 1_700_000_000_000
 const base: NotifyRecipient = {
@@ -72,5 +72,17 @@ describe('shouldNotifyOffline', () => {
   it('does NOT notify a fake recipient (non-positive telegram_id)', () => {
     expect(shouldNotifyOffline({ ...base, telegram_id: -42 }, NOW)).toBe(false)
     expect(shouldNotifyOffline({ ...base, telegram_id: null }, NOW)).toBe(false)
+  })
+})
+
+describe('canBotDm / isOfflineAndCool', () => {
+  it('canBotDm is false for a fake id and for declined PMs', () => {
+    expect(canBotDm({ telegram_id: -5, allows_write_to_pm: null })).toBe(false)
+    expect(canBotDm({ telegram_id: 123, allows_write_to_pm: false })).toBe(false)
+    expect(canBotDm({ telegram_id: 123, allows_write_to_pm: null })).toBe(true)
+  })
+
+  it('isOfflineAndCool is true for an offline woman with no Telegram id', () => {
+    expect(isOfflineAndCool({ ...base, telegram_id: null, gender: 'woman' }, NOW)).toBe(true)
   })
 })

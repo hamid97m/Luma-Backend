@@ -42,6 +42,19 @@ export const ar = {
       'أُبلغ عن صورة ملفك على أنها مزيفة. استبدلها بصورة حقيقية لك، وإلا سنحظر حسابك.',
     fallbackName: 'شخص ما',
   },
+  push: {
+    // Push notification titles. message/match/like titles are the other person's name.
+    title: {
+      app: 'لوما',
+      gift: 'هدية جديدة 🎁',
+      referralQualified: 'تم قبول دعوتك',
+      referralReward: 'حصلت على مكافأة 🎉',
+      premiumPurchased: 'تم تفعيل بريميوم ⭐',
+      accountPaused: 'ملفك مخفي',
+      photoWarning: 'تحقق من صورتك',
+      supportReply: 'رد فريق الدعم',
+    },
+  },
   referral: {
     qualified: (name: string) => `${name} انضم إلى لوما عبر رابط دعوتك 🎉 شكرًا لأنك تعرّف الناس على لوما!`,
     rewardSwipes: (n: number) => `مكافأة الدعوة: حصلت على ${n} سحبة اكتشاف إضافية! 🔥`,

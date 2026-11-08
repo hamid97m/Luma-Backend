@@ -136,6 +136,30 @@ describe('notifyUserMatch', () => {
   })
 })
 
+describe('stale devices (unseen for 14+ days)', () => {
+  it('pushes to a 20-day-old device AND still sends the bot DM', async () => {
+    const u = await createUser()
+    await addToken(u.id)
+    await sql`update user_devices set last_seen_at = now() - interval '20 days' where user_id = ${u.id}`
+    const r = await deliverToUser(asNotifyUser(u), { type: 'match', title: 'Sara', body: 'hi', link: '' },
+      () => sendMessage(u.telegram_id, 'dm'))
+    expect(bodies).toHaveLength(1)
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(r).toBe('bot')
+  })
+
+  it('a fresh device gets the push only', async () => {
+    const u = await createUser()
+    await addToken(u.id)
+    await sql`update user_devices set last_seen_at = now() - interval '13 days' where user_id = ${u.id}`
+    const r = await deliverToUser(asNotifyUser(u), { type: 'match', title: 'Sara', body: 'hi', link: '' },
+      () => sendMessage(u.telegram_id, 'dm'))
+    expect(bodies).toHaveLength(1)
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(r).toBe('push')
+  })
+})
+
 describe('notifyUserLike', () => {
   it('pushes a like with the liker name as title and links to likes', async () => {
     const u = await createUser({ locale: 'en' })

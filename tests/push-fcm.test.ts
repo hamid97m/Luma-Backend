@@ -114,6 +114,23 @@ describe('sendPushToTokens', () => {
     expect(await tokenOf('bad-payload')).toBe('bad-payload')
   })
 
+  it('a 403 SENDER_ID_MISMATCH is a dead token (pruned), not a config error', async () => {
+    await addToken('other-sender')
+    await addToken('fine')
+    const count = async () => Number(
+      (await registry.getSingleMetricAsString('luma_push_config_errors_total')).match(/luma_push_config_errors_total (\d+)/)?.[1] ?? 0)
+    const before = await count()
+    __setPushTransportForTests(async (b: any) => b.message.token === 'other-sender'
+      ? { status: 403, json: { error: { code: 403, status: 'PERMISSION_DENIED', message: 'SenderId mismatch',
+          details: [{ '@type': 'type.googleapis.com/google.firebase.fcm.v1.FcmError', errorCode: 'SENDER_ID_MISMATCH' }] } } }
+      : { status: 200, json: {} })
+    const r = await sendPushToTokens(['other-sender', 'fine'], payload)
+    expect(r).toEqual({ ok: ['fine'], dead: ['other-sender'], failed: [] })
+    expect(await tokenOf('other-sender')).toBeNull()
+    expect(await tokenOf('fine')).toBe('fine')
+    expect(await count()).toBe(before)
+  })
+
   it('retries a 503 once and succeeds', async () => {
     let calls = 0
     __setPushTransportForTests(async () => (++calls === 1 ? { status: 503, json: {} } : { status: 200, json: {} }))
@@ -177,6 +194,25 @@ describe('sendPushToUser', () => {
     const u = await addToken('u1')
     __setPushTransportForTests(async () => ({ status: 200, json: {} }))
     expect(await sendPushToUser(u.id, payload)).toEqual({ sent: 1, dead: 0, failed: 0 })
+  })
+
+  it('still sends to a stale device but counts only devices seen in the last 14 days', async () => {
+    const fresh = await addToken('fresh')
+    await sql`insert into user_devices (user_id, device_id, platform, push_token, push_token_at, last_seen_at)
+              values (${fresh.id}, 'd-stale', 'android', 'stale', now(), now() - interval '20 days')`
+    const sentTo: string[] = []
+    __setPushTransportForTests(async (b: any) => { sentTo.push(b.message.token); return { status: 200, json: {} } })
+    expect(await sendPushToUser(fresh.id, payload)).toEqual({ sent: 1, dead: 0, failed: 0 })
+    expect(sentTo.sort()).toEqual(['fresh', 'stale'])
+  })
+
+  it('a stale device alone counts zero sent', async () => {
+    const u = await addToken('old')
+    await sql`update user_devices set last_seen_at = now() - interval '20 days' where user_id = ${u.id}`
+    const t = vi.fn(async () => ({ status: 200, json: {} }))
+    __setPushTransportForTests(t)
+    expect(await sendPushToUser(u.id, payload)).toEqual({ sent: 0, dead: 0, failed: 0 })
+    expect(t).toHaveBeenCalledTimes(1)
   })
 
   it('returns zeros when unconfigured', async () => {

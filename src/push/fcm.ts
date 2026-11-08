@@ -102,8 +102,11 @@ type Outcome = 'ok' | 'dead' | 'failed' | 'config'
 
 function classify(status: number, json: any): Outcome {
   if (status >= 200 && status < 300) return 'ok'
-  if (status === 401 || status === 403) return 'config'
   const details: any[] = Array.isArray(json?.error?.details) ? json.error.details : []
+  // A token minted for another Firebase project: the token is useless to us,
+  // our credentials are fine.
+  if (status === 403 && details.some((d) => d?.errorCode === 'SENDER_ID_MISMATCH')) return 'dead'
+  if (status === 401 || status === 403) return 'config'
   if (status === 404 || details.some((d) => d?.errorCode === 'UNREGISTERED')) return 'dead'
   if (status === 400 && json?.error?.status === 'INVALID_ARGUMENT'
       && String(json?.error?.message ?? '').includes('registration token')) return 'dead'
@@ -182,15 +185,25 @@ export async function sendPushToTokens(tokens: string[], payload: PushPayload): 
   return result
 }
 
+/** A device not seen for this long is treated as inactive: it still gets the
+ *  push, but it does not count as delivered (so callers fall back to the bot
+ *  DM). Guards against an uninstalled app whose token FCM still accepts. */
+export const ACTIVE_DEVICE_DAYS = 14
+
+/** `sent` counts only successful tokens on active devices (seen in the last
+ *  ACTIVE_DEVICE_DAYS days); `dead`/`failed` count every token. */
 export async function sendPushToUser(
   userId: string,
   payload: PushPayload,
 ): Promise<{ sent: number; dead: number; failed: number }> {
   const zero = { sent: 0, dead: 0, failed: 0 }
   if (isStandby() || !isPushConfigured()) return zero
-  const rows = await sql<{ push_token: string }[]>`
-    select push_token from user_devices where user_id = ${userId} and push_token is not null`
+  const rows = await sql<{ push_token: string; active: boolean }[]>`
+    select push_token,
+           last_seen_at > now() - make_interval(days => ${ACTIVE_DEVICE_DAYS}) as active
+    from user_devices where user_id = ${userId} and push_token is not null`
   if (rows.length === 0) return zero
+  const active = new Set(rows.filter((x) => x.active).map((x) => x.push_token))
   const r = await sendPushToTokens(rows.map((x) => x.push_token), payload)
-  return { sent: r.ok.length, dead: r.dead.length, failed: r.failed.length }
+  return { sent: r.ok.filter((t) => active.has(t)).length, dead: r.dead.length, failed: r.failed.length }
 }

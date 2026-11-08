@@ -14,7 +14,14 @@ vi.mock('grammy', () => ({
 
 import { resetDb, createUser, createMatch, sql } from './helpers/db.js'
 import { initPush, __setPushTransportForTests } from '../src/push/fcm.js'
-import { notifyUserMatch, notifyUserLike, deliverToUser, type NotifyUser } from '../src/notify/userNotify.js'
+import {
+  notifyUserMatch, notifyUserLike, deliverToUser, type NotifyUser,
+  notifyUserGiftMessage, notifyUserGiftIntro, notifyUserReferralQualified, notifyUserReferralReward,
+  notifyUserPremiumPurchased, notifyUserPaused, notifyUserPhotoWarning, notifyUserSupportReply, notifyUserText,
+} from '../src/notify/userNotify.js'
+import { pauseForPhotoReview } from '../src/moderation/autoPause.js'
+import { runPurchaseMessageJob } from '../src/jobs/purchaseMessage.js'
+import { createTx, ago } from './helpers/premium.js'
 import { deliverMessageNotification } from '../src/messaging/deliver.js'
 import { chatHub } from '../src/realtime/hub.js'
 import { fa } from '../src/i18n/fa.js'
@@ -252,5 +259,195 @@ describe('push not configured', () => {
     await notifyUserMatch(asNotifyUser(g), { matchName: 'Sara', matchPhoto: null })
     expect(await notifyUserLike(asNotifyUser(g), 'Sara', 'like')).toBe('none')
     expect(sendMessage).not.toHaveBeenCalled()
+  })
+})
+
+describe('remaining notification types', () => {
+  const opened = { reply_markup: expect.anything() }
+  const cases: Array<{
+    name: string
+    call: (u: NotifyUser) => Promise<'push' | 'bot' | 'none'>
+    type: string
+    title: string
+    body: string
+    screen?: string
+    botText: string
+  }> = [
+    {
+      name: 'notifyUserGiftMessage', call: (u) => notifyUserGiftMessage(u, 'Ali', '🌹'), type: 'gift_message',
+      title: en.push.title.gift, body: en.notify.newMessage('Ali', en.gifts.sentYouGift('🌹')), screen: 'matches',
+      botText: fa.notify.newMessage('Ali', fa.gifts.sentYouGift('🌹')),
+    },
+    {
+      name: 'notifyUserGiftIntro', call: (u) => notifyUserGiftIntro(u, 'Ali', '🌹'), type: 'gift_intro',
+      title: en.push.title.gift, body: en.notify.giftIntro('Ali', '🌹'), botText: fa.notify.giftIntro('Ali', '🌹'),
+    },
+    {
+      name: 'notifyUserReferralQualified', call: (u) => notifyUserReferralQualified(u, 'Sara'), type: 'referral_qualified',
+      title: en.push.title.referralQualified, body: en.referral.qualified('Sara'), botText: fa.referral.qualified('Sara'),
+    },
+    {
+      name: 'notifyUserReferralReward', call: (u) => notifyUserReferralReward(u, { rewardType: 'premium_days', rewardAmount: 7 }),
+      type: 'referral_reward', title: en.push.title.referralReward, body: en.referral.rewardPremium(7),
+      botText: fa.referral.rewardPremium(7),
+    },
+    {
+      name: 'notifyUserReferralReward (swipes)', call: (u) => notifyUserReferralReward(u, { rewardType: 'swipes', rewardAmount: 20 }),
+      type: 'referral_reward', title: en.push.title.referralReward, body: en.referral.rewardSwipes(20),
+      botText: fa.referral.rewardSwipes(20),
+    },
+    {
+      name: 'notifyUserPremiumPurchased', call: (u) => notifyUserPremiumPurchased(u, 30), type: 'premium_purchased',
+      title: en.push.title.premiumPurchased, body: en.premium.purchased(30), botText: fa.premium.purchased(30),
+    },
+    {
+      name: 'notifyUserPaused', call: (u) => notifyUserPaused(u), type: 'account_paused',
+      title: en.push.title.accountPaused, body: en.notify.paused, botText: fa.notify.paused,
+    },
+    {
+      name: 'notifyUserPhotoWarning (man)', call: (u) => notifyUserPhotoWarning(u, 'man'), type: 'photo_warning',
+      title: en.push.title.photoWarning, body: en.notify.fakePhotoWarningMan, screen: 'profile',
+      botText: fa.notify.fakePhotoWarningMan,
+    },
+    {
+      name: 'notifyUserPhotoWarning (woman)', call: (u) => notifyUserPhotoWarning(u, 'woman'), type: 'photo_warning',
+      title: en.push.title.photoWarning, body: en.notify.fakePhotoWarningWoman, screen: 'profile',
+      botText: fa.notify.fakePhotoWarningWoman,
+    },
+    {
+      name: 'notifyUserSupportReply', call: (u) => notifyUserSupportReply(u, 'Where is my chat?', 'Fixed now'), type: 'support_reply',
+      title: en.push.title.supportReply, body: en.support.ticketReply('Where is my chat?', 'Fixed now'),
+      botText: fa.support.ticketReply('Where is my chat?', 'Fixed now'),
+    },
+  ]
+
+  for (const c of cases) {
+    it(`${c.name}: pushes only, with type/title/link, when the user has a token`, async () => {
+      const u = await createUser({ locale: 'en' })
+      await addToken(u.id)
+      expect(await c.call(asNotifyUser(u))).toBe('push')
+      expect(bodies).toHaveLength(1)
+      const msg = bodies[0].message
+      expect(msg.data.type).toBe(c.type)
+      expect(msg.notification).toEqual({ title: c.title, body: c.body.replace(/<[^>]*>/g, '') })
+      if (c.screen) {
+        expect(msg.data.screen).toBe(c.screen)
+        expect(msg.data.link).toBe(`https://luma.test/?screen=${c.screen}`)
+      } else {
+        expect(msg.data.screen).toBeUndefined()
+        expect(msg.data.link).toBe('https://luma.test')
+      }
+      expect(sendMessage).not.toHaveBeenCalled()
+    })
+
+    it(`${c.name}: sends today's exact bot DM without a token`, async () => {
+      const u = await createUser()
+      expect(await c.call(asNotifyUser(u))).toBe('bot')
+      expect(bodies).toHaveLength(0)
+      expect(sendMessage).toHaveBeenCalledTimes(1)
+      expect(sendMessage).toHaveBeenCalledWith(u.telegram_id, c.botText, opened)
+    })
+  }
+
+  it('Google-only user with no token: nothing sent, returns none', async () => {
+    const g = await googleUser()
+    expect(await notifyUserPaused(asNotifyUser(g))).toBe('none')
+    expect(sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('rethrows bot errors where the bot function throws', async () => {
+    const u = await createUser()
+    sendMessage.mockRejectedValueOnce(Object.assign(new Error('blocked'), { error_code: 403 }))
+    await expect(notifyUserPaused(asNotifyUser(u))).rejects.toThrow('blocked')
+  })
+
+  describe('notifyUserText', () => {
+    it('pushes an admin message with the given title and the button screen', async () => {
+      const u = await createUser({ locale: 'en' })
+      await addToken(u.id)
+      const r = await notifyUserText(asNotifyUser(u), {
+        type: 'admin_message', title: 'Hello', text: 'come back',
+        button: { title: 'Plans', kind: 'screen', screen: 'plans' },
+      })
+      expect(r).toBe('push')
+      const msg = bodies[0].message
+      expect(msg.data.type).toBe('admin_message')
+      expect(msg.data.screen).toBe('plans')
+      expect(msg.data.link).toBe('https://luma.test/?screen=plans')
+      expect(msg.notification).toEqual({ title: 'Hello', body: 'come back' })
+    })
+
+    it('falls back to the app title and carries a url button', async () => {
+      const u = await createUser({ locale: 'en' })
+      await addToken(u.id)
+      await notifyUserText(asNotifyUser(u), {
+        type: 'purchase_reminder', title: '  ', text: 'hi',
+        button: { title: 'Site', kind: 'url', url: 'https://x.test/a' },
+      })
+      const msg = bodies[0].message
+      expect(msg.notification.title).toBe(en.push.title.app)
+      expect(msg.data.url).toBe('https://x.test/a')
+      expect(msg.data.link).toBe('https://luma.test')
+    })
+
+    it('without a token sends exactly sendBroadcastMessage', async () => {
+      const u = await createUser()
+      expect(await notifyUserText(asNotifyUser(u), { type: 'admin_message', text: 'plain' })).toBe('bot')
+      expect(sendMessage).toHaveBeenCalledWith(u.telegram_id, 'plain', {})
+    })
+  })
+
+  it('a paused user with a token gets the account_paused push (no DM)', async () => {
+    const u = await createUser({ locale: 'en' })
+    await addToken(u.id)
+    expect(await pauseForPhotoReview(u.id)).toBe(true)
+    await vi.waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0].message.data.type).toBe('account_paused')
+    expect(sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('a paused Google-only user with a token gets the push too', async () => {
+    const g = await googleUser()
+    await addToken(g.id)
+    expect(await pauseForPhotoReview(g.id)).toBe(true)
+    await vi.waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0].message.data.type).toBe('account_paused')
+  })
+
+  describe('purchase-message job', () => {
+    const cfg = {
+      enabled: true, kind: 'text' as const, message: 'come back!', button: null,
+      sourceChatId: null, sourceMessageId: null, activeSince: '2026-01-01T00:00:00.000Z', translations: {},
+    }
+
+    async function googleAbandoner() {
+      const g = await createUser({ telegram_id: null, google_sub: `g-${++gSeq}`, email: `g${gSeq}@x.test`, geo_country: 'IR' })
+      await addToken(g.id)
+      await createTx(g.id, { created_at: ago(10 * 60 * 1000) })
+      return g
+    }
+
+    it('text mode: pushes a purchase_reminder to a Google-only user with a token', async () => {
+      await googleAbandoner()
+      const stats = await runPurchaseMessageJob({ getConfig: async () => cfg })
+      expect(stats).toMatchObject({ eligible: 1, sent: 1 })
+      expect(bodies).toHaveLength(1)
+      const msg = bodies[0].message
+      expect(msg.data.type).toBe('purchase_reminder')
+      expect(msg.notification).toEqual({ title: fa.push.title.app, body: 'come back!' })
+      expect(sendMessage).not.toHaveBeenCalled()
+    })
+
+    it('forward mode: skips a Google-only user', async () => {
+      await googleAbandoner()
+      const forward = vi.fn(() => Promise.resolve())
+      const stats = await runPurchaseMessageJob({
+        getConfig: async () => ({ ...cfg, kind: 'forward' as const, sourceChatId: '-100', sourceMessageId: 5 }),
+        forward,
+      })
+      expect(stats.eligible).toBe(0)
+      expect(forward).not.toHaveBeenCalled()
+      expect(bodies).toHaveLength(0)
+    })
   })
 })

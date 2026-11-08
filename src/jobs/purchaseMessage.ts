@@ -1,5 +1,8 @@
 import { sql } from '../db.js'
-import { sendBroadcastMessage, forwardBroadcastMessage } from '../bot.js'
+import { forwardBroadcastMessage } from '../bot.js'
+import { notifyUserText } from '../notify/userNotify.js'
+import { isPushConfigured } from '../push/fcm.js'
+import { isStandby } from '../appMode.js'
 import { getPurchaseMessageConfig, resolvePurchaseMessage, type PurchaseMessageConfig } from './purchaseMessageConfig.js'
 import type { Locale } from '../i18n/index.js'
 
@@ -22,8 +25,8 @@ export interface PurchaseMessageStats {
   failed: number
 }
 
-type Target = { id: string; telegram_id: number; locale: string | null }
-type Deliver = (target: Pick<Target, 'telegram_id' | 'locale'>) => Promise<void>
+type Target = { id: string; telegram_id: number | null; allows_write_to_pm: boolean | null; locale: string | null }
+type Deliver = (target: Target) => Promise<void>
 type Logger = { info?: (...a: any[]) => void; warn?: (...a: any[]) => void; error?: (...a: any[]) => void }
 
 export interface PurchaseMessageDeps {
@@ -51,14 +54,28 @@ function isDeliverable(cfg: PurchaseMessageConfig): boolean {
   return !!(cfg.message && cfg.message.trim())
 }
 
+/** Text mode delivered nothing (no push went out and no bot DM allowed). */
+class NotDelivered extends Error {}
+
 function buildDeliver(cfg: PurchaseMessageConfig, deps: PurchaseMessageDeps): Deliver {
-  const sendText = deps.sendText ?? sendBroadcastMessage
   const forward = deps.forward ?? forwardBroadcastMessage
-  return (target) => {
-    if (cfg.kind === 'forward') return forward(target.telegram_id, cfg.sourceChatId!, cfg.sourceMessageId!)
+  return async (target) => {
+    // Forward mode stays Telegram-only (the target query guarantees a DM-able telegram_id).
+    if (cfg.kind === 'forward') return forward(target.telegram_id as number, cfg.sourceChatId!, cfg.sourceMessageId!)
     const { text, button } = resolvePurchaseMessage(cfg, (target.locale as Locale | null) ?? null)
-    return sendText(target.telegram_id, text, button ?? undefined)
+    // Push first (Android / Google-only users), else the bot DM as before.
+    const via = await notifyUserText(target, { type: 'purchase_reminder', text, button: button ?? undefined }, deps.sendText)
+    if (via === 'none') throw new NotDelivered('no channel delivered')
   }
+}
+
+/** Who can be reached in this mode: forward → bot DM only; text → bot DM or,
+ * with push on, a push token (users with no Telegram link included). */
+function reachableFilter(cfg: PurchaseMessageConfig) {
+  const dm = sql`(telegram_id > 0 and (allows_write_to_pm is null or allows_write_to_pm = true))`
+  if (cfg.kind === 'forward' || !isPushConfigured() || isStandby()) return dm
+  return sql`(${dm} or exists (
+    select 1 from user_devices d where d.user_id = users.id and d.push_token is not null))`
 }
 
 /** Atomically claim a user by inserting their sends row BEFORE sending. The
@@ -110,7 +127,7 @@ async function deliverToUser(
 /** Load one user IFF they are eligible right now: has a pending (unpaid) purchase
  * attempt on/after the cutoff, never completed a purchase, hasn't been messaged,
  * lives in Iran, and is a messageable real user. Returns null otherwise. */
-async function loadEligibleTargetForUser(activeSince: string, userId: string): Promise<Target | null> {
+async function loadEligibleTargetForUser(cfg: PurchaseMessageConfig, activeSince: string, userId: string): Promise<Target | null> {
   // Query errors propagate (fail closed: never message on an unanswered check);
   // the per-payment caller's .catch logs them.
   const paid = await sql`
@@ -130,10 +147,10 @@ async function loadEligibleTargetForUser(activeSince: string, userId: string): P
   if (sent.length) return null
 
   const [user] = await sql<Target[]>`
-    select id, telegram_id, locale, geo_country from users
+    select id, telegram_id, allows_write_to_pm, locale, geo_country from users
     where id = ${userId} and is_seed = false and banned_at is null and deleted_at is null
       and geo_country = ${IRAN_COUNTRY}
-      and telegram_id > 0 and (allows_write_to_pm is null or allows_write_to_pm = true)
+      and ${reachableFilter(cfg)}
     limit 1`
   return user ?? null
 }
@@ -151,7 +168,7 @@ export async function maybeSendPurchaseMessageForUser(userId: string, deps: Purc
   if (!cfg || !cfg.enabled || !isDeliverable(cfg)) return stats
 
   const activeSince = cfg.activeSince ?? new Date(0).toISOString()
-  const target = await loadEligibleTargetForUser(activeSince, userId)
+  const target = await loadEligibleTargetForUser(cfg, activeSince, userId)
   if (!target) return stats
 
   stats.eligible = 1
@@ -220,10 +237,10 @@ export async function runPurchaseMessageJob(deps: RunPurchaseMessageJobDeps = {}
   if (freshIds.length === 0) return empty
 
   const targets = await sql<Target[]>`
-    select id, telegram_id, locale, geo_country from users
+    select id, telegram_id, allows_write_to_pm, locale, geo_country from users
     where id = any(${freshIds}::uuid[]) and is_seed = false and banned_at is null and deleted_at is null
       and geo_country = ${IRAN_COUNTRY}
-      and telegram_id > 0 and (allows_write_to_pm is null or allows_write_to_pm = true)
+      and ${reachableFilter(cfg)}
     limit ${cap}`
 
   const stats: PurchaseMessageStats = { eligible: targets.length, sent: 0, blocked: 0, failed: 0 }

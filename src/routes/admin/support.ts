@@ -1,6 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { sql, isUuid } from '../../db.js'
-import { notifyTicketReply } from '../../bot.js'
+import { notifyUserSupportReply, canReachUser } from '../../notify/userNotify.js'
 
 const PAGE_SIZE = 20
 const MAX_BODY = 2000
@@ -123,7 +123,7 @@ export async function adminSupportRoutes(app: FastifyInstance) {
 
     const [ticket] = isUuid(id)
       ? await sql`
-          select t.id, u.telegram_id, u.allows_write_to_pm, u.locale
+          select t.id, u.id as user_id, u.telegram_id, u.allows_write_to_pm, u.locale
           from support_tickets t
           left join users u on u.id = t.user_id
           where t.id = ${id}`.catch(() => [])
@@ -148,15 +148,19 @@ export async function adminSupportRoutes(app: FastifyInstance) {
       set status = 'open', last_sender = 'admin', last_message_at = ${new Date().toISOString()}
       where id = ${id}`.catch((err) => req.log.warn({ err }, 'ticket reopen on reply failed'))
 
-    const u: any = ticket
-    if (u?.telegram_id && u.allows_write_to_pm !== false) {
+    const t: any = ticket
+    const u = t?.user_id
+      ? { id: t.user_id as string, telegram_id: t.telegram_id, allows_write_to_pm: t.allows_write_to_pm, locale: t.locale }
+      : null
+    // Push first (Android / Google-only users), else the bot DM as before.
+    if (u && (await canReachUser(u).catch(() => false))) {
       // Preview = the ticket's opening (earliest) message.
       const [first] = await sql<{ body: string }[]>`
         select body from support_messages
         where ticket_id = ${id}
         order by created_at asc
         limit 1`.catch(() => [])
-      notifyTicketReply(u.telegram_id, first?.body ?? '', text, u.locale ?? null)
+      notifyUserSupportReply(u, first?.body ?? '', text)
         .catch((err) => req.log.warn({ err }, 'failed to send ticket reply notification'))
     }
 

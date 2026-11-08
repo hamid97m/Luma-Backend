@@ -304,6 +304,17 @@ export async function notifyReferralQualified(toTelegramId: number, referredName
   }
 }
 
+/** Text of the referral-reward DM (also the push body). */
+export function referralRewardText(
+  milestone: { rewardType: string; rewardAmount: number },
+  locale: Locale | null,
+): string {
+  const t = tFor(locale)
+  return milestone.rewardType === 'premium_days'
+    ? t.referral.rewardPremium(milestone.rewardAmount)
+    : t.referral.rewardSwipes(milestone.rewardAmount)
+}
+
 /** DM a referrer that they earned a referral milestone reward. */
 export async function notifyReferralReward(
   toTelegramId: number,
@@ -313,9 +324,7 @@ export async function notifyReferralReward(
   try {
     const t = tFor(locale)
     const bot = getBot()
-    const text = milestone.rewardType === 'premium_days'
-      ? t.referral.rewardPremium(milestone.rewardAmount)
-      : t.referral.rewardSwipes(milestone.rewardAmount)
+    const text = referralRewardText(milestone, locale)
     const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
     await bot.api.sendMessage(toTelegramId, text, { reply_markup: keyboard })
   } catch (err) {
@@ -364,6 +373,12 @@ export async function notifyPaused(toTelegramId: number, locale: Locale | null):
   await bot.api.sendMessage(toTelegramId, t.notify.paused, { reply_markup: keyboard })
 }
 
+/** Text of the fake-photo warning (also the push body). */
+export function fakePhotoWarningText(locale: Locale | null, gender: string | null): string {
+  const t = tFor(locale)
+  return gender === 'man' ? t.notify.fakePhotoWarningMan : t.notify.fakePhotoWarningWoman
+}
+
 /** Halfway warning when fake-photo reports hit half the pause threshold.
  * Women (and anyone who isn't a man) get a reassuring note; men get a block threat. */
 export async function notifyFakePhotoWarning(
@@ -372,7 +387,7 @@ export async function notifyFakePhotoWarning(
   gender: string | null,
 ): Promise<void> {
   const t = tFor(locale)
-  const text = gender === 'man' ? t.notify.fakePhotoWarningMan : t.notify.fakePhotoWarningWoman
+  const text = fakePhotoWarningText(locale, gender)
   const bot = getBot()
   const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
   await bot.api.sendMessage(toTelegramId, text, { reply_markup: keyboard })
@@ -488,6 +503,15 @@ export async function notifyGiftIntro(toTelegramId: number, senderName: string, 
   await bot.api.sendMessage(toTelegramId, t.notify.giftIntro(senderName, emoji), { reply_markup: keyboard })
 }
 
+/** Text of the support-reply DM (also the push body): preview capped at 200
+ * chars, whole text at 4000 (Telegram's limit is 4096). */
+export function ticketReplyText(issuePreview: string, answer: string, locale: Locale | null): string {
+  const t = tFor(locale)
+  const preview = issuePreview.length > 200 ? `${issuePreview.slice(0, 199)}…` : issuePreview
+  const text = t.support.ticketReply(preview, answer)
+  return text.length > 4000 ? `${text.slice(0, 3999)}…` : text
+}
+
 export async function notifyTicketReply(
   toTelegramId: number,
   issuePreview: string,
@@ -497,10 +521,7 @@ export async function notifyTicketReply(
   const t = tFor(locale)
   const bot = getBot()
   const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
-  const preview = issuePreview.length > 200 ? `${issuePreview.slice(0, 199)}…` : issuePreview
-  const text = t.support.ticketReply(preview, answer)
-  const safe = text.length > 4000 ? `${text.slice(0, 3999)}…` : text
-  await bot.api.sendMessage(toTelegramId, safe, { reply_markup: keyboard })
+  await bot.api.sendMessage(toTelegramId, ticketReplyText(issuePreview, answer, locale), { reply_markup: keyboard })
 }
 
 /** Telegram's catalog of gifts the bot can send. Return type is inferred from

@@ -1,5 +1,6 @@
 import { sql, isUuid } from '../db.js'
-import { createPremiumInvoiceLink, refundPremiumPayment, notifyPaymentChannel, notifyPremiumPurchased } from '../bot.js'
+import { createPremiumInvoiceLink, refundPremiumPayment, notifyPaymentChannel } from '../bot.js'
+import { notifyUserPremiumPurchased } from '../notify/userNotify.js'
 import { formatPremiumPaidNotice, formatTonPaysPaidNotice, formatTonPaysGrantFailedNotice } from '../payments/paymentNotify.js'
 import { schedulePurchaseCheckoutFollowup } from '../jobs/purchaseMessage.js'
 import { tFor, type Locale } from '../i18n/index.js'
@@ -423,7 +424,10 @@ export async function validatePremiumPreCheckout(transactionId: string, totalAmo
   return { ok: true as const }
 }
 
-type GrantUser = { premium_until: string | null; name: string | null; locale: string | null; telegram_id: number | null }
+type GrantUser = {
+  premium_until: string | null; name: string | null; locale: string | null
+  telegram_id: number | null; allows_write_to_pm: boolean | null
+}
 
 /**
  * Adds `durationDays` of premium to a user, extending from the later of now /
@@ -444,7 +448,7 @@ async function grantPremiumTime(userId: string, durationDays: number): Promise<{
   try {
     await sql.begin(async (q) => {
       const [row] = await q<GrantUser[]>`
-        select premium_until, name, locale, telegram_id from users where id = ${userId} for update`
+        select premium_until, name, locale, telegram_id, allows_write_to_pm from users where id = ${userId} for update`
       if (!row) return
       user = row
       await q`
@@ -480,8 +484,11 @@ export async function handlePremiumPaid(transactionId: string, chargeId: string,
     at: new Date().toISOString(),
   })).catch(() => {})
 
-  notifyPremiumPurchased(buyerTelegramId, tx.duration_days, (user.locale as Locale | null) ?? null)
-    .catch((err) => console.error('[premium] buyer DM failed:', err?.message ?? err))
+  // Push first; else the DM goes to the paying Telegram account, as before.
+  notifyUserPremiumPurchased(
+    { id: tx.user_id, telegram_id: buyerTelegramId, allows_write_to_pm: user.allows_write_to_pm, locale: user.locale },
+    tx.duration_days,
+  ).catch((err) => console.error('[premium] buyer DM failed:', err?.message ?? err))
 }
 
 /** Buyer paid but we couldn't grant time: refund the Stars and mark the tx.
@@ -547,11 +554,11 @@ export async function handleTonPaysPaid(
     at: new Date().toISOString(),
   })).catch(() => {})
 
-  // Website-only buyers (no Telegram account) get no bot DM.
-  if ((user.telegram_id ?? 0) > 0) {
-    notifyPremiumPurchased(user.telegram_id as number, tx.duration_days, (user.locale as Locale | null) ?? null)
-      .catch((err) => console.error('[tonpays] buyer DM failed:', err?.message ?? err))
-  }
+  // Push first; website-only buyers (no Telegram account) get no bot DM.
+  notifyUserPremiumPurchased(
+    { id: tx.user_id, telegram_id: user.telegram_id, allows_write_to_pm: user.allows_write_to_pm, locale: user.locale },
+    tx.duration_days,
+  ).catch((err) => console.error('[tonpays] buyer DM failed:', err?.message ?? err))
 
   return 'granted'
 }

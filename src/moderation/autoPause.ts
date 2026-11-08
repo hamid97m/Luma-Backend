@@ -1,5 +1,5 @@
 import { sql } from '../db.js'
-import { notifyFakePhotoWarning, notifyPaused } from '../bot.js'
+import { notifyUserPaused, notifyUserPhotoWarning, canReachUser } from '../notify/userNotify.js'
 import { deleteAllPhotosForUser } from '../photos/deleteAllPhotosForUser.js'
 import type { Locale } from '../i18n/locale.js'
 
@@ -41,16 +41,17 @@ export async function maybeWarnFakePhoto(reportedUserId: string): Promise<boolea
     if (pendingCount >= threshold) return false
 
     const [data] = await sql<{
-      telegram_id: number; allows_write_to_pm: boolean | null; locale: Locale | null
+      id: string; telegram_id: number | null; allows_write_to_pm: boolean | null; locale: Locale | null
       gender: string | null; paused_at: string | null; banned_at: string | null
     }[]>`
-      select telegram_id, allows_write_to_pm, locale, gender, paused_at, banned_at
+      select id, telegram_id, allows_write_to_pm, locale, gender, paused_at, banned_at
       from users where id = ${reportedUserId}`
     if (!data || data.paused_at || data.banned_at) return false
-    if (!(data.telegram_id > 0) || data.allows_write_to_pm === false) return false
+    // Reachable = bot DM allowed, or a push token (Android / Google-only users).
+    if (!(await canReachUser(data))) return false
 
     Promise.resolve(
-      notifyFakePhotoWarning(data.telegram_id, data.locale ?? null, data.gender ?? null),
+      notifyUserPhotoWarning(data, data.gender ?? null),
     ).catch((err) => console.error('[moderation] notifyFakePhotoWarning failed:', err?.message ?? err))
     return true
   } catch (err) {
@@ -92,10 +93,10 @@ export async function pauseForPhotoReview(userId: string): Promise<boolean> {
   // The update only matches an active, non-banned, not-already-paused row,
   // so concurrent callers can't double-pause or double-notify.
   // A failed write reads as "not paused" (false) — never fatal.
-  const [data] = await sql<{ telegram_id: number; allows_write_to_pm: boolean | null; locale: Locale | null }[]>`
+  const [data] = await sql<{ id: string; telegram_id: number | null; allows_write_to_pm: boolean | null; locale: Locale | null }[]>`
     update users set paused_at = ${new Date().toISOString()}
     where id = ${userId} and paused_at is null and banned_at is null
-    returning telegram_id, allows_write_to_pm, locale`.catch((err) => {
+    returning id, telegram_id, allows_write_to_pm, locale`.catch((err) => {
       console.error('[moderation] pauseForPhotoReview update failed:', (err as Error)?.message ?? err)
       return []
     })
@@ -103,11 +104,9 @@ export async function pauseForPhotoReview(userId: string): Promise<boolean> {
 
   await deleteAllPhotosForUser(userId)
 
-  // Telegram rejects DMs from bots the user never granted write access to;
-  // a false flag means an explicit decline, so skip it (null = unknown, try).
-  if (data.telegram_id > 0 && data.allows_write_to_pm !== false) {
-    Promise.resolve(notifyPaused(data.telegram_id, data.locale ?? null)).catch((err) =>
-      console.error('[moderation] notifyPaused failed:', err?.message ?? err))
-  }
+  // Push first; the bot DM only when no push went out and DMs aren't declined
+  // (telegram_id > 0, allows_write_to_pm !== false — checked inside).
+  Promise.resolve(notifyUserPaused(data)).catch((err) =>
+    console.error('[moderation] notifyPaused failed:', err?.message ?? err))
   return true
 }

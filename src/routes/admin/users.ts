@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { sql, isUuid } from '../../db.js'
-import { notifyPaused, sendBroadcastMessage, forwardBroadcastMessage } from '../../bot.js'
+import { sendBroadcastMessage, forwardBroadcastMessage } from '../../bot.js'
+import { notifyUserPaused } from '../../notify/userNotify.js'
 import { deleteAllPhotosForUser } from '../../photos/deleteAllPhotosForUser.js'
 import { validateButton } from '../../messaging/messageButton.js'
 import { parseChannelMessageLink } from '../../messaging/channelLink.js'
@@ -397,13 +398,13 @@ export async function adminUsersRoutes(app: FastifyInstance) {
   })
 
   const setPaused = async (id: string, pausedAt: string | null, reply: any) => {
-    type Paused = { telegram_id: number | null; allows_write_to_pm: boolean | null; locale: Locale | null }
+    type Paused = { id: string; telegram_id: number | null; allows_write_to_pm: boolean | null; locale: Locale | null }
     let data: Paused | undefined
     try {
       ;[data] = isUuid(id)
         ? await sql<Paused[]>`
             update users set paused_at = ${pausedAt} where id = ${id}
-            returning telegram_id, allows_write_to_pm, locale`
+            returning id, telegram_id, allows_write_to_pm, locale`
         : []
     } catch { /* any failure answered 404 before, too */ }
     if (!data) return reply.status(404).send({ error: 'user_not_found' })
@@ -412,10 +413,10 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     // best-effort by construction, never blocks the pause response.
     if (pausedAt) await deleteAllPhotosForUser(id)
 
-    // Warn the user only when pausing (not on resume), and only if bot DMs are
-    // not explicitly declined.
-    if (pausedAt && data.telegram_id != null && data.telegram_id > 0 && data.allows_write_to_pm !== false) {
-      notifyPaused(data.telegram_id, data.locale ?? null).catch((err) =>
+    // Warn the user only when pausing (not on resume): push first, else a bot
+    // DM if DMs are not explicitly declined (checked inside).
+    if (pausedAt) {
+      notifyUserPaused(data).catch((err) =>
         console.error('[admin] notifyPaused failed:', err?.message ?? err))
     }
     return { ok: true }

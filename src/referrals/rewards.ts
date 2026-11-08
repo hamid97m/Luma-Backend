@@ -1,7 +1,7 @@
 import { sql } from '../db.js'
 import { getReferralConfig } from './config.js'
 import { extendPremiumUntil } from '../premium/service.js'
-import { notifyReferralQualified, notifyReferralReward } from '../bot.js'
+import { notifyUserReferralQualified, notifyUserReferralReward } from '../notify/userNotify.js'
 import type { Locale } from '../i18n/index.js'
 
 export interface Milestone {
@@ -78,8 +78,8 @@ export async function evaluateReferralRewards(referrerId: string): Promise<void>
     const due = dueMilestones(qualifiedCount, granted)
     if (due.length === 0) return
 
-    const [referrer] = await sql<{ telegram_id: number; allows_write_to_pm: boolean | null; locale: Locale | null }[]>`
-      select telegram_id, allows_write_to_pm, locale from users where id = ${referrerId}`
+    const [referrer] = await sql<{ id: string; telegram_id: number | null; allows_write_to_pm: boolean | null; locale: Locale | null }[]>`
+      select id, telegram_id, allows_write_to_pm, locale from users where id = ${referrerId}`
 
     for (const milestone of due) {
       // Atomic claim: the referral_rewards PK is the idempotency guard — only the caller
@@ -99,9 +99,8 @@ export async function evaluateReferralRewards(referrerId: string): Promise<void>
       if (milestone.rewardType === 'swipes') await grantBonusSwipes(referrerId, milestone.rewardAmount)
       else await grantPremiumDays(referrerId, milestone.rewardAmount)
 
-      if (referrer && referrer.telegram_id > 0 && referrer.allows_write_to_pm !== false) {
-        await notifyReferralReward(referrer.telegram_id, milestone, referrer.locale ?? null)
-      }
+      // Push first; bot DM only if allowed (telegram_id > 0, DMs not declined).
+      if (referrer) await notifyUserReferralReward(referrer, milestone)
     }
   } catch (err) {
     console.error('evaluateReferralRewards failed', err)
@@ -125,11 +124,10 @@ export async function maybeQualifyReferral(userId: string): Promise<void> {
       returning referrer_id`
     if (!qualified) return
 
-    const [referrer] = await sql<{ telegram_id: number; allows_write_to_pm: boolean | null; locale: Locale | null }[]>`
-      select telegram_id, allows_write_to_pm, locale from users where id = ${qualified.referrer_id}`
-    if (referrer && referrer.telegram_id > 0 && referrer.allows_write_to_pm !== false) {
-      await notifyReferralQualified(referrer.telegram_id, user.name, referrer.locale ?? null)
-    }
+    const [referrer] = await sql<{ id: string; telegram_id: number | null; allows_write_to_pm: boolean | null; locale: Locale | null }[]>`
+      select id, telegram_id, allows_write_to_pm, locale from users where id = ${qualified.referrer_id}`
+    // Push first; bot DM only if allowed (telegram_id > 0, DMs not declined).
+    if (referrer) await notifyUserReferralQualified(referrer, user.name)
     await evaluateReferralRewards(qualified.referrer_id)
   } catch (err) {
     console.error('maybeQualifyReferral failed', err)

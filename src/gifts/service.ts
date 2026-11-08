@@ -2,8 +2,9 @@ import { sql, isUuid } from '../db.js'
 import { computeCharge } from './pricing.js'
 import {
   getGiftCatalog, createGiftInvoiceLink, sendGiftToUser, refundGift,
-  notifyNewMessage, notifyGiftIntro, notifyPaymentChannel,
+  notifyPaymentChannel,
 } from '../bot.js'
+import { notifyUserGiftMessage, notifyUserGiftIntro, type NotifyUser } from '../notify/userNotify.js'
 import { formatGiftPaidNotice } from '../payments/paymentNotify.js'
 import { tFor, type Locale } from '../i18n/index.js'
 import { seedIcebreakers } from '../icebreakers/seed.js'
@@ -160,7 +161,7 @@ export async function handleGiftPaid(payload: string, chargeId: string, buyerTel
   if (!tx) return // already handled or unknown
 
   // A failed lookup used to come back as `data: null` — keep that (missing recipient → refund).
-  const [recipient] = await tolerant(() => sql`select telegram_id, name, locale from users where id = ${tx.recipient_id}`, [])
+  const [recipient] = await tolerant(() => sql`select id, telegram_id, allows_write_to_pm, name, locale from users where id = ${tx.recipient_id}`, [])
   const [buyer] = await tolerant(() => sql`select name from users where id = ${tx.buyer_id}`, [])
   // No Telegram account (website-only user) → the gift can't be delivered; refund.
   if (!recipient || recipient.telegram_id == null) { await failAndRefund(tx.id, buyerTelegramId, chargeId); return }
@@ -203,7 +204,7 @@ export async function handleGiftPaid(payload: string, chargeId: string, buyerTel
       console.error(`[gifts] failed to insert gift message for tx ${tx.id}:`, msgErr)
     }
     if (recipient.telegram_id) {
-      notifyNewMessage(recipient.telegram_id, buyer?.name ?? rt.notify.fallbackName, rt.gifts.sentYouGift(tx.gift_emoji ?? '🎁'), null, undefined, recipientLocale)
+      notifyUserGiftMessage(recipient as NotifyUser, buyer?.name ?? rt.notify.fallbackName, tx.gift_emoji ?? '🎁')
         .catch(() => {})
     }
   } else {
@@ -213,7 +214,7 @@ export async function handleGiftPaid(payload: string, chargeId: string, buyerTel
       console.error(`[gifts] failed to set intro_status for tx ${tx.id}:`, introErr)
     }
     if (recipient.telegram_id) {
-      notifyGiftIntro(recipient.telegram_id, buyer?.name ?? rt.notify.fallbackName, tx.gift_emoji ?? '🎁', recipientLocale).catch(() => {})
+      notifyUserGiftIntro(recipient as NotifyUser, buyer?.name ?? rt.notify.fallbackName, tx.gift_emoji ?? '🎁').catch(() => {})
     }
   }
 }

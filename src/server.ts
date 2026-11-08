@@ -92,7 +92,6 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(cors, {
     origin: corsOrigins.length ? corsOrigins : '*',
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-    allowedHeaders: ['Authorization', 'Content-Type', 'X-Client-Platform', 'X-Client-Version', 'X-Device-Id', 'X-Device-Model', 'X-Device-Os', 'Cache-Control'],
     // Cache preflights: the signup page_hidden event fires as the webview closes,
     // when a fresh preflight may never finish.
     maxAge: 600,

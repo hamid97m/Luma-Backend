@@ -4,6 +4,7 @@ vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
 vi.mock('../src/googleAuth.js', () => ({ verifyGoogleIdToken: vi.fn() }))
 
 import { buildApp } from '../src/server.js'
+import { verifyInitData } from '../src/auth.js'
 import { verifyGoogleIdToken } from '../src/googleAuth.js'
 import { signSessionToken } from '../src/session.js'
 import { parseClientInfo } from '../src/devices/clientInfo.js'
@@ -88,6 +89,18 @@ describe('device recording', () => {
     expect(row).toMatchObject({ user_id: res.json().user.id, device_id: 'dev-1', platform: 'android' })
   })
 
+  it('POST /auth/verify (initData) records a telegram device', async () => {
+    const u = await createUser()
+    vi.mocked(verifyInitData).mockReturnValue({ id: u.telegram_id, first_name: 'Test' } as any)
+    const res = await app.inject({
+      method: 'POST', url: '/auth/verify', payload: { initData: 'x' },
+      headers: { ...HEADERS, 'x-client-platform': 'telegram' },
+    })
+    expect(res.statusCode).toBe(200)
+    const [row] = await waitForRows(1)
+    expect(row).toMatchObject({ user_id: u.id, device_id: 'dev-1', platform: 'telegram' })
+  })
+
   it('requests without X-Device-Id succeed and create no row', async () => {
     const u = await createUser({ telegram_id: null, email: 'a@b.co' })
     const res = await app.inject({ method: 'GET', url: '/auth/me', headers: { authorization: `Bearer ${signSessionToken(u.id)}` } })
@@ -105,12 +118,12 @@ describe('device recording', () => {
         headers: {
           origin: 'https://app.datinglumi.com',
           'access-control-request-method': 'GET',
-          'access-control-request-headers': 'authorization,x-client-platform,x-client-version,x-device-id,x-device-model,x-device-os',
+          'access-control-request-headers': 'authorization,x-client-platform,x-client-version,x-device-id,x-device-model,x-device-os,pragma',
         },
       })
       expect(res.statusCode).toBe(204)
       const allowed = String(res.headers['access-control-allow-headers']).toLowerCase()
-      for (const h of ['x-client-platform', 'x-client-version', 'x-device-id', 'x-device-model', 'x-device-os']) {
+      for (const h of ['x-client-platform', 'x-client-version', 'x-device-id', 'x-device-model', 'x-device-os', 'pragma']) {
         expect(allowed).toContain(h)
       }
     } finally {

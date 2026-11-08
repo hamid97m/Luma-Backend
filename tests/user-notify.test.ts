@@ -349,6 +349,28 @@ describe('remaining notification types', () => {
     })
   }
 
+  describe('DMs that never checked allows_write_to_pm keep doing so', () => {
+    const optOut = [
+      { name: 'gift_message', call: (u: NotifyUser) => notifyUserGiftMessage(u, 'Ali', '🌹'),
+        text: fa.notify.newMessage('Ali', fa.gifts.sentYouGift('🌹')) },
+      { name: 'gift_intro', call: (u: NotifyUser) => notifyUserGiftIntro(u, 'Ali', '🌹'), text: fa.notify.giftIntro('Ali', '🌹') },
+      { name: 'premium_purchased', call: (u: NotifyUser) => notifyUserPremiumPurchased(u, 30), text: fa.premium.purchased(30) },
+    ]
+    for (const c of optOut) {
+      it(`${c.name}: Telegram user with allows_write_to_pm=false and no token still gets the bot DM`, async () => {
+        const u = await createUser({ allows_write_to_pm: false })
+        expect(await c.call(asNotifyUser(u))).toBe('bot')
+        expect(sendMessage).toHaveBeenCalledWith(u.telegram_id, c.text, { reply_markup: expect.anything() })
+      })
+    }
+
+    it('the shared rule still applies elsewhere (paused: opted-out → none)', async () => {
+      const u = await createUser({ allows_write_to_pm: false })
+      expect(await notifyUserPaused(asNotifyUser(u))).toBe('none')
+      expect(sendMessage).not.toHaveBeenCalled()
+    })
+  })
+
   it('Google-only user with no token: nothing sent, returns none', async () => {
     const g = await googleUser()
     expect(await notifyUserPaused(asNotifyUser(g))).toBe('none')

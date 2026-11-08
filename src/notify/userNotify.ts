@@ -37,11 +37,18 @@ const clipBody = (s: string) => (s.length > MAX_PUSH_BODY ? `${s.slice(0, MAX_PU
  *
  * `push` may be a thunk so the payload (and any bot.ts text helper it calls)
  * is only built when push is actually attempted.
+ *
+ * `ignoreBotOptOut`: the bot fallback only needs telegram_id > 0, ignoring
+ * allows_write_to_pm — for DMs that never checked the flag (gifts, premium
+ * purchase), so Telegram users without a token keep today's exact DM.
  */
+export interface DeliverOptions { ignoreBotOptOut?: boolean }
+
 export async function deliverToUser(
   u: NotifyUser,
   push: PushPayload | (() => PushPayload),
   botSend: () => Promise<void>,
+  opts: DeliverOptions = {},
 ): Promise<'push' | 'bot' | 'none'> {
   let sent = 0
   // Checked here too (sendPushToUser also does) so that with push off the bot
@@ -55,7 +62,8 @@ export async function deliverToUser(
     }
   }
   if (sent > 0) return 'push'
-  if (!canBotDm(u)) return 'none'
+  const botOk = opts.ignoreBotOptOut ? (u.telegram_id ?? 0) > 0 : canBotDm(u)
+  if (!botOk) return 'none'
   await botSend()
   return 'bot'
 }
@@ -132,7 +140,8 @@ export async function canReachUser(u: NotifyUser): Promise<boolean> {
 const tg = (u: NotifyUser) => u.telegram_id as number
 const homeLink = () => safeLinkFields()
 
-/** Gift sent inside a chat (shown like a new message, no chat deep link). Rethrows bot errors. */
+/** Gift sent inside a chat (shown like a new message, no chat deep link).
+ * Bot fallback ignores allows_write_to_pm, as before. Rethrows bot errors. */
 export async function notifyUserGiftMessage(
   u: NotifyUser,
   senderName: string,
@@ -149,10 +158,12 @@ export async function notifyUserGiftMessage(
       ...safeLinkFields({ screen: 'matches' }),
     }),
     () => notifyNewMessage(tg(u), senderName, body, null, undefined, localeOf(u)),
+    { ignoreBotOptOut: true },
   )
 }
 
-/** Discovery gift waiting in the intros inbox. Rethrows bot errors. */
+/** Discovery gift waiting in the intros inbox. Bot fallback ignores
+ * allows_write_to_pm, as before. Rethrows bot errors. */
 export async function notifyUserGiftIntro(
   u: NotifyUser,
   senderName: string,
@@ -163,6 +174,7 @@ export async function notifyUserGiftIntro(
     u,
     () => ({ type: 'gift_intro', title: t.push.title.gift, body: stripHtml(t.notify.giftIntro(senderName, emoji)), ...homeLink() }),
     () => notifyGiftIntro(tg(u), senderName, emoji, localeOf(u)),
+    { ignoreBotOptOut: true },
   )
 }
 
@@ -195,7 +207,8 @@ export async function notifyUserReferralReward(
   )
 }
 
-/** Premium purchase is active. Rethrows bot errors. */
+/** Premium purchase is active. Bot fallback ignores allows_write_to_pm, as
+ * before (Stars + TonPays). Rethrows bot errors. */
 export async function notifyUserPremiumPurchased(u: NotifyUser, durationDays: number): Promise<'push' | 'bot' | 'none'> {
   const t = tFor(localeOf(u))
   return deliverToUser(
@@ -205,6 +218,7 @@ export async function notifyUserPremiumPurchased(u: NotifyUser, durationDays: nu
       body: stripHtml(t.premium.purchased(durationDays)), ...homeLink(),
     }),
     () => notifyPremiumPurchased(tg(u), durationDays, localeOf(u)),
+    { ignoreBotOptOut: true },
   )
 }
 

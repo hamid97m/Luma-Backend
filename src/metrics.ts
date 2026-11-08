@@ -126,3 +126,25 @@ export function startMetricsServer(port: number, log: FastifyBaseLogger): http.S
   server.listen(port, '127.0.0.1')
   return server
 }
+
+const pushSent = new Counter({
+  name: 'luma_push_sent_total',
+  help: 'FCM push sends by type and result',
+  labelNames: ['type', 'result'] as const,
+  registers: [registry],
+})
+
+/** `type` is the PushType union, so cardinality stays bounded. */
+export function countPushSent(type: string, result: 'ok' | 'dead' | 'failed'): void {
+  pushSent.inc({ type, result })
+}
+
+const pushConfigErrors = new Counter({
+  name: 'luma_push_config_errors_total',
+  help: 'FCM 401/403 responses (service-account or project misconfiguration)',
+  registers: [registry],
+})
+
+export function countPushConfigError(): void {
+  pushConfigErrors.inc()
+}

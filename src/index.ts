@@ -10,6 +10,7 @@ import { runLikeRevealJob } from './jobs/likeReveal.js'
 import { trackJob, startMetricsServer, initJobMetrics } from './metrics.js'
 import { msUntilNextTehranHour } from './likes/revealPick.js'
 import { cleanupInterruptedBroadcasts } from './messaging/broadcast.js'
+import { initPush } from './push/fcm.js'
 import { startChatListener } from './realtime/listener.js'
 import { isSessionSecretConfigured } from './session.js'
 
@@ -138,6 +139,7 @@ if (isLive) {
   // Skip bot in dev — fake BOT_TOKEN would crash the process
   console.log('[dev] Bot disabled (set NODE_ENV=production and a real BOT_TOKEN to enable)')
 }
+await initPush()
 await app.listen({ port: Number(process.env.PORT ?? 3000), host: '0.0.0.0' })
 if (process.env.METRICS_PORT) startMetricsServer(Number(process.env.METRICS_PORT), app.log)
 

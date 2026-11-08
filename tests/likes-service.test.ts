@@ -69,6 +69,13 @@ describe('getIncomingLikers', () => {
     expect((await getIncomingLikers(me.id)).map((r) => r.id)).toEqual([ok.id])
   })
 
+  it('excludes a deleted-then-returned liker whose profile was wiped', async () => {
+    // Account delete blanks name/age; reopening the app clears deleted_at but leaves the wiped profile.
+    await liker('', 1, { age: 0, account_status: 'preparing', deleted_at: null })
+    const ok = await liker('OK', 2)
+    expect((await getIncomingLikers(me.id)).map((r) => r.id)).toEqual([ok.id])
+  })
+
   it('caps the list at the newest 100', async () => {
     const created: string[] = []
     for (let i = 0; i < 105; i++) {

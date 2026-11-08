@@ -5,6 +5,7 @@ vi.mock('../src/bot.js', () => ({ notifyMatch: vi.fn(), notifyNewMessage: vi.fn(
 
 import { buildApp } from '../src/server.js'
 import { notifyNewMessage } from '../src/bot.js'
+import { chatHub } from '../src/realtime/hub.js'
 import { AUTH, authAs } from './helpers/auth.js'
 import { resetDb, createUser, createMatch, createPhoto, insertRow, sql } from './helpers/db.js'
 
@@ -243,12 +244,23 @@ describe('POST /matches/:matchId/messages', () => {
       expect(row.notified_offline_at).toBeNull()
     })
 
-    it('does not send an offline notification when the recipient is online', async () => {
+    it('does not send an offline notification when the recipient is online (app open)', async () => {
+      const spy = vi.spyOn(chatHub, 'isOnline').mockReturnValue(true)
+      try {
+        await setup({ last_active: RECENT(), notified_offline_at: null })
+        const res = await send({ body: 'hi' })
+        expect(res.statusCode).toBe(200)
+        await settle()
+        expect(notifyNewMessage).not.toHaveBeenCalled()
+      } finally { spy.mockRestore() }
+    })
+
+    it('notifies a recently active recipient who is not online — no 10-minute wait', async () => {
       await setup({ last_active: RECENT(), notified_offline_at: null })
       const res = await send({ body: 'hi' })
       expect(res.statusCode).toBe(200)
       await settle()
-      expect(notifyNewMessage).not.toHaveBeenCalled()
+      expect(notifyNewMessage).toHaveBeenCalledTimes(1)
     })
 
     it('woman: does not notify again when already notified in the last 4h of this offline stretch', async () => {

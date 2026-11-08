@@ -30,6 +30,7 @@ vi.mock('../src/messaging/deliver.js', async (orig) => {
 
 import { notifyMatch, notifyNewMessage, notifyNewLike } from '../src/bot.js'
 import { runFakeLikerJob } from '../src/jobs/fakeLiker.js'
+import { chatHub } from '../src/realtime/hub.js'
 import { seedIcebreakers } from '../src/icebreakers/seed.js'
 import { icebreakerQuestion } from '../src/icebreakers/catalog.js'
 import { tFor } from '../src/i18n/index.js'
@@ -918,9 +919,17 @@ describe('runFakeLikerJob — salam notification gating', () => {
     expect(f1.notified_offline_at).toBeNull()
   })
 
-  it('does not notify when the real user is online (<10 min)', async () => {
-    await runWithReal({ last_active: RECENT, telegram_id: 777 })
-    expect(notifyNewMessage).not.toHaveBeenCalled()
+  it('does not notify when the real user is online (app open)', async () => {
+    const spy = vi.spyOn(chatHub, 'isOnline').mockReturnValue(true)
+    try {
+      await runWithReal({ last_active: RECENT, telegram_id: 777 })
+      expect(notifyNewMessage).not.toHaveBeenCalled()
+    } finally { spy.mockRestore() }
+  })
+
+  it('notifies a recently active real user who is not online — no 10-minute wait', async () => {
+    await runWithReal({ gender: 'man', last_active: RECENT, telegram_id: 777 })
+    await vi.waitFor(() => expect(notifyNewMessage).toHaveBeenCalledTimes(1))
   })
 
   it('does not notify when allows_write_to_pm is false', async () => {

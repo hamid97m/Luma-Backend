@@ -3,6 +3,8 @@ import { sql, isUuid, defined } from '../../db.js'
 import { countAudience, fetchAudience, fetchPushAudience, type BroadcastFilters } from '../../messaging/audience.js'
 import { runBroadcast, botSendAdapter, pushSendAdapter, type SendOutcome } from '../../messaging/broadcast.js'
 import { linkFromButton } from '../../push/links.js'
+import { isPushConfigured } from '../../push/fcm.js'
+import { isStandby } from '../../appMode.js'
 import { sendBroadcastMessage, forwardBroadcastMessage, verifyForwardSource } from '../../bot.js'
 import { validateButton } from '../../messaging/messageButton.js'
 import { parseChannelMessageLink } from '../../messaging/channelLink.js'
@@ -109,9 +111,21 @@ async function executeBroadcast(
   }
 }
 
+/** Why a push broadcast can't go out right now (same order as the admin test
+ *  push): null when it can. */
+function pushUnavailable(): 'standby' | 'push_not_configured' | null {
+  if (isStandby()) return 'standby'
+  if (!isPushConfigured()) return 'push_not_configured'
+  return null
+}
+
 export async function adminBroadcastsRoutes(app: FastifyInstance) {
-  app.post('/broadcasts/preview', async (req) => {
-    const { filters, channel } = req.body as { filters?: BroadcastFilters; channel?: string }
+  app.post('/broadcasts/preview', async (req, reply) => {
+    const { filters, channel } = (req.body ?? {}) as { filters?: BroadcastFilters; channel?: string }
+    if (channel === 'push') {
+      const why = pushUnavailable()
+      if (why) return reply.status(503).send({ error: why })
+    }
     // A failed count used to read as 0 (the query error was ignored).
     const count = await countAudience(filters ?? {}, channel === 'push' ? 'push' : 'bot').catch(() => 0)
     return { count }
@@ -144,6 +158,8 @@ export async function adminBroadcastsRoutes(app: FastifyInstance) {
       if (trimmed.length > MAX_PUSH_BODY_LEN) return reply.status(400).send({ error: 'message_too_long' })
       const btn = validateButton(body.button)
       if (!btn.ok) return reply.status(400).send({ error: btn.error })
+      const why = pushUnavailable()
+      if (why) return reply.status(503).send({ error: why })
 
       insert = { kind: 'push', channel: 'push', title, message: trimmed }
       send = pushSendAdapter({ type: 'broadcast', title, body: trimmed, ...linkFromButton(btn.button) })

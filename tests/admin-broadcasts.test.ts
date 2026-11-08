@@ -376,6 +376,34 @@ describe('admin push broadcasts', () => {
     expect(res.json()).toEqual({ count: 1 })
   })
 
+  it('push broadcast and preview are 503 standby in standby mode', async () => {
+    await withToken()
+    process.env.APP_MODE = 'standby'
+    const res = await post({ channel: 'push', title: 't', message: 'm' })
+    expect(res.statusCode).toBe(503)
+    expect(res.json()).toEqual({ error: 'standby' })
+    const pre = await app.inject({ method: 'POST', url: '/admin/broadcasts/preview', headers, payload: { channel: 'push' } })
+    expect(pre.statusCode).toBe(503)
+    expect(pre.json()).toEqual({ error: 'standby' })
+    expect(await sql`select id from broadcasts`).toHaveLength(0)
+  })
+
+  it('push broadcast and preview are 503 push_not_configured without an FCM key', async () => {
+    await withToken()
+    delete process.env.FCM_SERVICE_ACCOUNT_FILE
+    await initPush()
+    const res = await post({ channel: 'push', title: 't', message: 'm' })
+    expect(res.statusCode).toBe(503)
+    expect(res.json()).toEqual({ error: 'push_not_configured' })
+    const pre = await app.inject({ method: 'POST', url: '/admin/broadcasts/preview', headers, payload: { channel: 'push' } })
+    expect(pre.statusCode).toBe(503)
+    expect(pre.json()).toEqual({ error: 'push_not_configured' })
+    expect(await sql`select id from broadcasts`).toHaveLength(0)
+    // bot-channel preview is unaffected
+    const bot = await app.inject({ method: 'POST', url: '/admin/broadcasts/preview', headers, payload: {} })
+    expect(bot.statusCode).toBe(200)
+  })
+
   it('GET list and detail include channel and title', async () => {
     const b = await insertRow('broadcasts', { ...BROADCAST_ROW, kind: 'push', channel: 'push', title: 'T' })
     const list = await app.inject({ method: 'GET', url: '/admin/broadcasts', headers })

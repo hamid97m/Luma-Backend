@@ -43,10 +43,10 @@ Reply with a JSON object only, exactly: {"approved": boolean, "reason": string |
 Reject (approved false) only when the photo clearly breaks one of these rules, with reason set to the rule's code:
 - "no_face": no clearly visible human face — back of the head, too far away, face hidden by a mask, emoji or sticker, or too dark or blurry to see the face.
 - "not_real_person": not a real photo of a person — cartoon, drawing, anime, AI-generated art, logo, meme, landscape, object, animal or a screenshot.
-- "celebrity_or_stock": a recognizable celebrity, athlete or public figure, or a professional stock, model or advertising photo.
+- "celebrity_or_stock": not the user's own photo — a recognizable celebrity, actor, singer, athlete, influencer or other public figure, or an image taken from the internet: a professional stock, model, fashion, magazine or advertising shot, a studio photoshoot with professional lighting and retouching, a movie or TV still, a wallpaper or Pinterest-style aesthetic picture, or any photo carrying a watermark, stock-site logo, photographer credit or another account's username.
 - "nudity": nudity or sexual content. Swimwear at a beach or pool and gym clothes are fine; exposed genitals or nipples, underwear-only shots or sexual poses are not.
 - "contact_or_ad": a visible phone number, social-media handle or ID, URL, QR code, or advertising text.
-Sunglasses, hats, filters, selfies and casual or low-quality photos are fine. If you are unsure, approve.
+Sunglasses, hats, filters, selfies and casual or low-quality photos are fine: an ordinary phone selfie or snapshot of a non-famous person is the user's own photo. If you are unsure, approve.
 When approved, reason is null.`
 
 /**

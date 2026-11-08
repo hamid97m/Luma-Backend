@@ -11,7 +11,7 @@ const EVENT_NAMES = new Set([
 ])
 /** Onboarding order; the admin funnel sorts by it too. */
 export const SIGNUP_STEPS = ['picker', 'name', 'city', 'age', 'gender', 'pref', 'interests', 'photo']
-const PLATFORMS = ['telegram', 'web']
+const PLATFORMS = ['telegram', 'web', 'android']
 // This table must never hold user-typed content, so anything else is stored as null.
 const DETAIL_RE = /^[a-z0-9_:.-]{1,32}$/
 const LOCALE_RE = /^[A-Za-z0-9_-]{1,16}$/

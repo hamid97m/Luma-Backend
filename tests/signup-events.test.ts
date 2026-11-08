@@ -41,6 +41,11 @@ describe('POST /signup-events', () => {
     ])
   })
 
+  it('stores the android platform', async () => {
+    expect((await post(body([{ name: 'step_view', step: 'city' }], { platform: 'android' }))).statusCode).toBe(204)
+    expect((await rows())[0].platform).toBe('android')
+  })
+
   it('attaches user_id from valid initData', async () => {
     const user = await createUser()
     authAs(user as { telegram_id: number })

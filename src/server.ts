@@ -29,6 +29,8 @@ import { tonpaysWebhookRoutes } from './routes/tonpaysWebhook.js'
 import { mediaRoutes } from './routes/media.js'
 import { eventsRoutes } from './realtime/eventsRoute.js'
 import { registerHttpMetrics } from './metrics.js'
+import { parseClientInfo } from './devices/clientInfo.js'
+import { recordDevice } from './devices/record.js'
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -49,6 +51,8 @@ export function isPausedExempt(method: string, url: string): boolean {
   // Web bootstrap: like /auth/verify, answers with the profile (paused: true)
   // so the client can route to the photo-required screen.
   if (method === 'GET') return path === '/auth/me'
+  // Android signs out / refreshes its push token while paused too.
+  if ((method === 'PUT' || method === 'DELETE') && path === '/devices/push-token') return true
   if (method !== 'POST') return false
   return (
     path === '/profile/me/photos/upload-url' ||
@@ -88,6 +92,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(cors, {
     origin: corsOrigins.length ? corsOrigins : '*',
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'X-Client-Platform', 'X-Client-Version', 'X-Device-Id', 'X-Device-Model', 'X-Device-Os', 'Cache-Control'],
     // Cache preflights: the signup page_hidden event fires as the webview closes,
     // when a fresh preflight may never finish.
     maxAge: 600,
@@ -138,7 +143,8 @@ export async function buildApp(): Promise<FastifyInstance> {
 
     // Website sessions send `Bearer <jwt>`; the Mini App sends raw initData.
     let where
-    if (authorization.startsWith('Bearer ')) {
+    const authKind = authorization.startsWith('Bearer ') ? 'bearer' : 'initData'
+    if (authKind === 'bearer') {
       const userId = verifySessionToken(authorization.slice('Bearer '.length))
       if (!userId) return reply.status(401).send({ error: 'invalid_session' })
       where = sql`id = ${userId}`
@@ -161,6 +167,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     if (data.banned_at) return reply.status(401).send({ error: 'account_banned', botUsername: getBotUsername() })
     req.userId = data.id
     req.isPaused = Boolean(data.paused_at)
+    recordDevice(data.id, parseClientInfo(req.headers, authKind), req.log)
     if (req.isPaused && !isPausedExempt(req.method, req.url)) {
       return reply.status(403).send({ error: 'account_paused' })
     }

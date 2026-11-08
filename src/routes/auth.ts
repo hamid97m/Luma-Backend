@@ -1,16 +1,19 @@
-import { FastifyInstance, FastifyReply } from 'fastify'
+import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { verifyInitData, verifyTelegramWidget } from '../auth.js'
 import { signIn, loadAuthUser, type Identity } from '../accounts.js'
 import { isSessionSecretConfigured, signSessionToken } from '../session.js'
 import { verifyGoogleIdToken } from '../googleAuth.js'
+import { parseClientInfo } from '../devices/clientInfo.js'
+import { recordDevice } from '../devices/record.js'
 
 /** Website sign-in: the same account lookup as the Mini App, answered with a
  *  session token since the browser has no initData to resend. */
-async function webSignIn(identity: Identity, reply: FastifyReply) {
+async function webSignIn(identity: Identity, req: FastifyRequest, reply: FastifyReply) {
   // Checked before signIn so a misconfigured server creates no accounts.
   if (!isSessionSecretConfigured()) return reply.status(503).send({ error: 'web_login_unavailable' })
   const result = await signIn(identity)
   if (!result.ok) return reply.status(result.status).send(result.body)
+  recordDevice(result.userId, parseClientInfo(req.headers, 'bearer'), req.log)
   return { token: signSessionToken(result.userId), user: result.user }
 }
 
@@ -27,7 +30,9 @@ export async function authRoutes(app: FastifyInstance) {
 
     const startParam = new URLSearchParams(initData).get('start_param')
     const result = await signIn({ kind: 'telegram', tgUser, startParam })
-    return result.ok ? { user: result.user } : reply.status(result.status).send(result.body)
+    if (!result.ok) return reply.status(result.status).send(result.body)
+    recordDevice(result.userId, parseClientInfo(req.headers, 'initData'), req.log)
+    return { user: result.user }
   })
 
   // Telegram Login Widget payload: id, first_name, last_name?, username?,
@@ -41,7 +46,7 @@ export async function authRoutes(app: FastifyInstance) {
     const tgUser = verifyTelegramWidget(body, process.env.BOT_TOKEN ?? '')
     if (!tgUser) return reply.status(401).send({ error: 'invalid_telegram_login' })
 
-    return webSignIn({ kind: 'telegram', tgUser }, reply)
+    return webSignIn({ kind: 'telegram', tgUser }, req, reply)
   })
 
   // "Sign in with Google": `credential` is the ID token from Google Identity Services.
@@ -54,14 +59,14 @@ export async function authRoutes(app: FastifyInstance) {
     const google = await verifyGoogleIdToken(credential)
     if (!google) return reply.status(401).send({ error: 'invalid_google_login' })
 
-    return webSignIn({ kind: 'google', ...google }, reply)
+    return webSignIn({ kind: 'google', ...google }, req, reply)
   })
 
   // Website counterpart of initData 'dev_mode': sign in as the dev user from a
   // plain browser. Never registered in production.
   if (process.env.NODE_ENV !== 'production') {
-    app.post('/auth/dev', async (_req, reply) =>
-      webSignIn({ kind: 'telegram', tgUser: { id: 999999, first_name: 'Dev', username: 'devuser' } }, reply))
+    app.post('/auth/dev', async (req, reply) =>
+      webSignIn({ kind: 'telegram', tgUser: { id: 999999, first_name: 'Dev', username: 'devuser' } }, req, reply))
   }
 
   // Behind the auth preHandler (Bearer or initData), which already rejects

@@ -1,7 +1,8 @@
 import { FastifyInstance } from 'fastify'
 import { sql, isUuid, defined } from '../../db.js'
-import { countAudience, fetchAudience, type BroadcastFilters } from '../../messaging/audience.js'
-import { runBroadcast } from '../../messaging/broadcast.js'
+import { countAudience, fetchAudience, fetchPushAudience, type BroadcastFilters } from '../../messaging/audience.js'
+import { runBroadcast, botSendAdapter, pushSendAdapter, type SendOutcome } from '../../messaging/broadcast.js'
+import { linkFromButton } from '../../push/links.js'
 import { sendBroadcastMessage, forwardBroadcastMessage, verifyForwardSource } from '../../bot.js'
 import { validateButton } from '../../messaging/messageButton.js'
 import { parseChannelMessageLink } from '../../messaging/channelLink.js'
@@ -12,6 +13,8 @@ import {
 
 const MAX_MESSAGE_LEN = 4096
 const MAX_BUTTON_TITLE_LEN = 64
+const MAX_PUSH_TITLE_LEN = 100
+const MAX_PUSH_BODY_LEN = 500
 
 /** `{ en?: {message?, buttonTitle?}, ar?: {...} }` for the text kind. Persian is the
  * base `message`/button title, so `fa` is not an accepted key. */
@@ -55,6 +58,8 @@ function serialize(row: any) {
   return {
     id: row.id,
     kind: row.kind ?? 'text',
+    channel: row.channel ?? 'bot',
+    title: row.title ?? null,
     message: row.message,
     filters: row.filters,
     status: row.status,
@@ -72,13 +77,13 @@ function serialize(row: any) {
  * sends to one recipient — a composed text DM or a channel forward. */
 async function executeBroadcast(
   id: string,
-  targets: { id: string; telegram_id: number }[],
-  deliver: (telegramId: number) => Promise<void>,
+  targets: { id: string }[],
+  send: (target: any) => Promise<SendOutcome>,
   log: any,
 ) {
   try {
     const { sent, failed } = await runBroadcast(targets, {
-      send: deliver,
+      send,
       onOptOut: async (userId) => {
         await sql`update users set allows_write_to_pm = false where id = ${userId}`
       },
@@ -106,26 +111,44 @@ async function executeBroadcast(
 
 export async function adminBroadcastsRoutes(app: FastifyInstance) {
   app.post('/broadcasts/preview', async (req) => {
-    const { filters } = req.body as { filters?: BroadcastFilters }
+    const { filters, channel } = req.body as { filters?: BroadcastFilters; channel?: string }
     // A failed count used to read as 0 (the query error was ignored).
-    const count = await countAudience(filters ?? {}).catch(() => 0)
+    const count = await countAudience(filters ?? {}, channel === 'push' ? 'push' : 'bot').catch(() => 0)
     return { count }
   })
 
   app.post('/broadcasts', async (req, reply) => {
     const body = req.body as {
-      kind?: string; message?: string; link?: string
+      kind?: string; message?: string; link?: string; channel?: string; title?: string
       filters?: BroadcastFilters; button?: unknown
     }
+    const channel = body.channel ?? 'bot'
+    if (channel !== 'bot' && channel !== 'push') return reply.status(400).send({ error: 'invalid_channel' })
+    const isPush = channel === 'push'
     const isForward = body.kind === 'forward'
     const f = body.filters ?? {}
 
     // Row fields + the per-recipient delivery closure differ by kind; everything
     // downstream (audience, job loop, reporting) is shared.
     let insert: Record<string, unknown>
-    let deliver: (telegramId: number) => Promise<void>
+    let send: (target: any) => Promise<SendOutcome>
+    let pushTargets: { id: string; tokens: string[] }[] | undefined
 
-    if (isForward) {
+    if (isPush) {
+      if (isForward) return reply.status(400).send({ error: 'push_forward_unsupported' })
+      const title = (body.title ?? '').trim()
+      if (!title) return reply.status(400).send({ error: 'empty_title' })
+      if (title.length > MAX_PUSH_TITLE_LEN) return reply.status(400).send({ error: 'title_too_long' })
+      const trimmed = (body.message ?? '').trim()
+      if (!trimmed) return reply.status(400).send({ error: 'empty_message' })
+      if (trimmed.length > MAX_PUSH_BODY_LEN) return reply.status(400).send({ error: 'message_too_long' })
+      const btn = validateButton(body.button)
+      if (!btn.ok) return reply.status(400).send({ error: btn.error })
+
+      insert = { kind: 'push', channel: 'push', title, message: trimmed }
+      send = pushSendAdapter({ type: 'broadcast', title, body: trimmed, ...linkFromButton(btn.button) })
+      pushTargets = await fetchPushAudience(f)
+    } else if (isForward) {
       const parsed = parseChannelMessageLink(body.link ?? '')
       if (!parsed) return reply.status(400).send({ error: 'invalid_link' })
 
@@ -147,7 +170,7 @@ export async function adminBroadcastsRoutes(app: FastifyInstance) {
         source_chat_id: parsed.chatId,
         source_message_id: parsed.messageId,
       }
-      deliver = (telegramId) => forwardBroadcastMessage(telegramId, parsed.chatId, parsed.messageId)
+      send = botSendAdapter((telegramId) => forwardBroadcastMessage(telegramId, parsed.chatId, parsed.messageId))
     } else {
       const trimmed = (body.message ?? '').trim()
       if (!trimmed) return reply.status(400).send({ error: 'empty_message' })
@@ -157,10 +180,10 @@ export async function adminBroadcastsRoutes(app: FastifyInstance) {
       if (!btn.ok) return reply.status(400).send({ error: btn.error })
 
       insert = { kind: 'text', message: trimmed }
-      deliver = (telegramId) => sendBroadcastMessage(telegramId, trimmed, btn.button)
+      send = botSendAdapter((telegramId) => sendBroadcastMessage(telegramId, trimmed, btn.button))
     }
 
-    const targets = await fetchAudience(f)
+    const targets: { id: string }[] = pushTargets ?? await fetchAudience(f)
     if (targets.length === 0) return reply.status(400).send({ error: 'empty_audience' })
 
     let row: any
@@ -181,7 +204,7 @@ export async function adminBroadcastsRoutes(app: FastifyInstance) {
     }
     if (!row) return reply.status(500).send({ error: 'broadcast_create_failed' })
 
-    void executeBroadcast(row.id, targets, deliver, req.log)
+    void executeBroadcast(row.id, targets, send, req.log)
     return { broadcast: serialize(row) }
   })
 

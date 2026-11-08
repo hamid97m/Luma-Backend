@@ -1,4 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { generateKeyPairSync } from 'node:crypto'
+import { initPush, __setPushTransportForTests } from '../src/push/fcm.js'
 
 vi.mock('../src/bot.js', () => ({
   sendBroadcastMessage: vi.fn().mockResolvedValue(undefined),
@@ -112,7 +117,7 @@ describe('admin broadcasts', () => {
     expect(optedOut.allows_write_to_pm).toBe(false)
 
     // Delivery closure sends the composed text to the target.
-    await vi.mocked(runBroadcast).mock.calls[0][1].send(42)
+    await vi.mocked(runBroadcast).mock.calls[0][1].send({ id: u0.id, telegram_id: 42 })
     expect(sendBroadcastMessage).toHaveBeenCalledWith(42, 'hello', undefined)
   })
 
@@ -288,6 +293,95 @@ describe('admin broadcasts', () => {
     const res = await app.inject({ method: 'PUT', url: '/admin/broadcasts/purchase-message', headers, payload: { enabled: true, kind: 'forward', link: 'https://t.me/mychannel/9' } })
     expect(res.statusCode).toBe(400)
     expect(res.json().error).toBe('forward_source_unreachable')
+  })
+})
+
+describe('admin push broadcasts', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  let headers: Record<string, string>
+  let tmp: string
+  let bodies: any[]
+  const savedEnv: Record<string, string | undefined> = {}
+
+  beforeEach(async () => {
+    await resetDb()
+    app = await buildApp()
+    ;({ headers } = await createAdmin())
+    for (const k of ['FCM_SERVICE_ACCOUNT_FILE', 'APP_MODE', 'WEB_URL']) savedEnv[k] = process.env[k]
+    delete process.env.APP_MODE
+    process.env.WEB_URL = 'https://app.example.com'
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bc-push-'))
+    const keyFile = path.join(tmp, 'sa.json')
+    const { privateKey } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    })
+    fs.writeFileSync(keyFile, JSON.stringify({
+      type: 'service_account', project_id: 'proj-x', private_key: privateKey,
+      client_email: 'sa@proj-x.iam.gserviceaccount.com',
+    }))
+    process.env.FCM_SERVICE_ACCOUNT_FILE = keyFile
+    await initPush()
+    bodies = []
+    __setPushTransportForTests(async (body) => { bodies.push(body); return { status: 200, json: {} } })
+  })
+  afterEach(() => {
+    __setPushTransportForTests(null)
+    for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
+    fs.rmSync(tmp, { recursive: true, force: true })
+  })
+
+  async function withToken(overrides: Record<string, unknown> = {}) {
+    const u = await createUser(overrides)
+    await sql`insert into user_devices (user_id, device_id, platform, push_token) values (${u.id}, ${'d-' + u.id}, 'android', ${'tok-' + u.id})`
+    return u
+  }
+  const post = (payload: any) => app.inject({ method: 'POST', url: '/admin/broadcasts', headers, payload })
+
+  it('sends a push broadcast to users with tokens and records channel/title', async () => {
+    await withToken(); await withToken(); await createUser()
+    vi.mocked(runBroadcast).mockImplementationOnce(async (t, o) =>
+      (await vi.importActual<typeof import('../src/messaging/broadcast.js')>('../src/messaging/broadcast.js'))
+        .runBroadcast(t, { ...o, sleep: async () => {} }))
+    const res = await post({ channel: 'push', title: 'Hello', message: 'Body', filters: {}, button: { title: 'Go', kind: 'screen', screen: 'plans' } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().broadcast).toMatchObject({ kind: 'push', channel: 'push', title: 'Hello', message: 'Body', totalRecipients: 2 })
+    await settled(res.json().broadcast.id)
+    const [row] = await sql`select * from broadcasts`
+    expect(row).toMatchObject({ status: 'completed', sent_count: 2, failed_count: 0, channel: 'push', kind: 'push' })
+    expect(bodies).toHaveLength(2)
+    expect(bodies[0].message.notification).toEqual({ title: 'Hello', body: 'Body' })
+    expect(bodies[0].message.data).toMatchObject({ type: 'broadcast', screen: 'plans' })
+    expect(sendBroadcastMessage).not.toHaveBeenCalled()
+  })
+
+  it('validates push title, message and kind', async () => {
+    await withToken()
+    expect((await post({ channel: 'push', message: 'x' })).json().error).toBe('empty_title')
+    expect((await post({ channel: 'push', title: 'x'.repeat(101), message: 'x' })).json().error).toBe('title_too_long')
+    expect((await post({ channel: 'push', title: 't', message: ' ' })).json().error).toBe('empty_message')
+    expect((await post({ channel: 'push', title: 't', message: 'x'.repeat(501) })).json().error).toBe('message_too_long')
+    const fwd = await post({ channel: 'push', kind: 'forward', title: 't', link: 'https://t.me/c/1' })
+    expect(fwd.statusCode).toBe(400)
+    expect(fwd.json().error).toBe('push_forward_unsupported')
+    expect((await post({ channel: 'smoke', message: 'x' })).json().error).toBe('invalid_channel')
+  })
+
+  it('push preview counts users with tokens; empty push audience is rejected', async () => {
+    const empty = await post({ channel: 'push', title: 't', message: 'm' })
+    expect(empty.json().error).toBe('empty_audience')
+    await withToken(); await createUser()
+    const res = await app.inject({ method: 'POST', url: '/admin/broadcasts/preview', headers, payload: { channel: 'push' } })
+    expect(res.json()).toEqual({ count: 1 })
+  })
+
+  it('GET list and detail include channel and title', async () => {
+    const b = await insertRow('broadcasts', { ...BROADCAST_ROW, kind: 'push', channel: 'push', title: 'T' })
+    const list = await app.inject({ method: 'GET', url: '/admin/broadcasts', headers })
+    expect(list.json().items[0]).toMatchObject({ channel: 'push', title: 'T' })
+    const one = await app.inject({ method: 'GET', url: `/admin/broadcasts/${b.id}`, headers })
+    expect(one.json().broadcast).toMatchObject({ channel: 'push', title: 'T' })
   })
 })
 

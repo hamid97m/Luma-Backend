@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { countAudience, fetchAudience } from '../src/messaging/audience.js'
+import { countAudience, fetchAudience, fetchPushAudience } from '../src/messaging/audience.js'
 import { resetDb, createUser, sql } from './helpers/db.js'
 
 const NOW = Date.parse('2026-09-01T00:00:00.000Z') // fixed clock
@@ -7,9 +7,9 @@ const DAY = 86_400_000
 const iso = (ms: number) => new Date(ms).toISOString()
 
 /** Names of the users the filters select, sorted. */
-async function audience(filters: any): Promise<string[]> {
-  const targets = await fetchAudience(filters, NOW)
-  const count = await countAudience(filters, NOW)
+async function audience(filters: any, channel: 'bot' | 'push' = 'bot'): Promise<string[]> {
+  const targets = channel === 'push' ? await fetchPushAudience(filters, NOW) : await fetchAudience(filters, 'bot', NOW)
+  const count = await countAudience(filters, channel, NOW)
   expect(count).toBe(targets.length) // preview count and send list always agree
   if (!targets.length) return []
   const rows = await sql<{ name: string }[]>`select name from users where id = any(${targets.map((t) => t.id)}::uuid[])`
@@ -33,7 +33,7 @@ describe('broadcast audience', () => {
 
   it('returns id + telegram_id per target', async () => {
     const u = await createUser({ name: 'ok' })
-    expect(await fetchAudience({}, NOW)).toEqual([{ id: u.id, telegram_id: u.telegram_id }])
+    expect(await fetchAudience({}, 'bot', NOW)).toEqual([{ id: u.id, telegram_id: u.telegram_id }])
   })
 
   it('filters by genders and lookingFor', async () => {
@@ -86,7 +86,40 @@ describe('broadcast audience', () => {
       await sql`
       insert into users (telegram_id, name, age, gender, looking_for, account_status)
       select 5000000 + g, 'bulk', 28, 'man', 'women', 'active' from generate_series(1, 1005) g`
-    expect(await fetchAudience({}, NOW)).toHaveLength(1005)
-    expect(await countAudience({}, NOW)).toBe(1005)
+    expect(await fetchAudience({}, 'bot', NOW)).toHaveLength(1005)
+    expect(await countAudience({}, 'bot', NOW)).toBe(1005)
+  })
+
+  async function device(userId: string, platform: string, opts: { token?: string; seenMsAgo?: number } = {}) {
+    await sql`insert into user_devices (user_id, device_id, platform, push_token, last_seen_at)
+      values (${userId}, ${'d-' + Math.random()}, ${platform}, ${opts.token ?? null}, ${iso(Date.now() - (opts.seenMsAgo ?? 0))})`
+  }
+
+  it('push channel includes a Google-only user with a token and excludes one without', async () => {
+    const g = await createUser({ name: 'googleOnly', telegram_id: -7 })
+    await device(g.id, 'android', { token: 'tok-g1' })
+    await device(g.id, 'android', { token: 'tok-g2' })
+    const t = await createUser({ name: 'noToken' })
+    await device(t.id, 'android')
+    await createUser({ name: 'noDevice' })
+    const seed = await createUser({ name: 'seed', is_seed: true })
+    await device(seed.id, 'android', { token: 'tok-s' })
+    expect(await audience({}, 'push')).toEqual(['googleOnly'])
+    const rows = await fetchPushAudience({}, NOW)
+    expect(rows).toEqual([{ id: g.id, tokens: ['tok-g1', 'tok-g2'] }])
+    // bot channel is unchanged: Google-only user is not on it
+    expect(await audience({})).toEqual(['noDevice', 'noToken'])
+  })
+
+  it('platforms filter needs a device of that platform seen in the last 90 days', async () => {
+    const fresh = await createUser({ name: 'fresh' })
+    await device(fresh.id, 'android', { token: 'tok-f' })
+    const old = await createUser({ name: 'old' })
+    await device(old.id, 'android', { token: 'tok-o', seenMsAgo: 91 * DAY })
+    const web = await createUser({ name: 'web' })
+    await device(web.id, 'web')
+    expect(await audience({ platforms: ['android'] }, 'push')).toEqual(['fresh'])
+    expect(await audience({ platforms: ['android'] })).toEqual(['fresh'])
+    expect(await audience({ platforms: ['web'] })).toEqual(['web'])
   })
 })

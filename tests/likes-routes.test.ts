@@ -105,8 +105,12 @@ describe('GET /likes', () => {
     vi.mocked(getIncomingLikers).mockResolvedValue([M()] as any)
     await setup({ enabled: false, myPremiumUntil: null, seenAt: null })
     await get()
-    await new Promise((r) => setTimeout(r, 50)) // fire-and-forget update
-    const [row] = await sql`select likes_seen_at from users where id = ${me.id}`
+    // fire-and-forget update: wait for it to land rather than sleeping
+    const row = await vi.waitFor(async () => {
+      const [r] = await sql`select likes_seen_at from users where id = ${me.id}`
+      if (!r.likes_seen_at) throw new Error('likes_seen_at not written yet')
+      return r
+    })
     expect(Date.now() - new Date(row.likes_seen_at).getTime()).toBeLessThan(5_000)
   })
 

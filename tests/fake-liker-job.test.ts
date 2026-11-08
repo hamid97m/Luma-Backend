@@ -11,6 +11,22 @@ vi.mock('../src/bot.js', () => ({
   notifyNewLike: vi.fn().mockResolvedValue(undefined),
 }))
 vi.mock('../src/icebreakers/seed.js', () => ({ seedIcebreakers: vi.fn().mockResolvedValue(undefined) }))
+// The job fires the salam notification and forgets it (void). Record each
+// delivery promise so tests can await the whole notify chain (incl. its real
+// Postgres round trips) instead of guessing with a tick, and so no delivery
+// leaks into the next test.
+const pendingDeliveries = vi.hoisted(() => [] as Promise<unknown>[])
+vi.mock('../src/messaging/deliver.js', async (orig) => {
+  const m = await orig<typeof import('../src/messaging/deliver.js')>()
+  return {
+    ...m,
+    deliverMessageNotification: (...args: Parameters<typeof m.deliverMessageNotification>) => {
+      const p = m.deliverMessageNotification(...args)
+      pendingDeliveries.push(p)
+      return p
+    },
+  }
+})
 
 import { notifyMatch, notifyNewMessage, notifyNewLike } from '../src/bot.js'
 import { runFakeLikerJob } from '../src/jobs/fakeLiker.js'
@@ -174,12 +190,20 @@ function enabledConfig(max = 100) {
 const silent = { info: () => {}, warn: () => {} }
 const mkLogger = () => ({ info: vi.fn(), warn: vi.fn() })
 const flush = () => new Promise((r) => setImmediate(r))
+/** Wait until every salam notification the job started has fully settled. */
+async function settleDeliveries() {
+  while (pendingDeliveries.length > 0) await Promise.allSettled(pendingDeliveries.splice(0))
+}
 
 beforeEach(async () => {
+  await settleDeliveries()
   vi.clearAllMocks()
   await resetDb()
 })
-afterEach(clearFaults)
+afterEach(async () => {
+  await settleDeliveries()
+  clearFaults()
+})
 
 // ---------------------------------------------------------------------------
 
@@ -878,11 +902,13 @@ describe('runFakeLikerJob — salam notification gating', () => {
     const logs = await useStore(store)
     await runFakeLikerJob('schedule', silent)
     await flush()
+    await settleDeliveries()
     return logs
   }
 
   it('notifies an offline, eligible real user and stamps notified_offline_at', async () => {
     await runWithReal({ last_active: STALE, notified_offline_at: null, telegram_id: 777, allows_write_to_pm: null })
+    await vi.waitFor(() => expect(notifyNewMessage).toHaveBeenCalled())
     expect(notifyNewMessage).toHaveBeenCalledWith(777, 'Sara', SALAM, 'https://p/f1.jpg', id('m1'), null)
     await vi.waitFor(async () => {
       const [r1] = await sql`select notified_offline_at from users where id = ${id('r1')}`
@@ -914,6 +940,7 @@ describe('runFakeLikerJob — salam notification gating', () => {
 
   it('man: is notified even when already notified this offline stretch (no throttle)', async () => {
     await runWithReal({ gender: 'man', last_active: STALE, notified_offline_at: STALE, telegram_id: 777 })
+    await vi.waitFor(() => expect(notifyNewMessage).toHaveBeenCalled())
     expect(notifyNewMessage).toHaveBeenCalledTimes(1)
   })
 })

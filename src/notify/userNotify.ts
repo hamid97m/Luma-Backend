@@ -41,8 +41,11 @@ const clipBody = (s: string) => (s.length > MAX_PUSH_BODY ? `${s.slice(0, MAX_PU
  * `ignoreBotOptOut`: the bot fallback only needs telegram_id > 0, ignoring
  * allows_write_to_pm — for DMs that never checked the flag (gifts, premium
  * purchase), so Telegram users without a token keep today's exact DM.
+ *
+ * `allowBot: false`: push only — no bot fallback this time (new-message
+ * pushes go out before the bot DM's 10-minute offline wait is over).
  */
-export interface DeliverOptions { ignoreBotOptOut?: boolean }
+export interface DeliverOptions { ignoreBotOptOut?: boolean; allowBot?: boolean }
 
 export async function deliverToUser(
   u: NotifyUser,
@@ -62,6 +65,7 @@ export async function deliverToUser(
     }
   }
   if (sent > 0) return 'push'
+  if (opts.allowBot === false) return 'none'
   const botOk = opts.ignoreBotOptOut ? (u.telegram_id ?? 0) > 0 : canBotDm(u)
   if (!botOk) return 'none'
   await botSend()

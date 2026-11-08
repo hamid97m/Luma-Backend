@@ -253,6 +253,59 @@ describe('deliverMessageNotification', () => {
     await deliverMessageNotification({ ...recipient, telegram_id: null }, sender.id, 'Sara', 'hi', m.id)
     expect(bodies).toHaveLength(1)
   })
+
+  describe('not online but active within the last 10 minutes', () => {
+    const oneMinAgo = () => new Date(Date.now() - 60_000).toISOString()
+
+    it('pushes right away (no 10-minute wait) and stamps notified_offline_at', async () => {
+      const { sender, rec, m, recipient } = await setup()
+      await addToken(rec.id)
+      await deliverMessageNotification({ ...recipient, last_active: oneMinAgo() }, sender.id, 'Sara', 'hi', m.id)
+      expect(bodies).toHaveLength(1)
+      expect(bodies[0].message.data.chatId).toBe(m.id)
+      const [row] = await sql`select notified_offline_at from users where id = ${rec.id}`
+      expect(row.notified_offline_at).not.toBeNull()
+    })
+
+    it('still sends nothing while the recipient has an open stream', async () => {
+      const { sender, rec, m, recipient } = await setup()
+      await addToken(rec.id)
+      isConnectedSpy = vi.spyOn(chatHub, 'isConnected').mockImplementation((id) => id === rec.id)
+      await deliverMessageNotification({ ...recipient, last_active: oneMinAgo() }, sender.id, 'Sara', 'hi', m.id)
+      expect(bodies).toHaveLength(0)
+      expect(sendMessage).not.toHaveBeenCalled()
+    })
+
+    it('keeps the 10-minute rule for the Telegram bot DM (no token → nothing yet)', async () => {
+      const { sender, m, recipient } = await setup()
+      await deliverMessageNotification({ ...recipient, last_active: oneMinAgo() }, sender.id, 'Sara', 'hi', m.id)
+      expect(bodies).toHaveLength(0)
+      expect(sendMessage).not.toHaveBeenCalled()
+      expect(sendPhoto).not.toHaveBeenCalled()
+    })
+
+    it('keeps the 10-minute rule for the bot DM when every push fails', async () => {
+      const { sender, rec, m, recipient } = await setup()
+      await addToken(rec.id)
+      status = 500
+      await deliverMessageNotification({ ...recipient, last_active: oneMinAgo() }, sender.id, 'Sara', 'hi', m.id)
+      expect(sendMessage).not.toHaveBeenCalled()
+      expect(sendPhoto).not.toHaveBeenCalled()
+      const [row] = await sql`select notified_offline_at from users where id = ${rec.id}`
+      expect(row.notified_offline_at).toBeNull()
+    })
+
+    it('keeps the women 4-hour limit for push', async () => {
+      const { sender, rec, m, recipient } = await setup()
+      await addToken(rec.id)
+      const hourAgo = new Date(Date.now() - 3_600_000).toISOString()
+      await deliverMessageNotification(
+        { ...recipient, gender: 'woman', last_active: oneMinAgo(), notified_offline_at: hourAgo },
+        sender.id, 'Sara', 'hi', m.id,
+      )
+      expect(bodies).toHaveLength(0)
+    })
+  })
 })
 
 describe('push not configured', () => {

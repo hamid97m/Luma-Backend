@@ -15,15 +15,23 @@ export interface NotifyRecipient {
   gender?: string | null
 }
 
-/** Offline (last_active missing or older than the threshold) and — unless they
- * are a man — not already notified in the last NOTIFY_COOLDOWN_MS. Channel-
- * neutral: applies to push and bot DM alike. notified_offline_at is cleared
- * when the user opens the app again (server.ts), so coming back online resets. */
-export function isOfflineAndCool(r: NotifyRecipient, nowMs: number): boolean {
-  const isOffline = !r.last_active || nowMs - new Date(r.last_active).getTime() > OFFLINE_THRESHOLD_MS
-  if (!isOffline) return false
+/** Offline for the bot DM: last_active missing or older than OFFLINE_THRESHOLD_MS. */
+export function isOffline(r: Pick<NotifyRecipient, 'last_active'>, nowMs: number): boolean {
+  return !r.last_active || nowMs - new Date(r.last_active).getTime() > OFFLINE_THRESHOLD_MS
+}
+
+/** Per-gender throttle: men always; everyone else at most once per
+ * NOTIFY_COOLDOWN_MS. notified_offline_at is cleared when the user opens the
+ * app again (server.ts), so coming back online resets it. Applies to push and
+ * bot DM alike. */
+export function isCooledDown(r: Pick<NotifyRecipient, 'gender' | 'notified_offline_at'>, nowMs: number): boolean {
   if (r.gender === 'man') return true
   return !r.notified_offline_at || nowMs - new Date(r.notified_offline_at).getTime() > NOTIFY_COOLDOWN_MS
+}
+
+/** Offline (10 min) and cooled down — the bot-DM gate for new messages. */
+export function isOfflineAndCool(r: NotifyRecipient, nowMs: number): boolean {
+  return isOffline(r, nowMs) && isCooledDown(r, nowMs)
 }
 
 /** The bot can DM this user: a real Telegram account (positive id — fakes have

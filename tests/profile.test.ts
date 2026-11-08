@@ -289,6 +289,21 @@ describe('DELETE /profile/me', () => {
     errorSpy.mockRestore()
   })
 
+  it('clears the push tokens of all my devices (and only mine)', async () => {
+    const other = await createUser()
+    await sql`insert into user_devices (user_id, device_id, platform, push_token, push_token_at) values
+      (${me.id}, 'd1', 'android', 'mine-1', now()),
+      (${me.id}, 'd2', 'android', 'mine-2', now()),
+      (${other.id}, 'd3', 'android', 'theirs', now())`
+
+    expect((await del()).statusCode).toBe(200)
+
+    const rows = await sql`select user_id, push_token, push_token_at from user_devices order by device_id`
+    expect(rows.map((r) => [r.push_token, r.push_token_at === null])).toEqual([
+      [null, true], [null, true], ['theirs', false],
+    ])
+  })
+
   it('returns 401 when not authenticated', async () => {
     const res = await app.inject({ method: 'DELETE', url: '/profile/me' })
     expect(res.statusCode).toBe(401)

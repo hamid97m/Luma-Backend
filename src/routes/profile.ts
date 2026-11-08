@@ -208,6 +208,14 @@ export async function profileRoutes(app: FastifyInstance) {
       }
     }
 
+    // No more pushes to this account's phones (they'd otherwise keep getting
+    // notifications until the app next re-registered or Firebase pruned them).
+    try {
+      await sql`update user_devices set push_token = null, push_token_at = null where user_id = ${req.userId}`
+    } catch {
+      return reply.status(500).send({ error: 'delete_failed' })
+    }
+
     try {
       await sql`
         update users set ${sql({

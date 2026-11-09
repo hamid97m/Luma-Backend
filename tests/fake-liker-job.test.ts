@@ -942,9 +942,10 @@ describe('runFakeLikerJob — salam notification gating', () => {
     expect(notifyNewMessage).not.toHaveBeenCalled()
   })
 
-  it('woman: does not notify when already notified within 4h of this offline stretch', async () => {
+  it('woman: notified even when notified_offline_at is recent (no global 4h cooldown)', async () => {
     await runWithReal({ gender: 'woman', looking_for: 'women', last_active: STALE, notified_offline_at: STALE, telegram_id: 777 })
-    expect(notifyNewMessage).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(notifyNewMessage).toHaveBeenCalled())
+    expect(notifyNewMessage).toHaveBeenCalledTimes(1)
   })
 
   it('man: is notified even when already notified this offline stretch (no throttle)', async () => {

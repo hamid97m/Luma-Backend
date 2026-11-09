@@ -12,7 +12,7 @@ vi.mock('grammy', () => ({
   Context: class {},
 }))
 
-import { resetDb, createUser, createMatch, sql } from './helpers/db.js'
+import { resetDb, createUser, createMatch, insertRow, sql } from './helpers/db.js'
 import { initPush, __setPushTransportForTests } from '../src/push/fcm.js'
 import {
   notifyUserMatch, notifyUserLike, deliverToUser, type NotifyUser,
@@ -293,7 +293,7 @@ describe('deliverMessageNotification', () => {
       expect(sendMessage.mock.calls.length + sendPhoto.mock.calls.length).toBe(1)
     })
 
-    it('keeps the women 4-hour limit for push', async () => {
+    it('pushes a woman for every message too (no 4-hour limit)', async () => {
       const { sender, rec, m, recipient } = await setup()
       await addToken(rec.id)
       const hourAgo = new Date(Date.now() - 3_600_000).toISOString()
@@ -301,8 +301,152 @@ describe('deliverMessageNotification', () => {
         { ...recipient, gender: 'woman', last_active: oneMinAgo(), notified_offline_at: hourAgo },
         sender.id, 'Sara', 'hi', m.id,
       )
-      expect(bodies).toHaveLength(0)
+      expect(bodies).toHaveLength(1)
     })
+  })
+})
+
+describe('Telegram-style message notifications', () => {
+  const dms = () => sendMessage.mock.calls.length + sendPhoto.mock.calls.length
+  const botRows = (userId: string) =>
+    sql`select match_id, channel, sent_at from message_notifications where user_id = ${userId} order by sent_at`
+
+  async function pair(gender: string, opts: { token?: boolean } = {}) {
+    const sender = await createUser({ name: 'Sara' })
+    const rec = await createUser({ gender })
+    const m = await createMatch(sender.id, rec.id)
+    if (opts.token) await addToken(rec.id)
+    const recipient = {
+      id: rec.id, telegram_id: rec.telegram_id, last_active: null as string | null, notified_offline_at: null,
+      allows_write_to_pm: null, locale: null, gender,
+    }
+    return { sender, rec, m, recipient }
+  }
+
+  /** Insert a message row (as the route does before notifying) and notify. */
+  async function say(p: { sender: any; m: any; recipient: any }, body: string, recipient = p.recipient) {
+    await insertRow('messages', { match_id: p.m.id, sender_id: p.sender.id, body })
+    await deliverMessageNotification(recipient, p.sender.id, 'Sara', body, p.m.id)
+  }
+
+  it('woman with a token: every message in a chat is pushed, tagged by chat, with the unread count', async () => {
+    const p = await pair('woman', { token: true })
+    await say(p, 'one')
+    await say(p, 'two')
+    await say(p, 'three')
+    expect(bodies).toHaveLength(3)
+    for (const b of bodies) {
+      expect(b.message.android.notification.tag).toBe(p.m.id)
+      expect(b.message.notification.title).toBe('Sara')
+    }
+    expect(bodies.map((b) => b.message.data.unread)).toEqual(['1', '2', '3'])
+    expect(bodies.map((b) => b.message.notification.body)).toEqual(['one', 'two', 'three'])
+    expect(dms()).toBe(0)
+  })
+
+  it('unread counts only the unread messages from the sender in that chat', async () => {
+    const p = await pair('woman', { token: true })
+    await insertRow('messages', { match_id: p.m.id, sender_id: p.sender.id, body: 'old', read_at: new Date().toISOString() })
+    await insertRow('messages', { match_id: p.m.id, sender_id: p.rec.id, body: 'mine' })
+    const elsewhere = await createMatch(p.sender.id, (await createUser()).id)
+    await insertRow('messages', { match_id: elsewhere.id, sender_id: p.sender.id, body: 'other chat' })
+    await say(p, 'new')
+    expect(bodies[0].message.data.unread).toBe('1')
+  })
+
+  it('man with a token: 3 messages → 3 pushes, no bot rows recorded', async () => {
+    const p = await pair('man', { token: true })
+    await say(p, 'a'); await say(p, 'b'); await say(p, 'c')
+    expect(bodies).toHaveLength(3)
+    expect(await botRows(p.rec.id)).toHaveLength(0)
+  })
+
+  for (const gender of ['man', 'woman']) {
+    it(`${gender} without a token: bot DM at most once per chat per 10 minutes, reset by activity`, async () => {
+      const p = await pair(gender)
+      await say(p, 'a'); await say(p, 'b'); await say(p, 'c')
+      expect(dms()).toBe(1)
+      const rows = await botRows(p.rec.id)
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({ match_id: p.m.id, channel: 'bot' })
+
+      // Active after that DM → the next message DMs again.
+      const activeAfter = new Date(new Date(rows[0].sent_at).getTime() + 1000).toISOString()
+      await say(p, 'd', { ...p.recipient, last_active: activeAfter })
+      expect(dms()).toBe(2)
+      // Not active since (last_active before the DM) → still held back.
+      await say(p, 'e', { ...p.recipient, last_active: new Date(Date.now() - 3_600_000).toISOString() })
+      expect(dms()).toBe(2)
+
+      // 11 minutes later → DMs again.
+      await sql`update message_notifications set sent_at = now() - interval '11 minutes' where user_id = ${p.rec.id}`
+      await say(p, 'f')
+      expect(dms()).toBe(3)
+    })
+  }
+
+  it('the bot window is per chat: another chat DMs right away', async () => {
+    const p = await pair('woman')
+    await say(p, 'a')
+    const sender2 = await createUser({ name: 'Mina' })
+    const m2 = await createMatch(sender2.id, p.rec.id)
+    await say({ sender: sender2, m: m2, recipient: p.recipient }, 'b')
+    expect(dms()).toBe(2)
+  })
+
+  it('online recipient → nothing sent and no row recorded', async () => {
+    const p = await pair('man')
+    isConnectedSpy = vi.spyOn(chatHub, 'isOnline').mockImplementation((id) => id === p.rec.id)
+    await say(p, 'a')
+    expect(dms()).toBe(0)
+    expect(bodies).toHaveLength(0)
+    expect(await botRows(p.rec.id)).toHaveLength(0)
+  })
+
+  it('race: two concurrent deliveries in one chat for a Telegram-only user → exactly 1 bot DM', async () => {
+    const p = await pair('man')
+    await insertRow('messages', { match_id: p.m.id, sender_id: p.sender.id, body: 'x' })
+    await Promise.all([
+      deliverMessageNotification(p.recipient, p.sender.id, 'Sara', 'x', p.m.id),
+      deliverMessageNotification(p.recipient, p.sender.id, 'Sara', 'y', p.m.id),
+    ])
+    expect(dms()).toBe(1)
+    expect(await botRows(p.rec.id)).toHaveLength(1)
+  })
+
+  it('a push that fails for every token falls back to the bot DM under the per-chat rule; no push row', async () => {
+    status = 400 // plain failure, no retry
+    const p = await pair('woman', { token: true })
+    await say(p, 'a'); await say(p, 'b')
+    expect(bodies).toHaveLength(2)
+    expect(dms()).toBe(1)
+    const rows = await botRows(p.rec.id)
+    expect(rows.map((r) => r.channel)).toEqual(['bot'])
+  })
+
+  it('a failed bot send releases the claim so the next message can DM', async () => {
+    const p = await pair('man')
+    sendMessage.mockRejectedValueOnce(new Error('blocked'))
+    await say(p, 'a')
+    expect(await botRows(p.rec.id)).toHaveLength(0)
+    await say(p, 'b')
+    expect(await botRows(p.rec.id)).toHaveLength(1)
+  })
+
+  it('rows older than 2 days are deleted on the next insert for that user', async () => {
+    const p = await pair('man')
+    const other = await createMatch((await createUser()).id, p.rec.id)
+    await sql`insert into message_notifications (user_id, match_id, channel, sent_at)
+              values (${p.rec.id}, ${other.id}, 'bot', now() - interval '3 days')`
+    const keep = await createUser()
+    const keepMatch = await createMatch((await createUser()).id, keep.id)
+    await sql`insert into message_notifications (user_id, match_id, channel, sent_at)
+              values (${keep.id}, ${keepMatch.id}, 'bot', now() - interval '3 days')`
+    await say(p, 'a')
+    const rows = await botRows(p.rec.id)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].match_id).toBe(p.m.id)
+    expect(await botRows(keep.id)).toHaveLength(1)
   })
 })
 

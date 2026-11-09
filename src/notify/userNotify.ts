@@ -85,6 +85,21 @@ export function safeLinkFields(opts: { screen?: string; chat?: string } = {}): R
   }
 }
 
+/**
+ * The user read a chat: a data-only 'message_read' push to their own devices
+ * so the app cancels the notification tagged with this chatId. Push only (no
+ * bot fallback); users without tokens get nothing. Never throws (logs).
+ */
+export async function notifyUserMessageRead(userId: string, matchId: string): Promise<void> {
+  if (!isPushConfigured() || isStandby()) return
+  try {
+    const { link } = safeLinkFields({ screen: 'matches', chat: matchId })
+    await sendPushToUser(userId, { type: 'message_read', title: '', body: '', link, chatId: matchId, dataOnly: true })
+  } catch (err) {
+    console.error(`[notify] message_read push to ${userId} failed:`, (err as Error)?.message ?? err)
+  }
+}
+
 const localeOf = (u: NotifyUser) => (u.locale as Locale | null) ?? null
 
 /** "It's a match" for one user. Never throws (logs). */

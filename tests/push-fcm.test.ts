@@ -79,11 +79,41 @@ describe('sendPushToTokens', () => {
       message: {
         token: 't1',
         notification: { title: 'Sara', body: 'hi' },
-        android: { priority: 'high', notification: { channel_id: 'default', sound: 'default' } },
+        android: { priority: 'high', notification: { channel_id: 'default', sound: 'default', tag: 'c1' } },
         data: { type: 'message', link: payload.link, screen: 'matches', chatId: 'c1' },
       },
     })
     for (const v of Object.values(bodies[0].message.data)) expect(typeof v).toBe('string')
+  })
+
+  it('tags the notification with chatId only when the payload has one', async () => {
+    const bodies: any[] = []
+    __setPushTransportForTests(async (b) => { bodies.push(b); return { status: 200, json: {} } })
+    await sendPushToTokens(['t1'], { type: 'like', title: 'Sara', body: 'hi', link: 'https://app.test/?screen=likes', screen: 'likes' })
+    expect(bodies[0].message.android).toEqual({ priority: 'high', notification: { channel_id: 'default', sound: 'default' } })
+    expect('tag' in bodies[0].message.android.notification).toBe(false)
+  })
+
+  it('carries data.unread as a string when given', async () => {
+    const bodies: any[] = []
+    __setPushTransportForTests(async (b) => { bodies.push(b); return { status: 200, json: {} } })
+    await sendPushToTokens(['t1'], { ...payload, unread: '3' })
+    expect(bodies[0].message.data.unread).toBe('3')
+  })
+
+  it('a data-only push has no notification block and only android.priority', async () => {
+    const bodies: any[] = []
+    __setPushTransportForTests(async (b) => { bodies.push(b); return { status: 200, json: {} } })
+    await sendPushToTokens(['t1'], {
+      type: 'message_read', title: '', body: '', link: payload.link, chatId: 'c1', dataOnly: true,
+    })
+    expect(bodies[0]).toEqual({
+      message: {
+        token: 't1',
+        android: { priority: 'high' },
+        data: { type: 'message_read', link: payload.link, chatId: 'c1' },
+      },
+    })
   })
 
   it('a 404 token is nulled in user_devices', async () => {

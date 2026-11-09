@@ -263,9 +263,19 @@ describe('POST /matches/:matchId/messages', () => {
       expect(notifyNewMessage).toHaveBeenCalledTimes(1)
     })
 
-    it('woman: does not notify again when already notified in the last 4h of this offline stretch', async () => {
-      const stamp = STALE() // minutes ago — well inside the 4h cooldown
+    it('woman: no global 4h cooldown — a recent notified_offline_at does not block a DM', async () => {
+      await setup({ gender: 'woman', last_active: STALE(), notified_offline_at: STALE() })
+      const res = await send({ body: 'hi' })
+      expect(res.statusCode).toBe(200)
+      await settle()
+      expect(notifyNewMessage).toHaveBeenCalledTimes(1)
+    })
+
+    it('woman: does not DM again in the same chat within 10 minutes when not active since', async () => {
+      const stamp = STALE()
       await setup({ gender: 'woman', last_active: STALE(), notified_offline_at: stamp })
+      await sql`insert into message_notifications (user_id, match_id, channel, sent_at)
+                values (${other.id}, ${match.id}, 'bot', now() - interval '1 minute')`
       const res = await send({ body: 'hi' })
       expect(res.statusCode).toBe(200)
       await settle()
@@ -274,9 +284,11 @@ describe('POST /matches/:matchId/messages', () => {
       expect(row.notified_offline_at).toBe(new Date(stamp).toISOString())
     })
 
-    it('woman: notifies again once the previous DM is older than 4h', async () => {
+    it('woman: DMs again once the previous DM in this chat is older than 10 minutes', async () => {
       const stamp = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString()
-      await setup({ gender: 'woman', last_active: STALE(), notified_offline_at: stamp })
+      await setup({ gender: 'woman', last_active: new Date(Date.now() - 60 * 60 * 1000).toISOString(), notified_offline_at: stamp })
+      await sql`insert into message_notifications (user_id, match_id, channel, sent_at)
+                values (${other.id}, ${match.id}, 'bot', now() - interval '11 minutes')`
       const res = await send({ body: 'hi' })
       expect(res.statusCode).toBe(200)
       await settle()

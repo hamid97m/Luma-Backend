@@ -8,7 +8,7 @@ export type PushType =
   | 'message' | 'gift_message' | 'gift_intro' | 'match' | 'like' | 'like_reveal'
   | 'referral_qualified' | 'referral_reward' | 'premium_purchased' | 'account_paused'
   | 'photo_warning' | 'support_reply' | 'admin_message' | 'purchase_reminder'
-  | 'broadcast' | 'test'
+  | 'broadcast' | 'test' | 'message_read'
 
 export interface PushPayload {
   type: PushType
@@ -18,6 +18,11 @@ export interface PushPayload {
   screen?: string
   chatId?: string
   url?: string
+  /** Message pushes: unread messages from the sender in that chat, as a string. */
+  unread?: string
+  /** No `notification` block: the app handles it silently (e.g. message_read
+   *  cancels the notification tagged with chatId). title/body are ignored. */
+  dataOnly?: boolean
 }
 
 export interface PushResult { ok: string[]; dead: string[]; failed: string[] }
@@ -88,11 +93,17 @@ function buildBody(token: string, p: PushPayload) {
   if (p.screen) data.screen = p.screen
   if (p.chatId) data.chatId = p.chatId
   if (p.url) data.url = p.url
+  if (p.unread !== undefined) data.unread = p.unread
+  if (p.dataOnly) return { message: { token, android: { priority: 'high' }, data } }
+  // Same chat → same tag, so the phone replaces that chat's notification
+  // instead of stacking a new one per message.
+  const notification: Record<string, string> = { channel_id: 'default', sound: 'default' }
+  if (p.chatId) notification.tag = p.chatId
   return {
     message: {
       token,
       notification: { title: p.title, body: p.body },
-      android: { priority: 'high', notification: { channel_id: 'default', sound: 'default' } },
+      android: { priority: 'high', notification },
       data,
     },
   }

@@ -101,7 +101,7 @@ describe('sendPushToTokens', () => {
     expect(bodies[0].message.data.unread).toBe('3')
   })
 
-  it('a data-only push has no notification block and only android.priority', async () => {
+  it('a data-only push has no notification block and normal android priority', async () => {
     const bodies: any[] = []
     __setPushTransportForTests(async (b) => { bodies.push(b); return { status: 200, json: {} } })
     await sendPushToTokens(['t1'], {
@@ -110,7 +110,7 @@ describe('sendPushToTokens', () => {
     expect(bodies[0]).toEqual({
       message: {
         token: 't1',
-        android: { priority: 'high' },
+        android: { priority: 'normal' },
         data: { type: 'message_read', link: payload.link, chatId: 'c1' },
       },
     })

@@ -1,4 +1,5 @@
 import { sql } from '../../src/db.js'
+import { settleMessageWork } from '../../src/messaging/inflight.js'
 
 export { sql }
 
@@ -10,6 +11,9 @@ const SINGLETON_CONFIG_TABLES = [
 /** Empty every table (keeps the schema), then restore the singleton config rows
  *  a fresh install has. Call in `beforeEach` of tests that touch the database. */
 export async function resetDb(): Promise<void> {
+  // Fire-and-forget notification work from the previous test must finish
+  // first: its claim transaction would deadlock with the TRUNCATE below.
+  await settleMessageWork()
   const tables = await sql<{ tablename: string }[]>`
     select tablename from pg_tables
     where schemaname = 'public' and tablename <> 'schema_migrations'`

@@ -354,11 +354,20 @@ describe('Telegram-style message notifications', () => {
     expect(bodies[0].message.data.unread).toBe('1')
   })
 
-  it('man with a token: 3 messages → 3 pushes, no bot rows recorded', async () => {
+  it('man with a token: 3 messages → 3 pushes, each recorded as a push row for the chat', async () => {
     const p = await pair('man', { token: true })
     await say(p, 'a'); await say(p, 'b'); await say(p, 'c')
     expect(bodies).toHaveLength(3)
-    expect(await botRows(p.rec.id)).toHaveLength(0)
+    const rows = await botRows(p.rec.id)
+    expect(rows.map((r) => [r.match_id, r.channel])).toEqual([[p.m.id, 'push'], [p.m.id, 'push'], [p.m.id, 'push']])
+  })
+
+  it('pushes do not hold back a later bot DM in the same chat', async () => {
+    const p = await pair('man', { token: true })
+    await say(p, 'a')
+    await sql`delete from user_devices where user_id = ${p.rec.id}`
+    await say(p, 'b')
+    expect(dms()).toBe(1)
   })
 
   for (const gender of ['man', 'woman']) {

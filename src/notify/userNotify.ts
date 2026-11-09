@@ -87,12 +87,20 @@ export function safeLinkFields(opts: { screen?: string; chat?: string } = {}): R
 
 /**
  * The user read a chat: a data-only 'message_read' push to their own devices
- * so the app cancels the notification tagged with this chatId. Push only (no
- * bot fallback); users without tokens get nothing. Never throws (logs).
+ * so the app cancels the notification tagged with this chatId — but only when
+ * a message push for this chat was actually delivered since the last clear
+ * (its 'push' rows in message_notifications are consumed atomically here).
+ * An open chat reads every live message, and those never showed anything.
+ * Push only (no bot fallback); users without tokens get nothing. Never throws (logs).
  */
 export async function notifyUserMessageRead(userId: string, matchId: string): Promise<void> {
   if (!isPushConfigured() || isStandby()) return
   try {
+    const consumed = await sql`
+      delete from message_notifications
+      where user_id = ${userId} and match_id = ${matchId} and channel = 'push'
+      returning 1`
+    if (consumed.length === 0) return
     const { link } = safeLinkFields({ screen: 'matches', chat: matchId })
     await sendPushToUser(userId, { type: 'message_read', title: '', body: '', link, chatId: matchId, dataOnly: true })
   } catch (err) {

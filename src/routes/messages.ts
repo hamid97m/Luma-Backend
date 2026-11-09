@@ -5,6 +5,7 @@ import { chatSendBlocked } from '../premium/chatLimit.js'
 import { messageColumns, messageJson } from '../messaging/messageJson.js'
 import { publishTyping, typingTargets } from '../realtime/typing.js'
 import { notifyUserMessageRead } from '../notify/userNotify.js'
+import { trackMessageWork } from '../messaging/inflight.js'
 
 const MAX_MESSAGE_LENGTH = 2000
 
@@ -90,13 +91,14 @@ async function getUsableMatch(matchId: string, userId: string): Promise<UsableMa
 }
 
 /** Marks the counterpart's unread messages read. When any were, the reader's
- * own devices get a data-only 'message_read' push (fire-and-forget) so the
- * app clears that chat's notification. */
+ * devices may get a data-only 'message_read' push (fire-and-forget; only if a
+ * message push for this chat was delivered — see notifyUserMessageRead) so
+ * the app clears that chat's notification. */
 async function markRead(matchId: string, userId: string): Promise<void> {
   const res = await sql`
     update messages set read_at = ${new Date().toISOString()}
     where match_id = ${matchId} and sender_id <> ${userId} and read_at is null`
-  if (res.count > 0) void notifyUserMessageRead(userId, matchId)
+  if (res.count > 0) void trackMessageWork(notifyUserMessageRead(userId, matchId))
 }
 
 export async function messagesRoutes(app: FastifyInstance) {

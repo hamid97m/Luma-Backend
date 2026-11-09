@@ -6,6 +6,7 @@ import { deliverToUser, safeLinkFields } from '../notify/userNotify.js'
 import { isPushConfigured } from '../push/fcm.js'
 import { isStandby } from '../appMode.js'
 import type { Locale } from '../i18n/index.js'
+import { trackMessageWork } from './inflight.js'
 
 export type DeliveryRecipient = NotifyRecipient & { id: string }
 
@@ -50,15 +51,35 @@ async function unreadCount(recipientId: string, matchId: string): Promise<number
  * "online" as the in-app green dot (chatHub.isOnline: an open SSE stream, or
  * closed less than PRESENCE_GRACE_MS ago). Telegram-style:
  *   - push for every message, any gender, tagged per chat (fcm.ts) and
- *     carrying the chat's unread count;
+ *     carrying the chat's unread count; a delivered push is recorded as a
+ *     'push' row, which the read path consumes to send the message_read clear;
  *   - bot DM only when no push was delivered, at most one per chat per
  *     CHAT_NOTIFY_WINDOW_MS unless the recipient was active since the last one
  *     (claimBotSlot; message_notifications).
  * notified_offline_at is stamped when either went out (other code reads it).
  * Never throws — a blocked bot or DB hiccup is logged and swallowed so callers
- * can fire-and-forget without affecting their response.
+ * can fire-and-forget without affecting their response. The work is tracked
+ * (inflight.ts) so tests can wait for it.
  */
-export async function deliverMessageNotification(
+export function deliverMessageNotification(
+  recipient: DeliveryRecipient,
+  senderId: string,
+  senderName: string,
+  body: string,
+  matchId: string,
+  log?: { warn: (...a: any[]) => void },
+): Promise<void> {
+  return trackMessageWork(deliver(recipient, senderId, senderName, body, matchId, log))
+}
+
+/** A delivered message push for this chat: the read path consumes these rows
+ * to decide whether a message_read clear push is needed. */
+async function recordPush(recipientId: string, matchId: string): Promise<void> {
+  await sql`delete from message_notifications where user_id = ${recipientId} and sent_at < now() - interval '2 days'`
+  await sql`insert into message_notifications (user_id, match_id, channel) values (${recipientId}, ${matchId}, 'push')`
+}
+
+async function deliver(
   recipient: DeliveryRecipient,
   senderId: string,
   senderName: string,
@@ -91,7 +112,8 @@ export async function deliverMessageNotification(
           )
         } catch (err) {
           // Nothing went out: release the slot so the next message can try.
-          await sql`delete from message_notifications where id = ${claimId}`.catch(() => {})
+          await sql`delete from message_notifications where id = ${claimId}`
+            .catch((e) => log?.warn({ err: e }, 'failed to release bot-DM claim'))
           throw err
         }
       },
@@ -100,6 +122,7 @@ export async function deliverMessageNotification(
     if (result !== 'none' && !held) {
       await sql`update users set notified_offline_at = ${new Date().toISOString()} where id = ${recipient.id}`
     }
+    if (result === 'push') await recordPush(recipient.id, matchId)
   } catch (err) {
     log?.warn({ err }, 'failed to send offline notification')
   }

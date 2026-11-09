@@ -94,7 +94,9 @@ function buildBody(token: string, p: PushPayload) {
   if (p.chatId) data.chatId = p.chatId
   if (p.url) data.url = p.url
   if (p.unread !== undefined) data.unread = p.unread
-  if (p.dataOnly) return { message: { token, android: { priority: 'high' }, data } }
+  // Normal priority: it shows nothing, and FCM deprioritizes apps whose
+  // high-priority messages don't lead to a visible notification.
+  if (p.dataOnly) return { message: { token, android: { priority: 'normal' }, data } }
   // Same chat → same tag, so the phone replaces that chat's notification
   // instead of stacking a new one per message.
   const notification: Record<string, string> = { channel_id: 'default', sound: 'default' }

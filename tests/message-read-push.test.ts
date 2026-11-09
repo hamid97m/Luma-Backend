@@ -9,6 +9,8 @@ vi.mock('../src/bot.js', () => ({ notifyMatch: vi.fn(), notifyNewMessage: vi.fn(
 
 import { buildApp } from '../src/server.js'
 import { initPush, __setPushTransportForTests } from '../src/push/fcm.js'
+import { deliverMessageNotification } from '../src/messaging/deliver.js'
+import { settleMessageWork } from '../src/messaging/inflight.js'
 import { AUTH, authAs } from './helpers/auth.js'
 import { resetDb, createUser, createMatch, insertRow, sql } from './helpers/db.js'
 
@@ -21,7 +23,6 @@ let bodies: any[]
 const envKeys = ['FCM_SERVICE_ACCOUNT_FILE', 'APP_MODE', 'WEB_URL'] as const
 const saved: Record<string, string | undefined> = {}
 
-const settle = () => new Promise((r) => setTimeout(r, 100))
 
 beforeEach(async () => {
   for (const k of envKeys) saved[k] = process.env[k]
@@ -68,58 +69,103 @@ async function addToken(userId: string, token = 'tok-' + userId) {
 const read = () => app.inject({ method: 'POST', url: `/matches/${match.id}/read`, headers: AUTH })
 const unreadFromOther = () => insertRow('messages', { match_id: match.id, sender_id: other.id, body: 'hi' })
 
+const pushRow = () => sql`insert into message_notifications (user_id, match_id, channel)
+                           values (${me.id}, ${match.id}, 'push')`
+
 describe('message_read push (clear the chat notification on read)', () => {
-  it('POST /read sends exactly one data-only message_read push to the reader', async () => {
+  it('no message push was ever delivered for the chat → reading sends nothing', async () => {
     await addToken(me.id)
-    await addToken(other.id)
     await unreadFromOther()
     const res = await read()
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ ok: true })
-    await vi.waitFor(() => expect(bodies).toHaveLength(1))
-    await settle()
+    await settleMessageWork()
+    expect(bodies).toHaveLength(0)
+  })
+
+  it('after a delivered message push, reading sends exactly one data-only message_read; a second read sends none', async () => {
+    await addToken(me.id)
+    await insertRow('messages', { match_id: match.id, sender_id: other.id, body: 'hi' })
+    await deliverMessageNotification(
+      { id: me.id, telegram_id: me.telegram_id, last_active: null, notified_offline_at: null, allows_write_to_pm: null, locale: null, gender: 'woman' },
+      other.id, 'Sara', 'hi', match.id,
+    )
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0].message.data.type).toBe('message')
+    bodies = []
+
+    const res = await read()
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ ok: true })
+    await settleMessageWork()
     expect(bodies).toHaveLength(1)
     const msg = bodies[0].message
     expect(msg.token).toBe('tok-' + me.id)
     expect('notification' in msg).toBe(false)
-    expect(msg.android).toEqual({ priority: 'high' })
+    expect(msg.android).toEqual({ priority: 'normal' })
     expect(msg.data).toEqual({
       type: 'message_read', chatId: match.id, link: `https://luma.test/?screen=matches&chat=${match.id}`,
     })
+    expect(await sql`select 1 from message_notifications where user_id = ${me.id} and channel = 'push'`).toHaveLength(0)
+
+    // A new unread message that never produced a push (e.g. the chat was open) → no second clear.
+    await unreadFromOther()
+    await read()
+    await settleMessageWork()
+    expect(bodies).toHaveLength(1)
+  })
+
+  it('only that chat\'s push rows are consumed', async () => {
+    await addToken(me.id)
+    const elsewhere = await createMatch(me.id, (await createUser()).id)
+    await sql`insert into message_notifications (user_id, match_id, channel) values (${me.id}, ${elsewhere.id}, 'push')`
+    await pushRow()
+    await unreadFromOther()
+    await read()
+    await settleMessageWork()
+    expect(bodies).toHaveLength(1)
+    const left = await sql`select match_id from message_notifications where user_id = ${me.id}`
+    expect(left.map((r) => r.match_id)).toEqual([elsewhere.id])
   })
 
   it('sends nothing when the reader has no push token; the response is unchanged', async () => {
+    await pushRow()
     await unreadFromOther()
     const res = await read()
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ ok: true })
-    await settle()
+    await settleMessageWork()
     expect(bodies).toHaveLength(0)
   })
 
   it('sends nothing when there was nothing unread to mark', async () => {
     await addToken(me.id)
+    await pushRow()
     await insertRow('messages', { match_id: match.id, sender_id: other.id, body: 'hi', read_at: new Date().toISOString() })
     await read()
-    await settle()
+    await settleMessageWork()
     expect(bodies).toHaveLength(0)
   })
 
   it('opening the chat (GET messages marks read) also sends the clear push', async () => {
     await addToken(me.id)
+    await pushRow()
     await unreadFromOther()
     const res = await app.inject({ method: 'GET', url: `/matches/${match.id}/messages`, headers: AUTH })
     expect(res.statusCode).toBe(200)
-    await vi.waitFor(() => expect(bodies).toHaveLength(1))
+    await settleMessageWork()
+    expect(bodies).toHaveLength(1)
     expect(bodies[0].message.data.type).toBe('message_read')
   })
 
   it('a failing push never affects the read response', async () => {
     await addToken(me.id)
+    await pushRow()
     await unreadFromOther()
     __setPushTransportForTests(async () => ({ status: 400, json: {} }))
     const res = await read()
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({ ok: true })
+    await settleMessageWork()
   })
 })

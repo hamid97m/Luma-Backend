@@ -16,6 +16,7 @@ import { adminReferralRoutes } from './referrals.js'
 import { adminJoinTagRoutes } from './join-tags.js'
 import { adminPhotoChecksRoutes } from './photo-checks.js'
 import { adminSignupFunnelRoutes } from './signup-funnel.js'
+import { adminDeletionReasonsRoutes } from './deletion-reasons.js'
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -58,4 +59,5 @@ export async function adminRoutes(app: FastifyInstance) {
   await app.register(adminJoinTagRoutes)
   await app.register(adminPhotoChecksRoutes)
   await app.register(adminSignupFunnelRoutes)
+  await app.register(adminDeletionReasonsRoutes)
 }

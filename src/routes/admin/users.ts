@@ -191,7 +191,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     if (!user) return reply.status(404).send({ error: 'user_not_found' })
 
     try {
-      const [photos, [counts], matchRows, deviceRows] = await Promise.all([
+      const [photos, [counts], matchRows, deviceRows, deletionRows] = await Promise.all([
         sql<{ url: string }[]>`select url, position from user_photos where user_id = ${id} order by position asc`,
         sql<{ swipes_given: number; likes_received: number; messages_sent: number }[]>`
           select
@@ -210,6 +210,9 @@ export async function adminUsersRoutes(app: FastifyInstance) {
           select device_id, platform, app_version, device_model, os, user_agent,
                  push_token is not null as has_push, push_token_at, first_seen_at, last_seen_at
           from user_devices where user_id = ${id} order by last_seen_at desc limit 50`,
+        sql<{ reason: string | null; note: string | null; created_at: string }[]>`
+          select reason, note, created_at from account_deletion_reasons
+          where user_id = ${id} order by created_at desc, id desc`,
       ])
       const devices = deviceRows.map((d) => ({
         deviceId: d.device_id,
@@ -250,6 +253,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
         counts: { swipesGiven, likesReceived, matches: matches.length, messagesSent },
         matches,
         devices,
+        deletionReasons: deletionRows.map((r) => ({ reason: r.reason, note: r.note, createdAt: r.created_at })),
       }
     } catch (err) {
       req.log.error({ err }, 'user detail fetch failed')

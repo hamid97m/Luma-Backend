@@ -1,4 +1,4 @@
-import { FastifyInstance } from 'fastify'
+import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import { sql } from '../db.js'
 import * as storage from '../storage.js'
 import { icebreakerIndex } from '../icebreakers/catalog.js'
@@ -7,6 +7,7 @@ import { isLocale } from '../i18n/index.js'
 import { scheduleUserGeo } from '../geo/resolveCity.js'
 import { scheduleMainPhotoCheck } from '../moderation/photoAiCheck.js'
 import { markActiveIfSignupComplete } from '../users/accountStatus.js'
+import { recordDeletionReason } from '../users/deletionReasons.js'
 
 type Photo = { id: string; url: string; position: number }
 
@@ -190,7 +191,21 @@ export async function profileRoutes(app: FastifyInstance) {
     return { ok: true, locale }
   })
 
-  app.delete('/profile/me', async (req, reply) => {
+  // The optional `{ reason, note }` body must never fail the delete: in this
+  // scope an empty or malformed JSON body parses to undefined instead of a 400.
+  await app.register(async (scoped) => {
+    scoped.removeContentTypeParser('application/json')
+    scoped.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+      try {
+        done(null, body ? JSON.parse(body as string) : undefined)
+      } catch {
+        done(null, undefined)
+      }
+    })
+    scoped.delete('/profile/me', deleteMe)
+  })
+
+  async function deleteMe(req: FastifyRequest, reply: FastifyReply) {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
     // A failed read was ignored (treated as no photos) — kept.
@@ -240,6 +255,11 @@ export async function profileRoutes(app: FastifyInstance) {
       return reply.status(500).send({ error: 'delete_failed' })
     }
 
+    // Only once the delete went through, so a failed attempt plus a retry
+    // doesn't count twice. The snapshot columns (gender, premium_until,
+    // created_at) are not touched by the wipe.
+    await recordDeletionReason(req.userId, req.body, req.log)
+
     return { ok: true }
-  })
+  }
 }

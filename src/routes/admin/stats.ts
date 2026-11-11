@@ -41,6 +41,7 @@ export async function adminStatsRoutes(app: FastifyInstance) {
         users, banned, deleted, seed,
         newToday, newWeek, dau, wau,
         men, women, nonbinary,
+        activeByGender,
         matches, matchesToday, messages, messagesToday,
         swipes, likes,
         signupRows, matchRows,
@@ -57,6 +58,15 @@ export async function adminStatsRoutes(app: FastifyInstance) {
         count('users', sql`where deleted_at is null and gender = 'man'`),
         count('users', sql`where deleted_at is null and gender = 'woman'`),
         count('users', sql`where deleted_at is null and gender = 'nonbinary'`),
+        // Real (non-seed) users active in the last 24h / 48h / 7d, per gender.
+        sql<{ day: number; two_days: number; week: number; gender: string }[]>`
+          select gender,
+                 count(*) filter (where last_active >= ${daysAgoIso(1)})::int as day,
+                 count(*) filter (where last_active >= ${daysAgoIso(2)})::int as two_days,
+                 count(*) filter (where last_active >= ${daysAgoIso(7)})::int as week
+          from users
+          where deleted_at is null and is_seed = false and gender in ('man', 'woman')
+          group by gender`,
         count('matches'),
         count('matches', sql`where created_at >= ${today}`),
         count('messages', sql`where type <> 'icebreaker'`),
@@ -93,6 +103,11 @@ export async function adminStatsRoutes(app: FastifyInstance) {
         week: { newUsers: newWeek },
         dau, wau,
         genders: { man: men, woman: women, nonbinary },
+        activeByGender: (() => {
+          const of = (g: string) => activeByGender.find((r) => r.gender === g)
+          const pick = (k: 'day' | 'two_days' | 'week') => ({ man: of('man')?.[k] ?? 0, woman: of('woman')?.[k] ?? 0 })
+          return { day: pick('day'), twoDays: pick('two_days'), week: pick('week') }
+        })(),
         signupsPerDay: bucketPerDay(signupRows, 30),
         matchesPerDay: bucketPerDay(matchRows, 30),
         premium: {

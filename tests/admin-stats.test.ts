@@ -25,6 +25,23 @@ describe('GET /admin/stats', () => {
     return res.json()
   }
 
+  it('activeByGender counts real (non-seed, non-deleted) users active in the last 24h / 48h / 7d per gender', async () => {
+    await createUser({ gender: 'woman', last_active: ago(DAY / 2) })
+    await createUser({ gender: 'woman', last_active: ago(1.5 * DAY) }) // 48h + week
+    await createUser({ gender: 'woman', last_active: ago(5 * DAY) }) // week only
+    await createUser({ gender: 'woman', last_active: ago(10 * DAY) }) // too old
+    await createUser({ gender: 'woman', last_active: ago(0), is_seed: true, telegram_id: -1 }) // fake
+    await createUser({ gender: 'woman', last_active: ago(0), deleted_at: ago(0) }) // deleted
+    await createUser({ gender: 'man', last_active: ago(0) })
+    await createUser({ gender: 'man', last_active: ago(0) })
+
+    expect((await stats()).activeByGender).toEqual({
+      day: { man: 2, woman: 1 },
+      twoDays: { man: 2, woman: 2 },
+      week: { man: 2, woman: 3 },
+    })
+  })
+
   it('requires a token', async () => {
     const res = await app.inject({ method: 'GET', url: '/admin/stats' })
     expect(res.statusCode).toBe(401)

@@ -267,4 +267,38 @@ describe('admin chats', () => {
   it('GET /admin/chats?filter=fake-unread with nothing unread is an empty page', async () => {
     expect((await get('/admin/chats?filter=fake-unread')).json()).toEqual({ items: [], total: 0, page: 1, pageCount: 1 })
   })
+
+  it('GET /admin/chats?userId= lists only that user\'s chats with their sentCount; sent=1 keeps chats they wrote in', async () => {
+    const wrote = await createMatch(sara.id, ali.id)
+    const silent = await createMatch(sara.id, real.id)
+    const iceOnly = await createMatch(sara.id, seed.id)
+    await createMatch(ali.id, real.id)
+    await msg(wrote.id, sara.id, 'hi')
+    await msg(wrote.id, sara.id, 'there')
+    await msg(wrote.id, ali.id, 'yo')
+    await msg(silent.id, real.id, 'hello?')
+    await msg(iceOnly.id, sara.id, 'Best trip?', { type: 'icebreaker' })
+
+    const all = (await get(`/admin/chats?userId=${sara.id}`)).json()
+    expect(all.total).toBe(3)
+    const sentById = Object.fromEntries(all.items.map((c: any) => [c.matchId, c.sentCount]))
+    expect(sentById).toEqual({ [wrote.id]: 2, [silent.id]: 0, [iceOnly.id]: 0 })
+
+    const sent = (await get(`/admin/chats?userId=${sara.id}&sent=1`)).json()
+    expect(sent).toMatchObject({ total: 1, page: 1, pageCount: 1 })
+    expect(sent.items).toHaveLength(1)
+    expect(sent.items[0]).toMatchObject({ matchId: wrote.id, sentCount: 2, messageCount: 3 })
+  })
+
+  it('GET /admin/chats?userId= paginates and rejects a non-uuid', async () => {
+    for (let i = 0; i < 21; i++) {
+      const u = await createUser({ name: `U${i}` })
+      const m = await createMatch(sara.id, u.id)
+      await msg(m.id, sara.id, `hi ${i}`)
+    }
+    const p2 = (await get(`/admin/chats?userId=${sara.id}&sent=1&page=2`)).json()
+    expect(p2).toMatchObject({ total: 21, page: 2, pageCount: 2 })
+    expect(p2.items).toHaveLength(1)
+    expect((await get('/admin/chats?userId=nope')).statusCode).toBe(400)
+  })
 })

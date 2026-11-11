@@ -48,12 +48,16 @@ async function findMatch(matchId: string) {
 }
 
 /** One page of chat-list rows (newest activity first), each with its non-icebreaker
- *  message count and latest non-icebreaker message. `ids` restricts the set. */
-async function chatListRows(from: number, ids?: string[]) {
+ *  message count and latest non-icebreaker message. `where` restricts the set;
+ *  `forUser` adds that user's own non-icebreaker message count as `sentCount`. */
+async function chatListRows(from: number, where = sql``, forUser?: string) {
   const rows = await sql`
     select m.id, m.created_at, m.last_message_at, m.user1_id, m.user2_id,
            ${participantCols('u1')}, ${participantCols('u2')},
            (select count(*)::int from messages c where c.match_id = m.id and c.type <> 'icebreaker') as message_count,
+           ${forUser
+             ? sql`(select count(*)::int from messages c where c.match_id = m.id and c.type <> 'icebreaker' and c.sender_id = ${forUser})`
+             : sql`null::int`} as sent_count,
            last.body as last_body, last.created_at as last_created_at, last.found as has_last
     from matches m
     left join users u1 on u1.id = m.user1_id
@@ -63,16 +67,23 @@ async function chatListRows(from: number, ids?: string[]) {
       where l.match_id = m.id and l.type <> 'icebreaker'
       order by l.created_at desc limit 1
     ) last on true
-    ${ids ? sql`where m.id = any(${ids}::uuid[])` : sql``}
+    ${where}
     order by m.last_message_at desc
     limit ${PAGE_SIZE} offset ${from}`
-  return withParticipants(rows).map((row) => ({
+  return withParticipants(rows).map((row, i) => ({
     matchId: row.id,
     matchedAt: row.created_at,
     users: [participant(row.user1), participant(row.user2)],
     messageCount: row.message_count ?? 0,
     lastMessage: row.has_last ? { body: row.last_body, createdAt: row.last_created_at } : null,
+    ...(forUser ? { sentCount: rows[i].sent_count ?? 0 } : {}),
   }))
+}
+
+/** Chats `userId` is part of; with `sentOnly`, just those where they sent ≥1 non-icebreaker message. */
+function userChatsWhere(userId: string, sentOnly: boolean) {
+  return sql`where (m.user1_id = ${userId} or m.user2_id = ${userId})
+    ${sentOnly ? sql`and exists (select 1 from messages s where s.match_id = m.id and s.sender_id = ${userId} and s.type <> 'icebreaker')` : sql``}`
 }
 
 function participant(u: any) {
@@ -119,9 +130,24 @@ export async function adminChatsRoutes(app: FastifyInstance) {
   })
 
   app.get('/chats', async (req, reply) => {
-    const { page = '1', filter } = req.query as Record<string, string>
+    const { page = '1', filter, userId, sent } = req.query as Record<string, string>
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const from = (pageNum - 1) * PAGE_SIZE
+
+    if (userId !== undefined) {
+      if (!isUuid(userId)) return reply.status(400).send({ error: 'invalid_user_id' })
+      const where = userChatsWhere(userId, sent === '1')
+      try {
+        const [items, [{ count }]] = await Promise.all([
+          chatListRows(from, where, userId),
+          sql<{ count: number }[]>`select count(*)::int as count from matches m ${where}`,
+        ])
+        return { items, total: count, page: pageNum, pageCount: Math.max(1, Math.ceil(count / PAGE_SIZE)) }
+      } catch (err) {
+        req.log.error({ err }, 'chats fetch failed')
+        return reply.status(500).send({ error: 'chats_fetch_failed' })
+      }
+    }
 
     if (filter === 'fake-unread') {
       const unreadIds = await fakeUnreadMatchIds()
@@ -129,7 +155,7 @@ export async function adminChatsRoutes(app: FastifyInstance) {
       if (total === 0) return { items: [], total: 0, page: pageNum, pageCount: 1 }
       let items
       try {
-        items = await chatListRows(from, unreadIds)
+        items = await chatListRows(from, sql`where m.id = any(${unreadIds}::uuid[])`)
       } catch (err) {
         req.log.error({ err }, 'chats fetch failed')
         return reply.status(500).send({ error: 'chats_fetch_failed' })

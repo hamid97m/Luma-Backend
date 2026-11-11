@@ -106,9 +106,9 @@ describe('POST /auth/telegram-web', () => {
     const second = await post('/auth/telegram-web', 'Bearer junk-2')
     const google = await post('/auth/google', 'junk-3')
 
-    expect(first.headers['x-ratelimit-remaining']).toBe('299')
-    expect(second.headers['x-ratelimit-remaining']).toBe('298')
-    expect(google.headers['x-ratelimit-remaining']).toBe('297')
+    expect(first.headers['x-ratelimit-remaining']).toBe('119')
+    expect(second.headers['x-ratelimit-remaining']).toBe('118')
+    expect(google.headers['x-ratelimit-remaining']).toBe('117')
   })
 
   it('behind the local nginx, each visitor IP gets its own sign-in bucket', async () => {
@@ -122,8 +122,8 @@ describe('POST /auth/telegram-web', () => {
     const a = await post('203.0.113.1')
     const b = await post('203.0.113.2')
 
-    expect(a.headers['x-ratelimit-remaining']).toBe('299')
-    expect(b.headers['x-ratelimit-remaining']).toBe('299')
+    expect(a.headers['x-ratelimit-remaining']).toBe('119')
+    expect(b.headers['x-ratelimit-remaining']).toBe('119')
   })
 
   it('tampered field → 401 invalid_telegram_login', async () => {

@@ -122,7 +122,7 @@ describe('POST /matches/:matchId/typing', () => {
     expect((await ping()).statusCode).toBe(200)
   })
 
-  it('has its own rate limit (40/min), independent of the global 300/hour bucket', async () => {
+  it('has its own rate limit (40/min), independent of the global 120/min bucket', async () => {
     for (let i = 0; i < 40; i++) {
       const res = await ping()
       expect(res.statusCode).toBe(200)
@@ -135,14 +135,14 @@ describe('POST /matches/:matchId/typing', () => {
     // The global bucket was never touched by the 41 pings.
     const other = await app.inject({ method: 'GET', url: `/matches/${match.id}/messages`, headers: AUTH })
     expect(other.statusCode).toBe(200)
-    expect(other.headers['x-ratelimit-limit']).toBe('300')
-    expect(other.headers['x-ratelimit-remaining']).toBe('299')
+    expect(other.headers['x-ratelimit-limit']).toBe('120')
+    expect(other.headers['x-ratelimit-remaining']).toBe('119')
   })
 })
 
 describe('global rate limit', () => {
-  it('answers 429 rate_limited (not 500) once the 300/hour bucket is spent', async () => {
-    for (let i = 0; i < 300; i++) {
+  it('answers 429 rate_limited (not 500) once the 120/min bucket is spent', async () => {
+    for (let i = 0; i < 120; i++) {
       const res = await app.inject({ method: 'GET', url: `/matches/${match.id}/messages`, headers: AUTH })
       expect(res.statusCode).toBe(200)
     }

@@ -36,6 +36,12 @@ describe('admin premium', () => {
     expect(res.statusCode).toBe(401)
   })
 
+  it('admin routes get the larger 600/min bucket, not the 120/min user one', async () => {
+    const res = await app.inject({ method: 'GET', url: '/admin/premium/config', headers })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['x-ratelimit-limit']).toBe('600')
+  })
+
   it('reads the premium config', async () => {
     await sql`update premium_config set premium_enabled = true`
     const res = await app.inject({ method: 'GET', url: '/admin/premium/config', headers })

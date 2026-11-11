@@ -63,6 +63,9 @@ export function isPausedExempt(method: string, url: string): boolean {
   )
 }
 
+const RATE_LIMIT_PER_MIN = 120
+const ADMIN_RATE_LIMIT_PER_MIN = 600
+
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
     // nginx on the same host is the only proxy: trust X-Forwarded-For from
@@ -98,9 +101,12 @@ export async function buildApp(): Promise<FastifyInstance> {
     maxAge: 600,
   })
 
+  // Per-minute buckets (common API practice): 300/hour was spent by a few
+  // minutes of normal admin-panel browsing (each screen loads 4-6 endpoints).
+  // Routes with their own `config.rateLimit` (login, photos, swipes…) keep it.
   await app.register(rateLimit, {
-    max: 300,
-    timeWindow: '1 hour',
+    max: (req: FastifyRequest) => (req.url.startsWith('/admin/') ? ADMIN_RATE_LIMIT_PER_MIN : RATE_LIMIT_PER_MIN),
+    timeWindow: '1 minute',
     keyGenerator: (req: FastifyRequest) => {
       // Website sign-in carries no real credential in the header — key by IP so
       // a made-up Authorization value can't mint a fresh bucket per attempt.

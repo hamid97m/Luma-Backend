@@ -413,6 +413,47 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     return { ok: true }
   }
 
+  // Likes this user sent (?dir=sent, default) or received (?dir=received), newest first,
+  // with the other person and the chat when the like turned into a match.
+  app.get('/users/:id/likes', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { dir = 'sent', page = '1' } = req.query as Record<string, string>
+    if (!isUuid(id)) return reply.status(404).send({ error: 'user_not_found' })
+    if (dir !== 'sent' && dir !== 'received') return reply.status(400).send({ error: 'invalid_dir' })
+    const pageNum = Math.max(1, parseInt(page, 10) || 1)
+    const self = dir === 'sent' ? sql`s.swiper_id` : sql`s.swiped_id`
+    const other = dir === 'sent' ? sql`s.swiped_id` : sql`s.swiper_id`
+    try {
+      const [rows, [{ count }]] = await Promise.all([
+        sql<{ created_at: string; other_id: string; name: string | null; is_seed: boolean | null; photo: string | null; match_id: string | null }[]>`
+          select s.created_at, ${other} as other_id, o.name, o.is_seed,
+                 (select p.url from user_photos p where p.user_id = o.id order by p.position asc limit 1) as photo,
+                 (select m.id from matches m
+                  where (m.user1_id = ${id} and m.user2_id = ${other}) or (m.user2_id = ${id} and m.user1_id = ${other})
+                  limit 1) as match_id
+          from swipes s
+          left join users o on o.id = ${other}
+          where ${self} = ${id} and s.direction = 'like'
+          order by s.created_at desc
+          limit ${PAGE_SIZE} offset ${(pageNum - 1) * PAGE_SIZE}`,
+        sql<{ count: number }[]>`select count(*)::int as count from swipes s where ${self} = ${id} and s.direction = 'like'`,
+      ])
+      return {
+        items: rows.map((r) => ({
+          user: { id: r.other_id, name: r.name ?? '', photo: r.photo, isSeed: !!r.is_seed },
+          likedAt: r.created_at,
+          matchId: r.match_id,
+        })),
+        total: count,
+        page: pageNum,
+        pageCount: Math.max(1, Math.ceil(count / PAGE_SIZE)),
+      }
+    } catch (err) {
+      req.log.error({ err }, 'user likes fetch failed')
+      return reply.status(500).send({ error: 'likes_fetch_failed' })
+    }
+  })
+
   app.post('/users/:id/ban', async (req, reply) => {
     const { id } = req.params as { id: string }
     return setBanned(id, new Date().toISOString(), reply)

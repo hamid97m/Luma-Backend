@@ -59,7 +59,7 @@ describe('GET /admin/users', () => {
       gender: 'woman', lookingFor: 'men', isActive: true, isSeed: false, bannedAt: null, pausedAt: null,
       deletedAt: null, createdAt: '2026-07-01T00:00:00.000Z', lastActive: '2026-08-04T00:00:00.000Z',
       geoCity: 'Tehran', geoCountry: 'IR', locale: null, accountStatus: 'preparing',
-      joinTag: null,
+      joinTag: null, botStatus: null, botStatusAt: null,
     })
 
     const page2 = await list('?page=2')

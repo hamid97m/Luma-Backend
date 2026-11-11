@@ -7,7 +7,7 @@ import { generateKeyPairSync } from 'node:crypto'
 const sendPhoto = vi.fn().mockResolvedValue(undefined)
 const sendMessage = vi.fn().mockResolvedValue(undefined)
 vi.mock('grammy', () => ({
-  Bot: vi.fn().mockImplementation(() => ({ api: { sendPhoto, sendMessage } })),
+  Bot: vi.fn().mockImplementation(() => ({ api: { sendPhoto, sendMessage, config: { use: vi.fn() } } })),
   InlineKeyboard: vi.fn().mockImplementation(function () { return { webApp() { return this } } }),
   Context: class {},
 }))

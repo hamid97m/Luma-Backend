@@ -42,6 +42,21 @@ describe('GET /admin/stats', () => {
     })
   })
 
+  it('botStatusByGender counts real users per gender and bot status (null → unknown)', async () => {
+    await createUser({ gender: 'man', bot_status: 'active' })
+    await createUser({ gender: 'man', bot_status: 'blocked' })
+    await createUser({ gender: 'woman', bot_status: 'active' })
+    await createUser({ gender: 'woman' })
+    await createUser({ gender: 'woman', bot_status: 'deactivated' })
+    await createUser({ gender: 'woman', bot_status: 'blocked', deleted_at: ago(0) }) // deleted
+    await createUser({ gender: 'woman', bot_status: 'active', is_seed: true, telegram_id: -1 }) // fake
+
+    expect((await stats()).botStatusByGender).toEqual({
+      man: { active: 1, blocked: 1, deactivated: 0, not_started: 0, unknown: 0 },
+      woman: { active: 1, blocked: 0, deactivated: 1, not_started: 0, unknown: 1 },
+    })
+  })
+
   it('requires a token', async () => {
     const res = await app.inject({ method: 'GET', url: '/admin/stats' })
     expect(res.statusCode).toBe(401)

@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const sendPhoto = vi.fn().mockResolvedValue(undefined)
 const sendMessage = vi.fn().mockResolvedValue(undefined)
 vi.mock('grammy', () => ({
-  Bot: vi.fn().mockImplementation(() => ({ api: { sendPhoto, sendMessage } })),
+  Bot: vi.fn().mockImplementation(() => ({ api: { sendPhoto, sendMessage, config: { use: vi.fn() } } })),
   InlineKeyboard: vi.fn().mockImplementation(() => ({ webApp() { return this } })),
   Context: class {},
 }))

@@ -4,7 +4,7 @@ const sendPhoto = vi.fn().mockResolvedValue(undefined)
 const sendMessage = vi.fn().mockResolvedValue(undefined)
 const webApp = vi.fn(function (this: unknown) { return this })
 vi.mock('grammy', () => ({
-  Bot: vi.fn().mockImplementation(() => ({ api: { sendPhoto, sendMessage } })),
+  Bot: vi.fn().mockImplementation(() => ({ api: { sendPhoto, sendMessage, config: { use: vi.fn() } } })),
   InlineKeyboard: vi.fn().mockImplementation(() => ({ webApp })),
   Context: class {},
 }))
@@ -116,7 +116,7 @@ describe('/start replies in the user locale or Telegram language', () => {
     const commandMock = vi.fn((name: string, fn: (ctx: any) => Promise<void>) => { handlers[name] = fn })
     vi.doMock('grammy', () => ({
       Bot: vi.fn().mockImplementation(() => ({
-        api: { sendPhoto, sendMessage },
+        api: { sendPhoto, sendMessage, config: { use: vi.fn() } },
         command: commandMock,
         on: vi.fn(),
       })),

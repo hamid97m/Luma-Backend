@@ -13,6 +13,7 @@ import { tFor, mapTelegramLang, LOCALES, type Locale } from './i18n/index.js'
 import type { MessageButton } from './messaging/messageButton.js'
 import { parseRefCode, stashReferralClaim } from './referrals/attribution.js'
 import { parseJoinTag, recordJoinTagStart } from './joinTags/attribution.js'
+import { botStatusTracker, recordBotStatus } from './botStatus.js'
 
 let _bot: Bot | null = null
 
@@ -20,6 +21,7 @@ function getBot(): Bot {
   if (!_bot) {
     _bot = new Bot(process.env.BOT_TOKEN!)
     if (isStandby()) _bot.api.config.use(standbyBotGuard)
+    _bot.api.config.use(botStatusTracker)
   }
   return _bot
 }
@@ -93,6 +95,23 @@ let handlersRegistered = false
 function registerHandlers(bot: Bot): void {
   if (handlersRegistered) return
   handlersRegistered = true
+
+  // --- Bot reachability (users.bot_status) ---
+  // Telegram reports block/stop ('kicked') and unblock/Start ('member') of the private chat.
+  bot.on('my_chat_member', async (ctx, next) => {
+    const upd = ctx.myChatMember
+    if (upd.chat.type === 'private') {
+      const s = upd.new_chat_member.status
+      if (s === 'kicked') await recordBotStatus(upd.from.id, 'blocked')
+      else if (s === 'member') await recordBotStatus(upd.from.id, 'active')
+    }
+    return next()
+  })
+  // Anyone writing to the bot can be reached.
+  bot.on('message', async (ctx, next) => {
+    if (ctx.chat.type === 'private' && ctx.from) await recordBotStatus(ctx.from.id, 'active')
+    return next()
+  })
 
   // --- Telegram Stars payments (gifts + premium; must precede the message catch-alls) ---
   // The invoice payload routes: `premium:<txId>` -> premium, anything else -> gifts.
@@ -211,7 +230,7 @@ export async function initWebhook(publicBaseUrl: string): Promise<void> {
   const url = `${publicBaseUrl.replace(/\/+$/, '')}${webhookPath()}`
   await bot.api.setWebhook(url, {
     secret_token: webhookSecretToken(),
-    allowed_updates: ['message', 'pre_checkout_query'],
+    allowed_updates: ['message', 'pre_checkout_query', 'my_chat_member'],
     drop_pending_updates: false,
   })
   // "What can this bot do?" text follows the Telegram client language. The

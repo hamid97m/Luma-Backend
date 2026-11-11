@@ -41,7 +41,7 @@ export async function adminStatsRoutes(app: FastifyInstance) {
         users, banned, deleted, seed,
         newToday, newWeek, dau, wau,
         men, women, nonbinary,
-        activeByGender,
+        activeByGender, botStatusRows,
         matches, matchesToday, messages, messagesToday,
         swipes, likes,
         signupRows, matchRows,
@@ -67,6 +67,12 @@ export async function adminStatsRoutes(app: FastifyInstance) {
           from users
           where deleted_at is null and is_seed = false and gender in ('man', 'woman')
           group by gender`,
+        // Bot reachability of real (non-seed, non-deleted) users, per gender; NULL status = not checked yet.
+        sql<{ gender: string; status: string | null; n: number }[]>`
+          select gender, bot_status as status, count(*)::int as n
+          from users
+          where deleted_at is null and is_seed = false and gender in ('man', 'woman')
+          group by gender, bot_status`,
         count('matches'),
         count('matches', sql`where created_at >= ${today}`),
         count('messages', sql`where type <> 'icebreaker'`),
@@ -107,6 +113,15 @@ export async function adminStatsRoutes(app: FastifyInstance) {
           const of = (g: string) => activeByGender.find((r) => r.gender === g)
           const pick = (k: 'day' | 'two_days' | 'week') => ({ man: of('man')?.[k] ?? 0, woman: of('woman')?.[k] ?? 0 })
           return { day: pick('day'), twoDays: pick('two_days'), week: pick('week') }
+        })(),
+        botStatusByGender: (() => {
+          const empty = () => ({ active: 0, blocked: 0, deactivated: 0, not_started: 0, unknown: 0 })
+          const out = { man: empty(), woman: empty() }
+          for (const r of botStatusRows) {
+            const g = out[r.gender as 'man' | 'woman']
+            g[(r.status ?? 'unknown') as keyof ReturnType<typeof empty>] += r.n
+          }
+          return out
         })(),
         signupsPerDay: bucketPerDay(signupRows, 30),
         matchesPerDay: bucketPerDay(matchRows, 30),

@@ -49,6 +49,8 @@ export function toListItem(u: any) {
     geoCountry: u.geo_country ?? null,
     locale: u.locale ?? null,
     joinTag: (u.join_tag ?? null) as string | null,
+    botStatus: (u.bot_status ?? null) as string | null,
+    botStatusAt: u.bot_status_at ?? null,
   }
 }
 
@@ -92,7 +94,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
         sql`
           select id, telegram_id, email, google_sub, username, name, age, gender, looking_for, is_active, is_seed,
                  banned_at, paused_at, deleted_at, created_at, last_active, geo_city, geo_country,
-                 locale, account_status, join_tag
+                 locale, account_status, join_tag, bot_status, bot_status_at
           from users
           where true ${statusFilter} ${genderFilter} ${tagFilter} ${searchFilter}
           order by created_at desc

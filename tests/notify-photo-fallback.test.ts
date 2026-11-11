@@ -4,7 +4,7 @@ const sendPhoto = vi.fn()
 const sendMessage = vi.fn().mockResolvedValue(undefined)
 const webApp = vi.fn(function (this: unknown) { return this })
 vi.mock('grammy', () => ({
-  Bot: vi.fn().mockImplementation(() => ({ api: { sendPhoto, sendMessage } })),
+  Bot: vi.fn().mockImplementation(() => ({ api: { sendPhoto, sendMessage, config: { use: vi.fn() } } })),
   InlineKeyboard: vi.fn().mockImplementation(() => ({ webApp })),
   Context: class {},
 }))

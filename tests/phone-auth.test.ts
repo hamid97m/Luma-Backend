@@ -220,6 +220,24 @@ describe('phone login', () => {
     expect(sendOtpSms).not.toHaveBeenCalled()
   })
 
+  it('a listed test number gets the static code and no SMS; other numbers still get SMS', async () => {
+    process.env.PHONE_OTP_STATIC_NUMBERS = '0936 052 8920, +989121111111'
+    process.env.PHONE_OTP_STATIC_CODE = '12345'
+    try {
+      expect((await post(app, '/auth/phone/request', { phone: '09360528920' })).statusCode).toBe(200)
+      expect(sendOtpSms).not.toHaveBeenCalled()
+      const res = await post(app, '/auth/phone/verify', { phone: '09360528920', code: '12345' })
+      expect(res.statusCode).toBe(200)
+
+      await post(app, '/auth/phone/request', { phone: PHONE })
+      expect(sendOtpSms).toHaveBeenCalledTimes(1)
+      expect((await post(app, '/auth/phone/verify', { phone: PHONE, code: '12345' })).statusCode).toBe(400)
+    } finally {
+      delete process.env.PHONE_OTP_STATIC_NUMBERS
+      delete process.env.PHONE_OTP_STATIC_CODE
+    }
+  })
+
   it('a banned account answers account_banned', async () => {
     await createUser({ phone: PHONE, banned_at: new Date().toISOString() })
     await post(app, '/auth/phone/request', { phone: PHONE })

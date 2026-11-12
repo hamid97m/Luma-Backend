@@ -2,6 +2,7 @@ import { createHmac, randomInt, timingSafeEqual } from 'node:crypto'
 import type { FastifyBaseLogger } from 'fastify'
 import { sql } from '../db.js'
 import { sendOtpSms } from './mediana.js'
+import { normalizeIranMobile } from './normalize.js'
 
 export type OtpPurpose = 'login' | 'link'
 
@@ -33,13 +34,24 @@ export function normalizeCode(raw: unknown): string | null {
   return /^\d{5}$/.test(s) ? s : null
 }
 
+/** Test numbers (store review, QA, SMS-provider outages) get PHONE_OTP_STATIC_CODE
+ *  and no SMS. Only numbers listed in PHONE_OTP_STATIC_NUMBERS — never everyone,
+ *  which would let anyone sign in as any number. */
+export function staticCodeFor(phone: string): string | null {
+  const code = normalizeCode(process.env.PHONE_OTP_STATIC_CODE ?? '')
+  if (!code) return null
+  const numbers = (process.env.PHONE_OTP_STATIC_NUMBERS ?? '').split(',').map(normalizeIranMobile)
+  return numbers.includes(phone) ? code : null
+}
+
 /** Checks the send limits, stores a new code and sends it by SMS. A failed send
  *  deletes its row, so a provider outage doesn't use up the user's quota. */
 export async function issueCode(opts: {
   phone: string; purpose: OtpPurpose; userId: string | null; ip: string; log: FastifyBaseLogger
 }): Promise<{ ok: true } | Fail> {
   const { phone, purpose, userId, ip, log } = opts
-  const code = String(randomInt(0, 100_000)).padStart(5, '0')
+  const staticCode = staticCodeFor(phone)
+  const code = staticCode ?? String(randomInt(0, 100_000)).padStart(5, '0')
 
   // Serialized per phone so two parallel requests can't both pass the cooldown.
   const issued = await sql.begin(async (tx): Promise<{ id: string } | Fail> => {
@@ -95,7 +107,7 @@ export async function issueCode(opts: {
   })
   if ('ok' in issued) return issued
 
-  if (!(await sendOtpSms(phone, code, log))) {
+  if (!staticCode && !(await sendOtpSms(phone, code, log))) {
     await sql`delete from phone_otp_codes where id = ${issued.id}`
     return { ok: false, status: 502, body: { error: 'sms_send_failed' } }
   }

@@ -8,13 +8,14 @@ import type { TelegramUser } from './types.js'
 export type Identity =
   | { kind: 'telegram'; tgUser: TelegramUser; startParam?: string | null }
   | { kind: 'google'; sub: string; email: string; givenName: string }
+  | { kind: 'phone'; phone: string }
 
 type ProfileWithPhotos = NonNullable<Awaited<ReturnType<typeof getProfileWithPhotos>>>
 
 export type AuthUser = { id: string; name: string; setupComplete: boolean; locale: string | null } | ProfileWithPhotos
 
 export type SignInResult =
-  | { ok: true; userId: string; user: AuthUser }
+  | { ok: true; userId: string; user: AuthUser; isNewUser: boolean }
   | { ok: false; status: 401 | 500; body: { error: string; botUsername?: string | null } }
 
 export function normalizeEmail(raw: string): string {
@@ -67,6 +68,12 @@ async function findAccount(
         from users where telegram_id = ${identity.tgUser.id}`
       return { row, attach: {} }
     }
+    if (identity.kind === 'phone') {
+      const [row] = await sql<AccountRow[]>`
+        select id, name, age, gender, looking_for, bio, deleted_at, banned_at, locale
+        from users where phone = ${identity.phone}`
+      return { row, attach: {} }
+    }
     const [bySub] = await sql<AccountRow[]>`
       select id, name, age, gender, looking_for, bio, deleted_at, banned_at, locale
       from users where google_sub = ${identity.sub}`
@@ -90,7 +97,21 @@ function newAccountColumns(identity: Identity): Record<string, unknown> {
       name: identity.tgUser.first_name,
     }
   }
+  if (identity.kind === 'phone') return { phone: identity.phone, name: '' }
   return { email: normalizeEmail(identity.email), google_sub: identity.sub, name: identity.givenName }
+}
+
+/** Phone numbers get reassigned: a deleted account gives its phone up, so the
+ *  number's next owner starts fresh instead of reviving someone else's
+ *  profile and chats. A banned account keeps it, so deleting isn't a way
+ *  around the ban. Returns false only on a database error. */
+export async function releasePhoneFromDeleted(phone: string): Promise<boolean> {
+  try {
+    await sql`update users set phone = null where phone = ${phone} and deleted_at is not null and banned_at is null`
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** Find-or-create the account behind a verified identity and build the
@@ -102,6 +123,10 @@ export async function signIn(identity: Identity): Promise<SignInResult> {
     identity.kind === 'telegram' && typeof identity.tgUser.allows_write_to_pm === 'boolean'
       ? { allows_write_to_pm: identity.tgUser.allows_write_to_pm }
       : {}
+
+  if (identity.kind === 'phone' && !(await releasePhoneFromDeleted(identity.phone))) {
+    return { ok: false, status: 500, body: { error: 'auth_update_failed' } }
+  }
 
   const { row: existing, attach, mismatch } = await findAccount(identity)
 
@@ -126,7 +151,7 @@ export async function signIn(identity: Identity): Promise<SignInResult> {
     } catch {
       return { ok: false, status: 500, body: { error: 'auth_update_failed' } }
     }
-    return { ok: true, userId: existing.id, user: await buildAuthUser(existing) }
+    return { ok: true, userId: existing.id, user: await buildAuthUser(existing), isNewUser: false }
   }
 
   let created: { id: string; name: string } | undefined
@@ -153,5 +178,7 @@ export async function signIn(identity: Identity): Promise<SignInResult> {
     await captureJoinTag(created.id, identity.tgUser.id)
   }
 
-  return { ok: true, userId: created.id, user: await buildAuthUser({ ...created, age: 0, locale: null }) }
+  return {
+    ok: true, userId: created.id, user: await buildAuthUser({ ...created, age: 0, locale: null }), isNewUser: true,
+  }
 }

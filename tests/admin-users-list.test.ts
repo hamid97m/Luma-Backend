@@ -55,7 +55,7 @@ describe('GET /admin/users', () => {
     expect(body.pageCount).toBe(3)
     expect(body.items).toHaveLength(2)
     expect(body.items[1]).toEqual({
-      id: sara.id, telegramId: 42, email: null, signInMethods: ['telegram'], username: 'sara', name: 'Sara', age: 24,
+      id: sara.id, telegramId: 42, email: null, phone: null, signInMethods: ['telegram'], username: 'sara', name: 'Sara', age: 24,
       gender: 'woman', lookingFor: 'men', isActive: true, isSeed: false, bannedAt: null, pausedAt: null,
       deletedAt: null, createdAt: '2026-07-01T00:00:00.000Z', lastActive: '2026-08-04T00:00:00.000Z',
       geoCity: 'Tehran', geoCountry: 'IR', locale: null, accountStatus: 'preparing',

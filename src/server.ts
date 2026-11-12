@@ -9,6 +9,7 @@ import { WEBHOOK_ROUTE_PREFIX } from './webhookRoute.js'
 import { sql } from './db.js'
 import type { TelegramUser } from './types.js'
 import { authRoutes } from './routes/auth.js'
+import { phoneAuthRoutes } from './routes/phoneAuth.js'
 import { profileRoutes } from './routes/profile.js'
 import { photosRoutes } from './routes/photos.js'
 import { discoveryRoutes } from './routes/discovery.js'
@@ -43,7 +44,9 @@ declare module 'fastify' {
 }
 
 const LAST_ACTIVE_THROTTLE_MS = 60_000
-const WEB_SIGN_IN_PATHS = new Set(['/auth/telegram-web', '/auth/google', '/auth/dev'])
+const WEB_SIGN_IN_PATHS = new Set([
+  '/auth/telegram-web', '/auth/google', '/auth/dev', '/auth/phone/request', '/auth/phone/verify',
+])
 
 /** The only way a paused user can come back is by uploading a fresh photo.
  *  Redeploy stamp: 2026-10-16T19:05. */
@@ -134,6 +137,8 @@ export async function buildApp(): Promise<FastifyInstance> {
       req.url === '/auth/telegram-web' ||
       req.url === '/auth/google' ||
       req.url === '/auth/dev' ||
+      req.url === '/auth/phone/request' ||
+      req.url === '/auth/phone/verify' ||
       req.url === '/health' ||
       req.url.split('?')[0] === '/signup-events' ||
       req.url.startsWith('/admin') ||
@@ -192,6 +197,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   app.get('/health', { logLevel: 'silent' }, async () => ({ ok: true }))
 
   await app.register(authRoutes)
+  await app.register(phoneAuthRoutes)
   await app.register(profileRoutes)
   await app.register(photosRoutes)
   await app.register(discoveryRoutes)

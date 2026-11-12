@@ -18,11 +18,12 @@ const LOOKING = ['men', 'women', 'both', 'everyone']
 
 // Seeds have negative telegram_ids and website users have none: neither signed in with Telegram.
 // A Google account's email is its Google identity, not a separate email login.
-function signInMethods(u: any): ('telegram' | 'google' | 'email')[] {
-  const methods: ('telegram' | 'google' | 'email')[] = []
+function signInMethods(u: any): ('telegram' | 'google' | 'email' | 'phone')[] {
+  const methods: ('telegram' | 'google' | 'email' | 'phone')[] = []
   if (u.telegram_id > 0) methods.push('telegram')
   if (u.google_sub) methods.push('google')
   if (u.email && !u.google_sub) methods.push('email')
+  if (u.phone) methods.push('phone')
   return methods
 }
 
@@ -31,6 +32,7 @@ export function toListItem(u: any) {
     id: u.id,
     telegramId: (u.telegram_id ?? null) as number | null,
     email: (u.email ?? null) as string | null,
+    phone: (u.phone ?? null) as string | null,
     signInMethods: signInMethods(u),
     username: u.username,
     name: u.name,
@@ -82,8 +84,8 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     if (search) {
       const pattern = `%${search.replace(/\*/g, '%')}%`
       searchFilter = /^-?\d+$/.test(search)
-        ? sql`and (name ilike ${pattern} or username ilike ${pattern} or email ilike ${pattern} or telegram_id = ${search}::bigint)`
-        : sql`and (name ilike ${pattern} or username ilike ${pattern} or email ilike ${pattern})`
+        ? sql`and (name ilike ${pattern} or username ilike ${pattern} or email ilike ${pattern} or phone ilike ${pattern} or telegram_id = ${search}::bigint)`
+        : sql`and (name ilike ${pattern} or username ilike ${pattern} or email ilike ${pattern} or phone ilike ${pattern})`
     }
 
     // Admins see every user, deleted ones included (unless a status filter says otherwise).
@@ -92,7 +94,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     try {
       ;[data, [{ count }]] = await Promise.all([
         sql`
-          select id, telegram_id, email, google_sub, username, name, age, gender, looking_for, is_active, is_seed,
+          select id, telegram_id, email, google_sub, phone, username, name, age, gender, looking_for, is_active, is_seed,
                  banned_at, paused_at, deleted_at, created_at, last_active, geo_city, geo_country,
                  locale, account_status, join_tag, bot_status, bot_status_at
           from users

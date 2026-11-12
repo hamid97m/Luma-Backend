@@ -39,7 +39,7 @@ describe('GET /profile/me', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({
       id: me.id, name: 'Ali', age: 25, gender: 'man', looking_for: 'women', bio: null,
-      interests: [], location: 'Tehran', icebreaker_prompt: null, icebreaker_answer: null,
+      interests: [], location: 'Tehran', icebreaker_prompt: null, icebreaker_answer: null, phone: null,
       is_active: true, paused_at: null, locale: null, account_status: 'active',
       photos: [
         { id: p0.id, url: 'https://img/0', position: 0 },

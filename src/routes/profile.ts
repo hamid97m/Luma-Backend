@@ -29,7 +29,7 @@ export async function getProfileWithPhotos(userId: string) {
   try {
     ;[user] = await sql`
       select id, name, age, gender, looking_for, bio, interests, location, icebreaker_prompt,
-             icebreaker_answer, is_active, paused_at, locale, account_status
+             icebreaker_answer, is_active, paused_at, locale, account_status, phone
       from users where id = ${userId}`
   } catch {
     return null

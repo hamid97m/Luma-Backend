@@ -45,7 +45,7 @@ declare module 'fastify' {
 
 const LAST_ACTIVE_THROTTLE_MS = 60_000
 const WEB_SIGN_IN_PATHS = new Set([
-  '/auth/telegram-web', '/auth/google', '/auth/dev', '/auth/phone/request', '/auth/phone/verify',
+  '/auth/telegram-web', '/auth/telegram-oidc', '/auth/google', '/auth/dev', '/auth/phone/request', '/auth/phone/verify',
 ])
 
 /** The only way a paused user can come back is by uploading a fresh photo.
@@ -135,6 +135,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     if (
       req.url === '/auth/verify' ||
       req.url === '/auth/telegram-web' ||
+      req.url === '/auth/telegram-oidc' ||
       req.url === '/auth/google' ||
       req.url === '/auth/dev' ||
       req.url === '/auth/phone/request' ||

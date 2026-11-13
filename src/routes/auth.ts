@@ -3,6 +3,7 @@ import { verifyInitData, verifyTelegramWidget } from '../auth.js'
 import { signIn, loadAuthUser, type Identity } from '../accounts.js'
 import { isSessionSecretConfigured, signSessionToken } from '../session.js'
 import { verifyGoogleIdToken } from '../googleAuth.js'
+import { verifyTelegramIdToken } from '../telegramOidc.js'
 import { parseClientInfo } from '../devices/clientInfo.js'
 import { recordDevice } from '../devices/record.js'
 
@@ -44,6 +45,20 @@ export async function authRoutes(app: FastifyInstance) {
     }
 
     const tgUser = verifyTelegramWidget(body, process.env.BOT_TOKEN ?? '')
+    if (!tgUser) return reply.status(401).send({ error: 'invalid_telegram_login' })
+
+    return webSignIn({ kind: 'telegram', tgUser }, req, reply)
+  })
+
+  // Native "Log in with Telegram" (Android): `idToken` is the OIDC ID token
+  // the Telegram app hands back. Same account as the Mini App (by Telegram id).
+  app.post('/auth/telegram-oidc', async (req, reply) => {
+    const idToken = (req.body as { idToken?: unknown } | null | undefined)?.idToken
+    if (typeof idToken !== 'string' || !idToken) {
+      return reply.status(400).send({ error: 'missing_id_token' })
+    }
+
+    const tgUser = await verifyTelegramIdToken(idToken)
     if (!tgUser) return reply.status(401).send({ error: 'invalid_telegram_login' })
 
     return webSignIn({ kind: 'telegram', tgUser }, req, reply)

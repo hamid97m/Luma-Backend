@@ -1,3 +1,4 @@
+import type { TransactionSql } from 'postgres'
 import { sql, isUuid } from '../db.js'
 import { createPremiumInvoiceLink, refundPremiumPayment, notifyPaymentChannel } from '../bot.js'
 import { notifyUserPremiumPurchased } from '../notify/userNotify.js'
@@ -105,7 +106,8 @@ export async function getPremiumStatus(userId: string) {
     tolerant(() => sql`select premium_enabled from premium_config where id = true`),
     tolerant(() => sql`select premium_until, locale, geo_country from users where id = ${userId}`),
     tolerant(() => sql`
-      select id, title, description, translations, price_stars, discount_percent, discount_ends_at, duration_days
+      select id, title, description, translations, price_stars, discount_percent, discount_ends_at, duration_days,
+             bazaar_sku, myket_sku, bazaar_price_toman, myket_price_toman
       from premium_plans
       where is_active = true
       order by sort_order asc`),
@@ -132,6 +134,10 @@ export async function getPremiumStatus(userId: string) {
         discountPercent: active ? p.discount_percent : null,
         discountEndsAt: active ? (p.discount_ends_at ?? null) : null,
         durationDays: p.duration_days,
+        bazaarSku: p.bazaar_sku ?? null,
+        myketSku: p.myket_sku ?? null,
+        bazaarPriceToman: p.bazaar_price_toman ?? null,
+        myketPriceToman: p.myket_price_toman ?? null,
       }
       if (tomanPerStar == null) return base
       return {
@@ -424,20 +430,39 @@ export async function validatePremiumPreCheckout(transactionId: string, totalAmo
   return { ok: true as const }
 }
 
-type GrantUser = {
+export type GrantUser = {
   premium_until: string | null; name: string | null; locale: string | null
   telegram_id: number | null; allows_write_to_pm: boolean | null
 }
 
 /**
- * Adds `durationDays` of premium to a user, extending from the later of now /
- * their current expiry (`extendPremiumUntil`). Shared by the Stars and TonPays
- * grant paths.
+ * Adds `durationDays` of premium to a user inside the caller's transaction:
+ * locks the user row (`for update`) and extends from the later of now / their
+ * current expiry (`extendPremiumUntil`). Returns the new expiry and the user
+ * row as it was before the update, or null when the user doesn't exist.
  *
- * Read and write run in one transaction with the user row locked
- * (`for update`), so two grants for the same buyer landing at once (a Stars
- * and a TonPays payment, or two stacked purchases) serialize instead of both
- * extending from the same old expiry and losing one purchase's days.
+ * The lock makes two grants for the same buyer landing at once serialize
+ * instead of both extending from the same old expiry and losing one
+ * purchase's days.
+ *
+ * `onUser` sees the locked row before the write, so a caller still knows who
+ * the buyer is if the update itself then fails.
+ */
+export async function extendPremiumIn(
+  q: TransactionSql<any>, userId: string, durationDays: number, onUser?: (user: GrantUser) => void,
+): Promise<{ premiumUntil: string; user: GrantUser } | null> {
+  const [row] = await q<GrantUser[]>`
+    select premium_until, name, locale, telegram_id, allows_write_to_pm from users where id = ${userId} for update`
+  if (!row) return null
+  onUser?.(row)
+  const premiumUntil = extendPremiumUntil(row.premium_until ?? null, durationDays)
+  await q`update users set premium_until = ${premiumUntil} where id = ${userId}`
+  return { premiumUntil, user: row }
+}
+
+/**
+ * Adds `durationDays` of premium to a user in its own transaction
+ * (`extendPremiumIn`). Shared by the Stars and TonPays grant paths.
  *
  * Mirrors the old two-call contract: `user` is null when the row is missing
  * (or the read failed); `error` carries the message when the write failed —
@@ -447,13 +472,7 @@ async function grantPremiumTime(userId: string, durationDays: number): Promise<{
   let user: GrantUser | null = null
   try {
     await sql.begin(async (q) => {
-      const [row] = await q<GrantUser[]>`
-        select premium_until, name, locale, telegram_id, allows_write_to_pm from users where id = ${userId} for update`
-      if (!row) return
-      user = row
-      await q`
-        update users set premium_until = ${extendPremiumUntil(row.premium_until ?? null, durationDays)}
-        where id = ${userId}`
+      await extendPremiumIn(q, userId, durationDays, (row) => { user = row })
     })
     return { user, error: null }
   } catch (err) {

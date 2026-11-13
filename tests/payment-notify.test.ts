@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   formatPremiumPaidNotice, formatGiftPaidNotice, formatTonPaysPaidNotice,
-  formatTonPaysGrantFailedNotice,
+  formatTonPaysGrantFailedNotice, formatStorePaidNotice,
 } from '../src/payments/paymentNotify.js'
 
 describe('formatPremiumPaidNotice', () => {
@@ -86,5 +86,30 @@ describe('formatGiftPaidNotice', () => {
     expect(text).toContain('Buyer: unknown')
     expect(text).toContain('Recipient: unknown')
     expect(text).toContain('Gift: 🎁')
+  })
+})
+
+describe('formatStorePaidNotice', () => {
+  it('names the store, buyer, duration, sku and Toman price with Latin digits', () => {
+    const text = formatStorePaidNotice({
+      store: 'myket', buyerName: 'Ali', durationDays: 30, sku: 'premium_1m', amountToman: 120000,
+      at: '2026-11-13T10:00:00.000Z',
+    })
+    expect(text).toContain('Myket')
+    expect(text).toContain('Ali')
+    expect(text).toContain('30 days')
+    expect(text).toContain('premium_1m')
+    expect(text).toContain('120,000 Toman')
+    expect(text).toContain('2026-11-13T10:00:00.000Z')
+  })
+
+  it('says Bazaar, unknown buyer and price unknown when missing', () => {
+    const text = formatStorePaidNotice({
+      store: 'bazaar', buyerName: null, durationDays: 90, sku: 'baz_3m', amountToman: null, at: 'now',
+    })
+    expect(text).toContain('Bazaar')
+    expect(text).toContain('unknown')
+    expect(text).toContain('price unknown')
+    expect(text).not.toContain('null')
   })
 })

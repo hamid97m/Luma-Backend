@@ -5,6 +5,10 @@ vi.mock('../src/premium/service.js', () => ({
   getPremiumStatus: vi.fn(), createPremiumCheckout: vi.fn(), getPremiumTransactionStatus: vi.fn(),
   changeTonPaysCard: vi.fn(), submitTonPaysRefundCard: vi.fn(),
 }))
+vi.mock('../src/premium/storePurchase.js', async () => ({
+  ...(await vi.importActual<typeof import('../src/premium/storePurchase.js')>('../src/premium/storePurchase.js')),
+  verifyStorePurchase: vi.fn(),
+}))
 
 import { buildApp } from '../src/server.js'
 import { authAs } from './helpers/auth.js'
@@ -13,6 +17,7 @@ import {
   getPremiumStatus, createPremiumCheckout, getPremiumTransactionStatus,
   changeTonPaysCard, submitTonPaysRefundCard,
 } from '../src/premium/service.js'
+import { verifyStorePurchase } from '../src/premium/storePurchase.js'
 
 describe('premium routes', () => {
   let app: Awaited<ReturnType<typeof buildApp>>
@@ -156,5 +161,52 @@ describe('premium routes', () => {
       payload: { cardNumber: '6037991122334455', cardHolder: 'Ali' },
     })
     expect(r2.statusCode).toBe(404)
+  })
+
+  describe('POST /premium/store-purchase', () => {
+    const post = (payload: unknown) => app.inject({
+      method: 'POST', url: '/premium/store-purchase', headers: { authorization: 'x' }, payload: payload as any,
+    })
+    const body = { store: 'myket', sku: 'premium_1m', purchaseToken: 'tok_1' }
+
+    it('401 without auth', async () => {
+      const res = await app.inject({ method: 'POST', url: '/premium/store-purchase', payload: body })
+      expect(res.statusCode).toBe(401)
+      expect(verifyStorePurchase).not.toHaveBeenCalled()
+    })
+
+    it('400 on missing/oversized fields or unknown store', async () => {
+      for (const bad of [
+        {}, { ...body, store: 'googleplay' }, { ...body, sku: '' }, { ...body, sku: '   ' },
+        { ...body, purchaseToken: undefined }, { ...body, purchaseToken: 'x'.repeat(257) },
+        { ...body, sku: 42 },
+      ]) {
+        auth()
+        const res = await post(bad)
+        expect(res.statusCode).toBe(400)
+        expect(res.json()).toEqual({ error: 'invalid_input' })
+      }
+      expect(verifyStorePurchase).not.toHaveBeenCalled()
+    })
+
+    it('200 with the result and passes the caller id + trimmed fields', async () => {
+      auth()
+      vi.mocked(verifyStorePurchase).mockResolvedValue({ ok: true, already: false, premiumUntil: '2026-12-13T00:00:00.000Z' })
+      const res = await post({ ...body, sku: ' premium_1m ' })
+      expect(res.statusCode).toBe(200)
+      expect(res.json()).toEqual({ ok: true, already: false, premiumUntil: '2026-12-13T00:00:00.000Z' })
+      expect(verifyStorePurchase).toHaveBeenCalledWith(me.id, 'myket', 'premium_1m', 'tok_1')
+    })
+
+    it.each([
+      ['unknown_sku', 400], ['invalid_input', 400], ['purchase_invalid', 402], ['payload_mismatch', 403],
+      ['token_used', 409], ['grant_failed', 500], ['store_unavailable', 502], ['store_not_configured', 503],
+    ] as const)('maps %s to %i', async (error, status) => {
+      auth()
+      vi.mocked(verifyStorePurchase).mockResolvedValue({ error })
+      const res = await post(body)
+      expect(res.statusCode).toBe(status)
+      expect(res.json()).toEqual({ error })
+    })
   })
 })

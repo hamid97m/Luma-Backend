@@ -3,6 +3,8 @@
 // so the exact wording is unit-testable. These are internal admin/audit
 // messages — English labels + Latin digits, not user-facing i18n copy.
 
+import type { StoreName } from './storeTypes.js'
+
 export interface PremiumPaidNotice {
   buyerName: string | null
   durationDays: number
@@ -36,7 +38,23 @@ export interface GiftPaidNotice {
   at: string // ISO timestamp
 }
 
+export interface StorePaidNotice {
+  store: StoreName
+  buyerName: string | null
+  durationDays: number
+  sku: string
+  amountToman: number | null
+  at: string // ISO timestamp
+}
+
 const UNKNOWN = 'unknown'
+
+const STORE_LABEL: Record<StoreName, string> = { bazaar: 'Bazaar', myket: 'Myket' }
+
+/** 120000 → "120,000" (Latin digits, comma thousands separator). */
+function groupThousands(n: number): string {
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+}
 
 export function formatPremiumPaidNotice(n: PremiumPaidNotice): string {
   return [
@@ -84,6 +102,16 @@ export function formatGiftPaidNotice(n: GiftPaidNotice): string {
     `Gift: ${n.giftEmoji ?? '🎁'}`,
     `Amount: ${n.amountStars} ⭐`,
     `Charge: ${n.chargeId}`,
+    `Time: ${n.at}`,
+  ].join('\n')
+}
+
+/** Bazaar/Myket in-app purchase verified and granted. Never includes the
+ * purchase token (a bearer credential for the purchase). */
+export function formatStorePaidNotice(n: StorePaidNotice): string {
+  const price = n.amountToman != null ? `${groupThousands(n.amountToman)} Toman` : 'price unknown'
+  return [
+    `💳 ${STORE_LABEL[n.store]}: ${n.buyerName ?? UNKNOWN} · ${n.durationDays} days · ${n.sku} · ${price}`,
     `Time: ${n.at}`,
   ].join('\n')
 }

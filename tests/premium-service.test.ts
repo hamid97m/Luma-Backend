@@ -145,11 +145,21 @@ describe('getPremiumStatus', () => {
     expect(res.premiumUntil).toBe(null)
     expect(res.paymentProvider).toBe('stars')
     expect(res.plans).toEqual([
-      { id: p1.id, title: '1 Month', description: 'Best start', priceStars: 100, discountPercent: null, originalPriceStars: null, discountEndsAt: null, durationDays: 30 },
-      { id: p2.id, title: '3 Months', description: '', priceStars: 75, discountPercent: 50, originalPriceStars: 150, discountEndsAt: null, durationDays: 90 },
-      { id: p3.id, title: '6 Months', description: '', priceStars: 150, discountPercent: 25, originalPriceStars: 200, discountEndsAt: future, durationDays: 180 },
-      { id: p4.id, title: '12 Months', description: '', priceStars: 300, discountPercent: null, originalPriceStars: null, discountEndsAt: null, durationDays: 365 },
+      { id: p1.id, title: '1 Month', description: 'Best start', priceStars: 100, discountPercent: null, originalPriceStars: null, discountEndsAt: null, durationDays: 30, bazaarSku: null, myketSku: null, bazaarPriceToman: null, myketPriceToman: null },
+      { id: p2.id, title: '3 Months', description: '', priceStars: 75, discountPercent: 50, originalPriceStars: 150, discountEndsAt: null, durationDays: 90, bazaarSku: null, myketSku: null, bazaarPriceToman: null, myketPriceToman: null },
+      { id: p3.id, title: '6 Months', description: '', priceStars: 150, discountPercent: 25, originalPriceStars: 200, discountEndsAt: future, durationDays: 180, bazaarSku: null, myketSku: null, bazaarPriceToman: null, myketPriceToman: null },
+      { id: p4.id, title: '12 Months', description: '', priceStars: 300, discountPercent: null, originalPriceStars: null, discountEndsAt: null, durationDays: 365, bazaarSku: null, myketSku: null, bazaarPriceToman: null, myketPriceToman: null },
     ])
+  })
+
+  it('/premium/status plans carry store SKUs and Toman prices', async () => {
+    await setPremiumConfig({ premium_enabled: true })
+    const me = await createUser()
+    await createPlan({ bazaar_sku: 'baz_1m', myket_sku: 'myk_1m', bazaar_price_toman: 110000, myket_price_toman: 120000, sort_order: 1 })
+    await createPlan({ sort_order: 2 })
+    const res = await getPremiumStatus(me.id)
+    expect(res.plans[0]).toMatchObject({ bazaarSku: 'baz_1m', myketSku: 'myk_1m', bazaarPriceToman: 110000, myketPriceToman: 120000 })
+    expect(res.plans[1]).toMatchObject({ bazaarSku: null, myketSku: null, bazaarPriceToman: null, myketPriceToman: null })
   })
 
   it('reports the toggle off and the viewer\'s own premium_until', async () => {

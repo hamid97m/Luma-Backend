@@ -38,5 +38,5 @@ export async function verifyMyketPurchase(sku: string, token: string): Promise<S
   } catch {
     throw new StoreUnavailableError('myket returned a non-JSON body')
   }
-  return parsePurchaseBody(body)
+  return parsePurchaseBody(body, sku)
 }

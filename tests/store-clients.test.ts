@@ -72,6 +72,16 @@ describe('myket', () => {
     vi.stubEnv('MYKET_ACCESS_TOKEN', '')
     expect(isMyketConfigured()).toBe(false)
   })
+  it('productId mismatching the requested SKU → invalid', async () => {
+    fetchMock.mockResolvedValue(json(200, { purchaseState: 0, productId: 'other_sku' }))
+    expect(await verifyMyketPurchase('s', 't')).toEqual({ status: 'invalid' })
+  })
+  it('matching or absent productId → purchased', async () => {
+    fetchMock.mockResolvedValueOnce(json(200, { purchaseState: 0, productId: 's' }))
+    expect((await verifyMyketPurchase('s', 't')).status).toBe('purchased')
+    fetchMock.mockResolvedValueOnce(json(200, { purchaseState: 0 }))
+    expect((await verifyMyketPurchase('s', 't')).status).toBe('purchased')
+  })
 })
 
 describe('bazaar', () => {
@@ -176,5 +186,15 @@ describe('bazaar', () => {
     expect(isBazaarConfigured()).toBe(true)
     vi.stubEnv('BAZAAR_REFRESH_TOKEN', '')
     expect(isBazaarConfigured()).toBe(false)
+  })
+  it('productId mismatching the requested SKU → invalid', async () => {
+    fetchMock.mockResolvedValueOnce(tokenRes()).mockResolvedValueOnce(json(200, { purchaseState: 0, productId: 'other_sku' }))
+    expect(await verifyBazaarPurchase('s', 't')).toEqual({ status: 'invalid' })
+  })
+  it('matching or absent productId → purchased', async () => {
+    fetchMock.mockResolvedValueOnce(tokenRes()).mockResolvedValueOnce(json(200, { purchaseState: 0, productId: 's' }))
+    expect((await verifyBazaarPurchase('s', 't')).status).toBe('purchased')
+    fetchMock.mockResolvedValueOnce(json(200, { purchaseState: 0 }))
+    expect((await verifyBazaarPurchase('s', 't')).status).toBe('purchased')
   })
 })

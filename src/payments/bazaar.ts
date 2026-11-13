@@ -89,5 +89,5 @@ export async function verifyBazaarPurchase(sku: string, token: string): Promise<
   } catch {
     throw new StoreUnavailableError('bazaar returned a non-JSON body')
   }
-  return parsePurchaseBody(body)
+  return parsePurchaseBody(body, sku)
 }

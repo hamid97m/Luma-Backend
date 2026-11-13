@@ -1,9 +1,12 @@
 // Cafe Bazaar in-app purchase verification (server-to-server, developer API v2).
-// Endpoints confirmed against a working Go client; access token sent as a Bearer header.
+// Endpoints confirmed against a working Go client; access token goes in the ?access_token= query param (Bearer header is rejected by the live API).
+// Never put the validate URL in error messages/logs: it carries the access token.
 import { StoreUnavailableError, STORE_TIMEOUT_MS, parsePurchaseBody, type StoreVerifyResult } from './storeTypes.js'
 
 const BASE = 'https://pardakht.cafebazaar.ir/devapi/v2'
 const REFRESH_MARGIN_MS = 60_000
+// The token endpoint returns expires_in: 3600000 (unit ambiguous); never cache longer than 50 min.
+const MAX_TOKEN_TTL_MS = 50 * 60_000
 
 let cached: { token: string; expiresAt: number } | null = null
 
@@ -44,7 +47,7 @@ async function getAccessToken(forceRefresh: boolean): Promise<string> {
     throw new StoreUnavailableError('bazaar token endpoint returned no access_token')
   }
   const expiresIn = typeof body.expires_in === 'number' ? body.expires_in : 3600
-  cached = { token: body.access_token, expiresAt: Date.now() + expiresIn * 1000 }
+  cached = { token: body.access_token, expiresAt: Date.now() + Math.min(expiresIn * 1000, MAX_TOKEN_TTL_MS) }
   return cached.token
 }
 
@@ -52,19 +55,31 @@ async function validate(sku: string, token: string, access: string): Promise<Res
   const pkg = process.env.BAZAAR_PACKAGE_NAME || 'com.lumi'
   const url =
     `${BASE}/api/validate/${encodeURIComponent(pkg)}/inapp/${encodeURIComponent(sku)}` +
-    `/purchases/${encodeURIComponent(token)}/`
+    `/purchases/${encodeURIComponent(token)}/?access_token=${encodeURIComponent(access)}`
   try {
-    return await fetch(url, { headers: { Authorization: `Bearer ${access}` }, signal: AbortSignal.timeout(STORE_TIMEOUT_MS) })
+    return await fetch(url, { signal: AbortSignal.timeout(STORE_TIMEOUT_MS) })
   } catch (err) {
     throw new StoreUnavailableError(`bazaar request failed: ${(err as Error).message}`)
   }
 }
 
+// Bazaar answers an invalid/expired access token with 403 {error:'invalid_credentials'} (or 401).
+async function isAuthFailure(res: Response): Promise<boolean> {
+  if (res.status === 401) return true
+  if (res.status !== 403) return false
+  try {
+    const body = (await res.clone().json()) as { error?: unknown }
+    return body.error === 'invalid_credentials'
+  } catch {
+    return false
+  }
+}
+
 export async function verifyBazaarPurchase(sku: string, token: string): Promise<StoreVerifyResult> {
   let res = await validate(sku, token, await getAccessToken(false))
-  if (res.status === 401) {
+  if (await isAuthFailure(res)) {
     res = await validate(sku, token, await getAccessToken(true))
-    if (res.status === 401) throw new StoreUnavailableError('bazaar rejected the refreshed access token')
+    if (await isAuthFailure(res)) throw new StoreUnavailableError('bazaar rejected the refreshed access token')
   }
   if (res.status === 404) return { status: 'invalid' }
   if (!res.ok) throw new StoreUnavailableError(`bazaar responded ${res.status}`)

@@ -84,9 +84,9 @@ describe('bazaar', () => {
       grant_type: 'refresh_token', client_id: 'cid', client_secret: 'csec', refresh_token: 'rtok',
     })
     expect(fetchMock.mock.calls[1][0]).toBe(
-      'https://pardakht.cafebazaar.ir/devapi/v2/api/validate/com.lumi/inapp/sku/purchases/tok/',
+      'https://pardakht.cafebazaar.ir/devapi/v2/api/validate/com.lumi/inapp/sku/purchases/tok/?access_token=acc',
     )
-    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer acc')
+    expect(fetchMock.mock.calls[1][1].headers).toBeUndefined()
   })
   it('401 on validate → refreshes once and retries', async () => {
     fetchMock
@@ -96,7 +96,44 @@ describe('bazaar', () => {
       .mockResolvedValueOnce(json(200, { purchaseState: 0 }))
     expect((await verifyBazaarPurchase('s', 't')).status).toBe('purchased')
     expect(fetchMock).toHaveBeenCalledTimes(4)
-    expect(fetchMock.mock.calls[3][1].headers.Authorization).toBe('Bearer acc2')
+    expect(String(fetchMock.mock.calls[3][0])).toContain('access_token=acc2')
+  })
+  it('403 invalid_credentials → refreshes once and retries; second → throws', async () => {
+    const bad = () => json(403, { error: 'invalid_credentials', error_description: 'Access token is not valid.' })
+    fetchMock
+      .mockResolvedValueOnce(tokenRes())
+      .mockResolvedValueOnce(bad())
+      .mockResolvedValueOnce(json(200, { access_token: 'acc2', expires_in: 3600 }))
+      .mockResolvedValueOnce(json(200, { purchaseState: 0 }))
+    expect((await verifyBazaarPurchase('s', 't')).status).toBe('purchased')
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    _resetBazaarTokenCache()
+    fetchMock.mockReset()
+    fetchMock.mockResolvedValueOnce(tokenRes()).mockResolvedValueOnce(bad()).mockResolvedValueOnce(tokenRes()).mockResolvedValueOnce(bad())
+    await expect(verifyBazaarPurchase('s', 't')).rejects.toBeInstanceOf(StoreUnavailableError)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+  it('other 403 → StoreUnavailableError without refresh', async () => {
+    fetchMock.mockResolvedValueOnce(tokenRes()).mockResolvedValueOnce(json(403, { error: 'forbidden' }))
+    await expect(verifyBazaarPurchase('s', 't')).rejects.toBeInstanceOf(StoreUnavailableError)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+  it('caches the access token for at most 50 minutes', async () => {
+    vi.useFakeTimers()
+    try {
+      fetchMock.mockImplementation(async (u: string) =>
+        String(u).includes('/auth/token/') ? json(200, { access_token: 'acc', expires_in: 3600000 }) : json(200, { purchaseState: 0 }))
+      await verifyBazaarPurchase('s', 't')
+      vi.advanceTimersByTime(45 * 60_000)
+      await verifyBazaarPurchase('s', 't')
+      const tokenCalls = () => fetchMock.mock.calls.filter(([u]) => String(u).includes('/auth/token/')).length
+      expect(tokenCalls()).toBe(1)
+      vi.advanceTimersByTime(6 * 60_000)
+      await verifyBazaarPurchase('s', 't')
+      expect(tokenCalls()).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
   it('second 401 → StoreUnavailableError', async () => {
     fetchMock

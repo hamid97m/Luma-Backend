@@ -118,7 +118,30 @@ describe('verifyStorePurchase', () => {
     expect(await storeRows()).toHaveLength(1)
   })
 
+  it('retry of a granted token survives the plan SKU being cleared → already:true, no second extension', async () => {
+    await verifyStorePurchase(me.id, 'myket', SKU, TOKEN)
+    const first = await premiumUntilOf(me.id)
+    await sql`update premium_plans set myket_sku = null where id = ${plan.id}`
+    vi.mocked(verifyMyketPurchase).mockClear()
+
+    expect(await verifyStorePurchase(me.id, 'myket', SKU, TOKEN)).toEqual({ ok: true, already: true, premiumUntil: first })
+    expect(verifyMyketPurchase).not.toHaveBeenCalled()
+    expect(await premiumUntilOf(me.id)).toBe(first)
+    expect(await storeRows()).toHaveLength(1)
+  })
+
   it('two concurrent submits of one token → one row, one extension', async () => {
+    // Barrier: neither store call resolves until both requests have passed the
+    // existing-row check, so both reach the insert and ON CONFLICT must decide.
+    let arrived = 0
+    let release!: () => void
+    const bothArrived = new Promise<void>((r) => { release = r })
+    vi.mocked(verifyMyketPurchase).mockImplementation(async () => {
+      arrived += 1
+      if (arrived === 2) release()
+      await bothArrived
+      return purchased(me.id)
+    })
     const [a, b] = await Promise.all([
       verifyStorePurchase(me.id, 'myket', SKU, TOKEN),
       verifyStorePurchase(me.id, 'myket', SKU, TOKEN),
@@ -130,6 +153,7 @@ describe('verifyStorePurchase', () => {
     const until = new Date((await premiumUntilOf(me.id))!).getTime()
     expect(until).toBeLessThan(Date.now() + 30.1 * DAY_MS)
     expect(notifyPaymentChannel).toHaveBeenCalledTimes(1)
+    expect(verifyMyketPurchase).toHaveBeenCalledTimes(2) // both passed the existing-row check
   })
 
   it('the same token on a different store is a separate purchase', async () => {

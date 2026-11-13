@@ -77,6 +77,11 @@ export async function verifyStorePurchase(
   const client = STORE_CLIENTS[input.store]
   if (!client.configured()) return { error: 'store_not_configured' }
 
+  // Checked before the plan lookup so an app retry of an already-granted
+  // token still succeeds after an admin edits or clears the plan's SKU.
+  const existing = await existingTokenResult(userId, input.store, input.purchaseToken)
+  if (existing) return existing
+
   // Inactive plans still count: the user already paid for this SKU.
   const skuCol = input.store === 'bazaar' ? 'bazaar_sku' : 'myket_sku'
   const priceCol = input.store === 'bazaar' ? 'bazaar_price_toman' : 'myket_price_toman'
@@ -84,9 +89,6 @@ export async function verifyStorePurchase(
     select id, title, duration_days, ${sql(priceCol)} as price_toman
     from premium_plans where ${sql(skuCol)} = ${input.sku}`
   if (!plan) return { error: 'unknown_sku' }
-
-  const existing = await existingTokenResult(userId, input.store, input.purchaseToken)
-  if (existing) return existing
 
   let verified: StoreVerifyResult
   try {
@@ -124,7 +126,9 @@ export async function verifyStorePurchase(
     })
   } catch (err) {
     if ((err as { code?: string })?.code === '23505') {
-      granted = null // lost a race on the token index: answer like a resubmit
+      // Lost a race on the token index: answer like a resubmit.
+      console.warn(`[store-purchase] ${input.store} unique violation on grant (user ${userId}, sku ${input.sku}): ${(err as Error)?.message ?? err}`)
+      granted = null
     } else {
       console.error(`[store-purchase] ${input.store} grant failed (user ${userId}):`, (err as Error)?.message ?? err)
       return { error: 'grant_failed' }

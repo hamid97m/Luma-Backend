@@ -46,6 +46,14 @@ describe('myket', () => {
     fetchMock.mockResolvedValueOnce(json(200, { purchaseState: 1 }))
     expect(await verifyMyketPurchase('s', 't')).toEqual({ status: 'invalid' })
   })
+  it('400 InvalidToken → invalid; other 400 → StoreUnavailableError', async () => {
+    fetchMock.mockResolvedValueOnce(json(400, { code: 400, messageCode: 'InvalidToken', data: null }))
+    expect(await verifyMyketPurchase('s', 't')).toEqual({ status: 'invalid' })
+    fetchMock.mockResolvedValueOnce(json(400, { code: 400, messageCode: 'SomethingElse' }))
+    await expect(verifyMyketPurchase('s', 't')).rejects.toBeInstanceOf(StoreUnavailableError)
+    fetchMock.mockResolvedValueOnce(new Response('not json', { status: 400 }))
+    await expect(verifyMyketPurchase('s', 't')).rejects.toBeInstanceOf(StoreUnavailableError)
+  })
   it('500 / 401 / fetch reject → StoreUnavailableError', async () => {
     fetchMock.mockResolvedValueOnce(json(500))
     await expect(verifyMyketPurchase('s', 't')).rejects.toBeInstanceOf(StoreUnavailableError)

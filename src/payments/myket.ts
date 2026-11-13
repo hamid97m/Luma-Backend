@@ -20,6 +20,17 @@ export async function verifyMyketPurchase(sku: string, token: string): Promise<S
     throw new StoreUnavailableError(`myket request failed: ${(err as Error).message}`)
   }
   if (res.status === 404) return { status: 'invalid' }
+  // Live API: valid key + unknown token -> 400 {messageCode:'InvalidToken'} (not 404).
+  if (res.status === 400) {
+    let code: unknown
+    try {
+      code = ((await res.json()) as { messageCode?: unknown }).messageCode
+    } catch {
+      code = undefined
+    }
+    if (code === 'InvalidToken') return { status: 'invalid' }
+    throw new StoreUnavailableError('myket responded 400')
+  }
   if (!res.ok) throw new StoreUnavailableError(`myket responded ${res.status}`)
   let body: unknown
   try {

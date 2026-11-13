@@ -84,8 +84,9 @@ describe('bazaar', () => {
       grant_type: 'refresh_token', client_id: 'cid', client_secret: 'csec', refresh_token: 'rtok',
     })
     expect(fetchMock.mock.calls[1][0]).toBe(
-      'https://pardakht.cafebazaar.ir/devapi/v2/api/validate/com.lumi/inapp/sku/purchases/tok/?access_token=acc',
+      'https://pardakht.cafebazaar.ir/devapi/v2/api/validate/com.lumi/inapp/sku/purchases/tok/',
     )
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer acc')
   })
   it('401 on validate → refreshes once and retries', async () => {
     fetchMock
@@ -95,7 +96,7 @@ describe('bazaar', () => {
       .mockResolvedValueOnce(json(200, { purchaseState: 0 }))
     expect((await verifyBazaarPurchase('s', 't')).status).toBe('purchased')
     expect(fetchMock).toHaveBeenCalledTimes(4)
-    expect(String(fetchMock.mock.calls[3][0])).toContain('access_token=acc2')
+    expect(fetchMock.mock.calls[3][1].headers.Authorization).toBe('Bearer acc2')
   })
   it('second 401 → StoreUnavailableError', async () => {
     fetchMock
@@ -104,6 +105,7 @@ describe('bazaar', () => {
       .mockResolvedValueOnce(tokenRes())
       .mockResolvedValueOnce(json(401))
     await expect(verifyBazaarPurchase('s', 't')).rejects.toBeInstanceOf(StoreUnavailableError)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
   })
   it('purchaseState 0 → purchased; 404 → invalid; purchaseState 1 → invalid', async () => {
     fetchMock.mockResolvedValueOnce(tokenRes()).mockResolvedValueOnce(json(404))

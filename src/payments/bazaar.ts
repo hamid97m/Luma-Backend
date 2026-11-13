@@ -1,5 +1,5 @@
 // Cafe Bazaar in-app purchase verification (server-to-server, developer API v2).
-// NOTE: endpoints follow the task brief; the docs page was not fetchable (unconfirmed).
+// Endpoints confirmed against a working Go client; access token sent as a Bearer header.
 import { StoreUnavailableError, STORE_TIMEOUT_MS, parsePurchaseBody, type StoreVerifyResult } from './storeTypes.js'
 
 const BASE = 'https://pardakht.cafebazaar.ir/devapi/v2'
@@ -52,9 +52,9 @@ async function validate(sku: string, token: string, access: string): Promise<Res
   const pkg = process.env.BAZAAR_PACKAGE_NAME || 'com.lumi'
   const url =
     `${BASE}/api/validate/${encodeURIComponent(pkg)}/inapp/${encodeURIComponent(sku)}` +
-    `/purchases/${encodeURIComponent(token)}/?access_token=${encodeURIComponent(access)}`
+    `/purchases/${encodeURIComponent(token)}/`
   try {
-    return await fetch(url, { signal: AbortSignal.timeout(STORE_TIMEOUT_MS) })
+    return await fetch(url, { headers: { Authorization: `Bearer ${access}` }, signal: AbortSignal.timeout(STORE_TIMEOUT_MS) })
   } catch (err) {
     throw new StoreUnavailableError(`bazaar request failed: ${(err as Error).message}`)
   }

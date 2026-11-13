@@ -122,4 +122,19 @@ describe('broadcast audience', () => {
     expect(await audience({ platforms: ['android'] })).toEqual(['fresh'])
     expect(await audience({ platforms: ['web'] })).toEqual(['web'])
   })
+
+  it('stores filter needs an Android device from that store seen in the last 90 days; unknown stores match nobody', async () => {
+    const baz = await createUser({ name: 'baz' })
+    await sql`insert into user_devices (user_id, device_id, platform, store) values (${baz.id}, 'b', 'android', 'bazaar')`
+    const myk = await createUser({ name: 'myk' })
+    await sql`insert into user_devices (user_id, device_id, platform, store) values (${myk.id}, 'm', 'android', 'myket')`
+    const stale = await createUser({ name: 'stale' })
+    await sql`insert into user_devices (user_id, device_id, platform, store, last_seen_at)
+      values (${stale.id}, 's', 'android', 'bazaar', ${iso(Date.now() - 91 * DAY)})`
+    const plain = await createUser({ name: 'plain' })
+    await device(plain.id, 'android')
+    expect(await audience({ stores: ['bazaar'] })).toEqual(['baz'])
+    expect((await audience({ stores: ['bazaar', 'myket'] })).sort()).toEqual(['baz', 'myk'])
+    expect(await audience({ stores: ['googleplay' as any] })).toEqual([])
+  })
 })

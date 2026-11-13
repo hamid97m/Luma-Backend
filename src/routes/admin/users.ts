@@ -211,7 +211,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
           where m.user1_id = ${id} or m.user2_id = ${id}
           order by m.created_at desc`,
         sql<any[]>`
-          select device_id, platform, app_version, device_model, os, user_agent,
+          select device_id, platform, store, app_version, device_model, os, user_agent,
                  push_token is not null as has_push, push_token_at, first_seen_at, last_seen_at
           from user_devices where user_id = ${id} order by last_seen_at desc limit 50`,
         sql<{ reason: string | null; note: string | null; created_at: string }[]>`
@@ -221,6 +221,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
       const devices = deviceRows.map((d) => ({
         deviceId: d.device_id,
         platform: d.platform,
+        store: d.store ?? null,
         appVersion: d.app_version ?? null,
         deviceModel: d.device_model ?? null,
         os: d.os ?? null,

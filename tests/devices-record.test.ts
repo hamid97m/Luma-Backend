@@ -31,10 +31,17 @@ async function waitForRows(n: number) {
 describe('parseClientInfo', () => {
   it('reads all headers', () => {
     expect(parseClientInfo({ ...HEADERS, 'user-agent': 'okhttp/4' }, 'bearer')).toEqual({
-      deviceId: 'dev-1', platform: 'android', appVersion: '1.2.3',
+      deviceId: 'dev-1', platform: 'android', store: null, appVersion: '1.2.3',
       deviceModel: 'Pixel 8', os: 'Android 15', userAgent: 'okhttp/4',
     })
   })
+  it('reads X-Client-Store for Android only, allowlisted and case-insensitive', () => {
+    expect(parseClientInfo({ ...HEADERS, 'x-client-store': 'Bazaar' }, 'bearer')!.store).toBe('bazaar')
+    expect(parseClientInfo({ ...HEADERS, 'x-client-store': 'myket' }, 'bearer')!.store).toBe('myket')
+    expect(parseClientInfo({ ...HEADERS, 'x-client-store': 'googleplay' }, 'bearer')!.store).toBeNull()
+    expect(parseClientInfo({ ...HEADERS, 'x-client-platform': 'web', 'x-client-store': 'bazaar' }, 'bearer')!.store).toBeNull()
+  })
+
   it('truncates, strips control chars, falls back on platform', () => {
     expect(parseClientInfo({ ...HEADERS, 'x-device-model': 'm'.repeat(100) }, 'bearer')!.deviceModel).toHaveLength(64)
     expect(parseClientInfo({ ...HEADERS, 'x-device-model': 'a\nb' }, 'bearer')!.deviceModel).toBe('ab')
@@ -79,6 +86,15 @@ describe('device recording', () => {
       await new Promise((r) => setTimeout(r, 20))
     }
     throw new Error('last_seen_at was not refreshed after throttle reset')
+  })
+
+  it('stores X-Client-Store and keeps it when a later request omits it', async () => {
+    const u = await createUser({ telegram_id: null, email: 'a@b.co' })
+    const base = { deviceId: 'dev-1', platform: 'android', appVersion: null, deviceModel: null, os: null, userAgent: null } as const
+    await upsertDevice(u.id, { ...base, store: 'myket' })
+    await upsertDevice(u.id, { ...base, store: null })
+    const [row] = await sql`select store from user_devices where user_id = ${u.id}`
+    expect(row.store).toBe('myket')
   })
 
   it('an upsert without app version / user agent keeps the stored values', async () => {

@@ -41,7 +41,7 @@ export async function adminStatsRoutes(app: FastifyInstance) {
         users, banned, deleted, seed,
         newToday, newWeek, dau, wau,
         men, women, nonbinary,
-        activeByGender, botStatusRows,
+        activeByGender, botStatusRows, sourceRows,
         matches, matchesToday, messages, messagesToday,
         swipes, likes,
         signupRows, matchRows,
@@ -73,6 +73,14 @@ export async function adminStatsRoutes(app: FastifyInstance) {
           from users
           where deleted_at is null and is_seed = false and gender in ('man', 'woman')
           group by gender, bot_status`,
+        // Real users per client source (device seen in the last 90 days); Android splits by store,
+        // 'android' = a native build that sent no X-Client-Store. A user on two sources counts in both.
+        sql<{ source: string; n: number }[]>`
+          select case when d.platform = 'android' then coalesce(d.store, 'android') else d.platform end as source,
+                 count(distinct d.user_id)::int as n
+          from user_devices d join users u on u.id = d.user_id
+          where u.deleted_at is null and u.is_seed = false and d.last_seen_at > now() - interval '90 days'
+          group by 1`,
         count('matches'),
         count('matches', sql`where created_at >= ${today}`),
         count('messages', sql`where type <> 'icebreaker'`),
@@ -121,6 +129,11 @@ export async function adminStatsRoutes(app: FastifyInstance) {
             const g = out[r.gender as 'man' | 'woman']
             g[(r.status ?? 'unknown') as keyof ReturnType<typeof empty>] += r.n
           }
+          return out
+        })(),
+        sources: (() => {
+          const out = { telegram: 0, web: 0, bazaar: 0, myket: 0, android: 0 }
+          for (const r of sourceRows) if (r.source in out) out[r.source as keyof typeof out] = r.n
           return out
         })(),
         signupsPerDay: bucketPerDay(signupRows, 30),

@@ -1,6 +1,6 @@
 import { sql } from '../db.js'
 import { isLocale } from '../i18n/index.js'
-import type { ClientPlatform } from '../devices/clientInfo.js'
+import { STORES, type ClientPlatform, type ClientStore } from '../devices/clientInfo.js'
 
 const DAY_MS = 86_400_000
 
@@ -13,6 +13,8 @@ export interface BroadcastFilters {
   locales?: string[]
   /** Has a device of one of these platforms seen in the last 90 days. */
   platforms?: ClientPlatform[]
+  /** Has an Android device from one of these stores seen in the last 90 days. */
+  stores?: ClientStore[]
 }
 
 export type BroadcastChannel = 'bot' | 'push'
@@ -46,6 +48,11 @@ export function audienceWhere(filters: BroadcastFilters, channel: BroadcastChann
       ${f.platforms?.length ? sql`and exists (select 1 from user_devices d where d.user_id = users.id
           and d.platform = any(${f.platforms}::text[])
           and d.last_seen_at > now() - interval '90 days')` : sql``}
+      ${
+        // Fail closed like locales: unknown store names match nobody.
+        f.stores?.length ? sql`and exists (select 1 from user_devices s where s.user_id = users.id
+          and s.store = any(${f.stores.filter((x) => STORES.includes(x))}::text[])
+          and s.last_seen_at > now() - interval '90 days')` : sql``}
       ${f.genders?.length ? sql`and gender::text = any(${f.genders}::text[])` : sql``}
       ${f.lookingFor?.length ? sql`and looking_for::text = any(${f.lookingFor}::text[])` : sql``}
       ${

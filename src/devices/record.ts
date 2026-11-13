@@ -7,10 +7,12 @@ const lastWrite = new Map<string, number>()
 
 export async function upsertDevice(userId: string, info: ClientInfo): Promise<void> {
   await sql`
-    insert into user_devices (user_id, device_id, platform, app_version, device_model, os, user_agent)
-    values (${userId}, ${info.deviceId}, ${info.platform}, ${info.appVersion}, ${info.deviceModel}, ${info.os}, ${info.userAgent})
+    insert into user_devices (user_id, device_id, platform, store, app_version, device_model, os, user_agent)
+    values (${userId}, ${info.deviceId}, ${info.platform}, ${info.store ?? null}, ${info.appVersion}, ${info.deviceModel}, ${info.os}, ${info.userAgent})
     on conflict (user_id, device_id) do update set
-      platform = excluded.platform, app_version = coalesce(excluded.app_version, user_devices.app_version),
+      platform = excluded.platform,
+      store = case when excluded.platform = 'android' then coalesce(excluded.store, user_devices.store) end,
+      app_version = coalesce(excluded.app_version, user_devices.app_version),
       device_model = coalesce(excluded.device_model, user_devices.device_model),
       os = coalesce(excluded.os, user_devices.os),
       user_agent = coalesce(excluded.user_agent, user_devices.user_agent), last_seen_at = now()`

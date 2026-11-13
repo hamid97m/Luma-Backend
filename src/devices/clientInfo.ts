@@ -1,10 +1,13 @@
 import type { IncomingHttpHeaders } from 'node:http'
 
 export type ClientPlatform = 'telegram' | 'web' | 'android'
+export type ClientStore = 'bazaar' | 'myket'
 
 export interface ClientInfo {
   deviceId: string
   platform: ClientPlatform
+  /** Android only: the store the build came from; null elsewhere. */
+  store: ClientStore | null
   appVersion: string | null
   deviceModel: string | null
   os: string | null
@@ -12,6 +15,7 @@ export interface ClientInfo {
 }
 
 const PLATFORMS: readonly string[] = ['telegram', 'web', 'android']
+export const STORES: readonly ClientStore[] = ['bazaar', 'myket']
 
 function header(headers: IncomingHttpHeaders, name: string): string | undefined {
   const v = headers[name]
@@ -32,9 +36,11 @@ export function parseClientInfo(headers: IncomingHttpHeaders, authKind: 'initDat
   if (!deviceId) return null
   const raw = clean(header(headers, 'x-client-platform'), 32)?.toLowerCase()
   const platform = (raw && PLATFORMS.includes(raw) ? raw : authKind === 'initData' ? 'telegram' : 'web') as ClientPlatform
+  const store = clean(header(headers, 'x-client-store'), 32)?.toLowerCase()
   return {
     deviceId,
     platform,
+    store: platform === 'android' && store && (STORES as readonly string[]).includes(store) ? (store as ClientStore) : null,
     appVersion: clean(header(headers, 'x-client-version'), 32),
     deviceModel: clean(header(headers, 'x-device-model'), 64),
     os: clean(header(headers, 'x-device-os'), 64),

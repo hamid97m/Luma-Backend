@@ -57,6 +57,21 @@ describe('GET /admin/stats', () => {
     })
   })
 
+  it('sources counts real users per client source over the last 90 days, Android split by store', async () => {
+    const a = await createUser()
+    const b = await createUser()
+    const c = await createUser()
+    const fake = await createUser({ is_seed: true, telegram_id: -1 })
+    await insertRow('user_devices', { user_id: a.id, device_id: 'a1', platform: 'android', store: 'bazaar' })
+    await insertRow('user_devices', { user_id: a.id, device_id: 'a2', platform: 'telegram' })
+    await insertRow('user_devices', { user_id: b.id, device_id: 'b1', platform: 'android', store: 'myket' })
+    await insertRow('user_devices', { user_id: b.id, device_id: 'b2', platform: 'android' }) // old build, no header
+    await insertRow('user_devices', { user_id: c.id, device_id: 'c1', platform: 'web', last_seen_at: ago(100 * DAY) }) // stale
+    await insertRow('user_devices', { user_id: fake.id, device_id: 'f1', platform: 'android', store: 'bazaar' })
+
+    expect((await stats()).sources).toEqual({ telegram: 1, web: 0, bazaar: 1, myket: 1, android: 1 })
+  })
+
   it('requires a token', async () => {
     const res = await app.inject({ method: 'GET', url: '/admin/stats' })
     expect(res.statusCode).toBe(401)

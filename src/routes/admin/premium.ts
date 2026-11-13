@@ -5,6 +5,7 @@ import { extendPremiumUntil, type PlanTranslations } from '../../premium/service
 const PLAN_COLS = [
   'id', 'title', 'description', 'translations', 'price_stars', 'discount_percent',
   'discount_ends_at', 'duration_days', 'is_active', 'sort_order', 'created_at',
+  'bazaar_sku', 'myket_sku', 'bazaar_price_toman', 'myket_price_toman',
 ]
 
 /** Plan row for `sql(row)`: jsonb `translations` must be passed as json explicitly. */
@@ -14,7 +15,7 @@ function planRowForSql(row: Record<string, unknown>): Record<string, any> {
 const PAGE_SIZE = 25
 const TX_STATUSES = ['pending_payment', 'paid', 'refunded', 'canceled', 'paid_grant_failed']
 const TX_SOURCES = ['purchase', 'admin_grant', 'referral']
-const TX_PROVIDERS = ['stars', 'tonpays']
+const TX_PROVIDERS = ['stars', 'tonpays', 'bazaar', 'myket']
 const TRANSLATABLE_LOCALES = ['en', 'ar'] as const
 
 function isPositiveInt(n: unknown): n is number {
@@ -54,7 +55,13 @@ function planToJson(p: any) {
     discountEndsAt: p.discount_ends_at ?? null,
     durationDays: p.duration_days, isActive: p.is_active, sortOrder: p.sort_order,
     createdAt: p.created_at,
+    bazaarSku: p.bazaar_sku ?? null, myketSku: p.myket_sku ?? null,
+    bazaarPriceToman: p.bazaar_price_toman ?? null, myketPriceToman: p.myket_price_toman ?? null,
   }
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  return (err as { code?: string } | null)?.code === '23505'
 }
 
 /** Validate + map camelCase plan fields to a snake_case row. `partial` allows omitted fields (PUT). */
@@ -113,6 +120,21 @@ function parsePlanBody(body: Record<string, unknown>, partial: boolean): { error
     if ('error' in tr) return { error: tr.error }
     row.translations = tr.value
   }
+  for (const [key, col] of [['bazaarSku', 'bazaar_sku'], ['myketSku', 'myket_sku']] as const) {
+    const v = body[key]
+    if (v === undefined) continue
+    if (v === null) { row[col] = null; continue }
+    if (typeof v !== 'string') return { error: 'invalid_sku' }
+    const t = v.trim()
+    if (t.length > 256) return { error: 'invalid_sku' }
+    row[col] = t || null
+  }
+  for (const [key, col] of [['bazaarPriceToman', 'bazaar_price_toman'], ['myketPriceToman', 'myket_price_toman']] as const) {
+    const v = body[key]
+    if (v === undefined) continue
+    if (v !== null && !isPositiveInt(v)) return { error: 'invalid_store_price' }
+    row[col] = v
+  }
   return { row }
 }
 
@@ -158,8 +180,14 @@ export async function adminPremiumRoutes(app: FastifyInstance) {
   app.post('/premium/plans', async (req, reply) => {
     const parsed = parsePlanBody((req.body ?? {}) as Record<string, unknown>, false)
     if ('error' in parsed) return reply.status(400).send({ error: parsed.error })
-    const [data] = await sql`
-      insert into premium_plans ${sql(planRowForSql(parsed.row))} returning ${sql(PLAN_COLS)}`.catch(() => [])
+    let data: any
+    try {
+      ;[data] = await sql`
+        insert into premium_plans ${sql(planRowForSql(parsed.row))} returning ${sql(PLAN_COLS)}`
+    } catch (err) {
+      if (isUniqueViolation(err)) return reply.status(409).send({ error: 'sku_taken' })
+      return reply.status(500).send({ error: 'plan_create_failed' })
+    }
     if (!data) return reply.status(500).send({ error: 'plan_create_failed' })
     return reply.status(201).send(planToJson(data))
   })
@@ -177,7 +205,8 @@ export async function adminPremiumRoutes(app: FastifyInstance) {
       ;[data] = await sql`
         update premium_plans set ${sql(planRowForSql(parsed.row))} where id = ${id}
         returning ${sql(PLAN_COLS)}`
-    } catch {
+    } catch (err) {
+      if (isUniqueViolation(err)) return reply.status(409).send({ error: 'sku_taken' })
       return reply.status(500).send({ error: 'plan_update_failed' })
     }
     if (!data) return reply.status(404).send({ error: 'plan_not_found' })
@@ -217,7 +246,7 @@ export async function adminPremiumRoutes(app: FastifyInstance) {
       ;[data, [{ count: total }]] = await Promise.all([
         sql`
           select t.id, t.plan_title, t.price_stars, t.duration_days, t.status, t.source, t.created_at,
-            t.paid_at, t.provider, t.price_toman, t.tonpays_status,
+            t.paid_at, t.provider, t.price_toman, t.tonpays_status, t.store_sku,
             case when u.id is null then null
               else json_build_object('name', u.name, 'username', u.username) end as user
           from premium_transactions t
@@ -246,6 +275,7 @@ export async function adminPremiumRoutes(app: FastifyInstance) {
         provider: r.provider,
         priceToman: r.price_toman ?? null,
         tonpaysStatus: r.tonpays_status ?? null,
+        storeSku: r.store_sku ?? null,
       })),
       total, page: pageNum, pageCount: Math.max(1, Math.ceil(total / PAGE_SIZE)),
     }

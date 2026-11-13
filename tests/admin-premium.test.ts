@@ -16,6 +16,7 @@ const PLAN_JSON = {
   title: '1 Month', description: 'Best start', translations: {}, priceStars: 100,
   discountPercent: null, discountEndsAt: null, durationDays: 30, isActive: true, sortOrder: 0,
   createdAt: '2026-08-05T00:00:00.000Z',
+  bazaarSku: null, myketSku: null, bazaarPriceToman: null, myketPriceToman: null,
 }
 const createPlan = (extra: Record<string, unknown> = {}) => insertRow('premium_plans', { ...PLAN_ROW, ...extra })
 const MISSING = '00000000-0000-0000-0000-000000000000'
@@ -369,7 +370,7 @@ describe('admin premium transactions + grant/revoke', () => {
         id: t.id, userName: 'Ali', userUsername: 'ali', planTitle: '1 Month',
         priceStars: 100, durationDays: 30, status: 'paid', source: 'purchase',
         createdAt: '2026-08-05T00:00:00.000Z', paidAt: '2026-08-05T00:01:00.000Z',
-        provider: 'stars', priceToman: null, tonpaysStatus: null,
+        provider: 'stars', priceToman: null, tonpaysStatus: null, storeSku: null,
       }],
       total: 1, page: 1, pageCount: 1,
     })
@@ -390,7 +391,7 @@ describe('admin premium transactions + grant/revoke', () => {
     const res = await app.inject({ method: 'GET', url: '/admin/premium/transactions?page=1', headers })
     expect(res.statusCode).toBe(200)
     expect(res.json().items[0]).toMatchObject({
-      userName: 'Sara', userUsername: null, provider: 'tonpays', priceToman: 150000, tonpaysStatus: 'verified',
+      userName: 'Sara', userUsername: null, provider: 'tonpays', priceToman: 150000, tonpaysStatus: 'verified', storeSku: null,
     })
   })
 
@@ -495,5 +496,74 @@ describe('admin premium transactions + grant/revoke', () => {
       expect(res.statusCode).toBe(404)
       expect(res.json()).toEqual({ error: 'user_not_found' })
     }
+  })
+})
+
+describe('admin premium store fields', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>
+  let headers: Record<string, string>
+  beforeEach(async () => {
+    await resetDb()
+    app = await buildApp()
+    headers = adminHeaders()
+  })
+  const post = (payload: Record<string, unknown>) =>
+    app.inject({ method: 'POST', url: '/admin/premium/plans', headers, payload })
+  const base = { title: 'P', priceStars: 100, durationDays: 30 }
+
+  it('creates and updates a plan with store SKUs and prices', async () => {
+    const res = await post({ ...base, bazaarSku: ' baz_1m ', myketSku: 'myk_1m', bazaarPriceToman: 99000, myketPriceToman: 109000 })
+    expect(res.statusCode).toBe(201)
+    expect(res.json()).toMatchObject({ bazaarSku: 'baz_1m', myketSku: 'myk_1m', bazaarPriceToman: 99000, myketPriceToman: 109000 })
+    const id = res.json().id
+    const put = await app.inject({ method: 'PUT', url: `/admin/premium/plans/${id}`, headers, payload: { myketSku: '', bazaarPriceToman: null } })
+    expect(put.statusCode).toBe(200)
+    expect(put.json()).toMatchObject({ bazaarSku: 'baz_1m', myketSku: null, bazaarPriceToman: null, myketPriceToman: 109000 })
+    const list = (await app.inject({ method: 'GET', url: '/admin/premium/plans', headers })).json()
+    expect(list.plans[0]).toMatchObject({ bazaarSku: 'baz_1m', myketSku: null })
+  })
+
+  it('blank SKU becomes null', async () => {
+    const res = await post({ ...base, bazaarSku: '   ' })
+    expect(res.statusCode).toBe(201)
+    expect(res.json().bazaarSku).toBeNull()
+  })
+
+  it('rejects invalid SKU and price', async () => {
+    for (const bad of [{ bazaarSku: 'x'.repeat(257) }, { myketSku: 5 }]) {
+      const r = await post({ ...base, ...bad })
+      expect(r.statusCode).toBe(400)
+      expect(r.json()).toEqual({ error: 'invalid_sku' })
+    }
+    for (const bad of [{ bazaarPriceToman: 0 }, { myketPriceToman: 1.5 }, { myketPriceToman: '5' }]) {
+      const r = await post({ ...base, ...bad })
+      expect(r.statusCode).toBe(400)
+      expect(r.json()).toEqual({ error: 'invalid_store_price' })
+    }
+  })
+
+  it('409 sku_taken on a duplicate SKU (POST and PUT)', async () => {
+    expect((await post({ ...base, bazaarSku: 'dup' })).statusCode).toBe(201)
+    const dup = await post({ ...base, bazaarSku: 'dup' })
+    expect(dup.statusCode).toBe(409)
+    expect(dup.json()).toEqual({ error: 'sku_taken' })
+    const other = (await post({ ...base, myketSku: 'm2' })).json()
+    const put = await app.inject({ method: 'PUT', url: `/admin/premium/plans/${other.id}`, headers, payload: { myketSku: 'm2', bazaarSku: 'dup' } })
+    expect(put.statusCode).toBe(409)
+    expect(put.json()).toEqual({ error: 'sku_taken' })
+  })
+
+  it('transactions filter by store provider and return storeSku', async () => {
+    const u = await createUser({ name: 'Ali' })
+    const mk = (extra: Record<string, unknown>) => insertRow('premium_transactions', {
+      user_id: u.id, plan_title: '1 Month', price_stars: 0, duration_days: 30, status: 'paid', source: 'purchase',
+      created_at: '2026-08-05T00:00:00.000Z', paid_at: '2026-08-05T00:01:00.000Z', ...extra,
+    })
+    const myk = await mk({ provider: 'myket', store_sku: 'myk_1m', store_purchase_token: 't1', price_toman: 109000 })
+    await mk({ provider: 'bazaar', store_sku: 'baz_1m', store_purchase_token: 't2' })
+    const res = await app.inject({ method: 'GET', url: '/admin/premium/transactions?provider=myket', headers })
+    const body = res.json()
+    expect(body.total).toBe(1)
+    expect(body.items[0]).toMatchObject({ id: myk.id, provider: 'myket', storeSku: 'myk_1m', priceToman: 109000 })
   })
 })

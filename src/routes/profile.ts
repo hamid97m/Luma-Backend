@@ -86,6 +86,21 @@ export async function profileRoutes(app: FastifyInstance) {
       updates.age = age
     }
 
+    // Gender is chosen once at signup; after that it's locked (switching it
+    // would dodge the gender-based free-tier limits). Resending the same value
+    // is fine. Admins can still change it from the admin panel.
+    if ('gender' in updates) {
+      let current
+      try {
+        ;[current] = await sql`select age, gender from users where id = ${req.userId}`
+      } catch {
+        current = undefined
+      }
+      if (current && current.age > 0 && updates.gender !== current.gender) {
+        return reply.status(403).send({ error: 'gender_locked' })
+      }
+    }
+
     if ('locale' in updates && !isLocale(updates.locale)) {
       return reply.status(400).send({ error: 'invalid_locale' })
     }

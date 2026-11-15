@@ -187,7 +187,24 @@ describe('PUT /profile/me', () => {
     expect(scheduleMainPhotoCheck).toHaveBeenCalledWith(me.id, expect.anything())
   })
 
+  it('returns 403 gender_locked when changing gender after signup', async () => {
+    const res = await put({ gender: 'woman', bio: 'hi' })
+    expect(res.statusCode).toBe(403)
+    expect(res.json()).toEqual({ error: 'gender_locked' })
+    const row = await userRow()
+    expect(row.gender).toBe('man')
+    expect(row.bio).toBeNull()
+  })
+
+  it('lets an unfinished signup (age 0) set its gender', async () => {
+    await sql`update users set age = 0 where id = ${me.id}`
+    const res = await put({ gender: 'woman' })
+    expect(res.statusCode).toBe(200)
+    expect((await userRow()).gender).toBe('woman')
+  })
+
   it('returns 500 update_failed for a value Postgres rejects (thrown error is caught)', async () => {
+    await sql`update users set age = 0 where id = ${me.id}`
     const res = await put({ gender: 'robot' })
     expect(res.statusCode).toBe(500)
     expect(res.json()).toEqual({ error: 'update_failed' })

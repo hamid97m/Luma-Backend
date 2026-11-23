@@ -140,7 +140,8 @@ if (isLive) {
   console.log('[dev] Bot disabled (set NODE_ENV=production and a real BOT_TOKEN to enable)')
 }
 await initPush()
-await app.listen({ port: Number(process.env.PORT ?? 3000), host: '0.0.0.0' })
+// HOST=127.0.0.1 in production: only nginx (same box) should reach the API.
+await app.listen({ port: Number(process.env.PORT ?? 3000), host: process.env.HOST ?? '0.0.0.0' })
 if (process.env.METRICS_PORT) startMetricsServer(Number(process.env.METRICS_PORT), app.log)
 
 if (isLive) {

@@ -110,7 +110,7 @@ export function regexFindsContactInfo(text: string): boolean {
 
 export const TEXT_SYSTEM_PROMPT = `You moderate text that a user wrote on their dating-app profile. Users are mostly Iranian; text is usually Persian, Finglish (Persian written in Latin letters) or English.
 You get a JSON object {"field": "name" | "bio" | "icebreaker_answer", "text": string}.
-Reply with a JSON object only, exactly: {"approved": boolean, "reason": string | null}
+Reply with a JSON object only, exactly: {"approved": boolean, "reason": string | null}, and for field "name" also "name_gender": "man" | "woman" | "unisex" | "unknown".
 Reject (approved false) only when the text clearly breaks one of these rules, with reason set to the rule's code:
 - "contact_info": any way to contact the user outside the app — phone number (also written with spaces, words or mixed digits), Telegram/Instagram/WhatsApp/Snapchat username or ID (also obfuscated, e.g. "insta: ali_r", "آیدی تل", "پیج اینستام", "add me on ..."), @username, t.me or any link/URL, email address.
 - "fake_name": ONLY for field "name". Not a plausible personal first name or nickname: a celebrity or fictional character name, a brand, "admin"/"support"/"test"/"bot", random letters or keyboard mash, a sentence, greeting or phrase ("سلام", "hi", "دنبال دوست"), or only emoji/symbols.
@@ -118,7 +118,8 @@ Reject (approved false) only when the text clearly breaks one of these rules, wi
 - "sexual": explicit sexual content, sexual solicitation or offering sexual services.
 - "ad_or_spam": advertising, selling, money or crypto offers, channel/group/page promotion, paid services.
 Allowed: ordinary Persian, Finglish or English first names and nicknames (e.g. "علی", "Sara", "ممد", "Ali Reza", "نازی", "Mamad"), a first name plus surname, names from any culture, a name with an emoji. Normal bios about hobbies, job, city, age, height, what they are looking for, jokes, poems and mild flirting are fine. Mentioning Instagram or Telegram without giving an ID is fine. Mild personal opinions, preferences ("no smokers please"), light jokes and normal mentions of religion or politics are fine.
-If you are unsure, approve. When approved, reason is null.`
+If you are unsure, approve. When approved, reason is null.
+"name_gender" (field "name" only) is the gender the name is normally used for — most Persian names are clearly male (e.g. "علی", "رضا", "Mamad") or female (e.g. "سارا", "مریم", "Nazanin"); use "unisex" for names used by both and "unknown" when you can't tell. It is only a note for human moderators and must never change "approved" or "reason".`
 
 /**
  * Validates the model's JSON reply. Throws on non-JSON or a missing verdict (a
@@ -139,7 +140,21 @@ export function parseTextVerdict(content: string, field: TextField): TextVerdict
   return { approved: false, reason: reason as TextRejectReason }
 }
 
-type AiReview = TextVerdict & { promptTokens: number | null; completionTokens: number | null }
+export const NAME_GENDERS = ['man', 'woman', 'unisex', 'unknown'] as const
+export type NameGender = (typeof NAME_GENDERS)[number]
+
+/** The name's usual gender from the model's reply (name field only); anything unexpected → null. Never throws. */
+export function parseNameGender(content: string, field: TextField): NameGender | null {
+  if (field !== 'name') return null
+  try {
+    const v = (JSON.parse(content) as Record<string, unknown> | null)?.name_gender
+    return (NAME_GENDERS as readonly unknown[]).includes(v) ? (v as NameGender) : null
+  } catch {
+    return null
+  }
+}
+
+type AiReview = TextVerdict & { nameGender: NameGender | null; promptTokens: number | null; completionTokens: number | null }
 
 /** One DeepSeek call. Throws on network/API/parse failure or timeout. */
 export async function askDeepSeekText(field: TextField, text: string): Promise<AiReview> {
@@ -154,7 +169,7 @@ export async function askDeepSeekText(field: TextField, text: string): Promise<A
       // Thinking is on by default and bills hundreds of hidden output tokens.
       thinking: { type: 'disabled' },
       temperature: 0,
-      max_tokens: 40,
+      max_tokens: 60,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: TEXT_SYSTEM_PROMPT },
@@ -173,6 +188,7 @@ export async function askDeepSeekText(field: TextField, text: string): Promise<A
   if (!content) throw new Error('deepseek_empty_reply')
   return {
     ...parseTextVerdict(content, field),
+    nameGender: parseNameGender(content, field),
     promptTokens: body.usage?.prompt_tokens ?? null,
     completionTokens: body.usage?.completion_tokens ?? null,
   }
@@ -191,6 +207,7 @@ async function logVerdict(row: {
   source: 'regex' | 'ai'
   prompt_tokens?: number | null
   completion_tokens?: number | null
+  name_gender?: NameGender | null
 }): Promise<void> {
   try {
     await sql`insert into profile_text_checks ${sql(row)}`
@@ -254,6 +271,7 @@ export async function checkProfileText(
   await logVerdict({
     user_id: userId, field, text, approved: review.approved, reason: review.reason, source: 'ai',
     prompt_tokens: review.promptTokens, completion_tokens: review.completionTokens,
+    name_gender: review.nameGender,
   })
   return { approved: review.approved, reason: review.reason }
 }

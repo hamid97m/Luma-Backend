@@ -4,7 +4,13 @@ import * as storage from '../storage.js'
 import { pauseForPhotoReview } from './autoPause.js'
 
 export type PhotoVerdict = { approved: boolean; reason: string | null }
-export type PhotoReview = PhotoVerdict & { promptTokens: number | null; completionTokens: number | null }
+export const APPARENT_GENDERS = ['man', 'woman', 'unclear'] as const
+export type ApparentGender = (typeof APPARENT_GENDERS)[number]
+export type PhotoReview = PhotoVerdict & {
+  apparentGender: ApparentGender | null
+  promptTokens: number | null
+  completionTokens: number | null
+}
 
 // Private copies of rejected photos (the pause deletes the originals).
 export const EVIDENCE_BUCKET = 'photo-ai-evidence' as const
@@ -39,7 +45,7 @@ function takeDailySlot(userId: string): boolean {
 const inFlight = new Map<string, Promise<PhotoVerdict>>()
 
 const SYSTEM_PROMPT = `You review the main profile photo of a user on a dating app. Other users see this photo first, so it must show the real user.
-Reply with a JSON object only, exactly: {"approved": boolean, "reason": string | null}
+Reply with a JSON object only, exactly: {"approved": boolean, "reason": string | null, "apparent_gender": "man" | "woman" | "unclear"}
 Reject (approved false) only when the photo clearly breaks one of these rules, with reason set to the rule's code:
 - "no_face": no clearly visible human face — back of the head, too far away, face hidden by a mask, emoji or sticker, or too dark or blurry to see the face.
 - "not_real_person": not a real photo of a person — cartoon, drawing, anime, AI-generated art, logo, meme, landscape, object, animal or a screenshot.
@@ -47,7 +53,8 @@ Reject (approved false) only when the photo clearly breaks one of these rules, w
 - "nudity": nudity or sexual content. Swimwear at a beach or pool and gym clothes are fine; exposed genitals or nipples, underwear-only shots or sexual poses are not.
 - "contact_or_ad": a visible phone number, social-media handle or ID, URL, QR code, or advertising text.
 Sunglasses, hats, filters, selfies and casual or low-quality photos are fine: an ordinary phone selfie or snapshot of a non-famous person is the user's own photo. If you are unsure, approve.
-When approved, reason is null.`
+When approved, reason is null.
+"apparent_gender" is your best guess of the gender of the person in the photo; it is only a note for human moderators and must never change "approved" or "reason". Use "unclear" when you are not confident, the face is not visible, there are several people, the person looks like a child, or there is no person.`
 
 /**
  * Validates the model's JSON reply. Throws on non-JSON or a missing verdict
@@ -66,6 +73,16 @@ export function parsePhotoVerdict(content: string): PhotoVerdict {
   return { approved: false, reason: parsed.reason as string }
 }
 
+/** The photo's apparent gender from the model's reply; anything unexpected → null. Never throws. */
+export function parseApparentGender(content: string): ApparentGender | null {
+  try {
+    const v = (JSON.parse(content) as Record<string, unknown> | null)?.apparent_gender
+    return (APPARENT_GENDERS as readonly unknown[]).includes(v) ? (v as ApparentGender) : null
+  } catch {
+    return null
+  }
+}
+
 /** One DeepSeek vision call. Throws on network/API/parse failure. */
 export async function askDeepSeekPhoto(userId: string, imageUrl: string): Promise<PhotoReview> {
   const apiKey = process.env.DEEPSEEK_API_KEY
@@ -80,7 +97,7 @@ export async function askDeepSeekPhoto(userId: string, imageUrl: string): Promis
       // Thinking is on by default and bills hundreds of hidden output tokens.
       thinking: { type: 'disabled' },
       temperature: 0,
-      max_tokens: 40,
+      max_tokens: 60,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
@@ -101,6 +118,7 @@ export async function askDeepSeekPhoto(userId: string, imageUrl: string): Promis
   if (!content) throw new Error('deepseek_empty_reply')
   return {
     ...parsePhotoVerdict(content),
+    apparentGender: parseApparentGender(content),
     promptTokens: body.usage?.prompt_tokens ?? null,
     completionTokens: body.usage?.completion_tokens ?? null,
   }
@@ -151,7 +169,7 @@ async function isCheckableUser(userId: string): Promise<boolean> {
 }
 
 async function review(userId: string, photo: { id: string; url: string }): Promise<PhotoVerdict> {
-  const { promptTokens, completionTokens, ...verdict } = await askDeepSeekPhoto(userId, photo.url)
+  const { promptTokens, completionTokens, apparentGender, ...verdict } = await askDeepSeekPhoto(userId, photo.url)
   const evidencePath = verdict.approved ? null : await saveEvidence(userId, photo.id)
   try {
     await sql`
@@ -164,6 +182,7 @@ async function review(userId: string, photo: { id: string; url: string }): Promi
         evidence_path: evidencePath,
         prompt_tokens: promptTokens,
         completion_tokens: completionTokens,
+        apparent_gender: apparentGender,
       })}
       on conflict (photo_id) do nothing`
   } catch (error) {

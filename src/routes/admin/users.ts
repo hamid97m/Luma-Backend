@@ -10,6 +10,7 @@ import { validateButton, type MessageButton } from '../../messaging/messageButto
 import { parseChannelMessageLink } from '../../messaging/channelLink.js'
 import { scheduleUserGeo } from '../../geo/resolveCity.js'
 import { isLocale, type Locale } from '../../i18n/index.js'
+import { getGenderFlag } from '../../moderation/genderFlags.js'
 
 export const PAGE_SIZE = 20
 
@@ -195,7 +196,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     if (!user) return reply.status(404).send({ error: 'user_not_found' })
 
     try {
-      const [photos, [counts], matchRows, deviceRows, deletionRows] = await Promise.all([
+      const [photos, [counts], matchRows, deviceRows, deletionRows, genderFlag] = await Promise.all([
         sql<{ url: string }[]>`select url, position from user_photos where user_id = ${id} order by position asc`,
         sql<{ swipes_given: number; likes_received: number; messages_sent: number }[]>`
           select
@@ -217,6 +218,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
         sql<{ reason: string | null; note: string | null; created_at: string }[]>`
           select reason, note, created_at from account_deletion_reasons
           where user_id = ${id} order by created_at desc, id desc`,
+        getGenderFlag(id),
       ])
       const devices = deviceRows.map((d) => ({
         deviceId: d.device_id,
@@ -259,6 +261,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
         matches,
         devices,
         deletionReasons: deletionRows.map((r) => ({ reason: r.reason, note: r.note, createdAt: r.created_at })),
+        genderFlag,
       }
     } catch (err) {
       req.log.error({ err }, 'user detail fetch failed')
@@ -308,6 +311,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     if ('gender' in body) {
       if (!GENDERS.includes(body.gender as string)) return reply.status(400).send({ error: 'invalid_gender' })
       patch.gender = body.gender
+      patch.gender_review_dismissed_at = new Date().toISOString()
     }
     if ('looking_for' in body) {
       if (!LOOKING.includes(body.looking_for as string)) return reply.status(400).send({ error: 'invalid_looking_for' })
@@ -384,6 +388,27 @@ export async function adminUsersRoutes(app: FastifyInstance) {
     }
 
     return { ok: true }
+  })
+
+  // Gender fix for any non-deleted user (real or seed; the user can't change it after
+  // signup). Also clears their gender review flag.
+  app.put('/users/:id/gender', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { gender } = (req.body ?? {}) as { gender?: unknown }
+    if (!GENDERS.includes(gender as string)) return reply.status(400).send({ error: 'invalid_gender' })
+    let row: { id: string } | undefined
+    try {
+      ;[row] = isUuid(id)
+        ? await sql<{ id: string }[]>`
+            update users set gender = ${gender as string}, gender_review_dismissed_at = now()
+            where id = ${id} and deleted_at is null returning id`
+        : []
+    } catch (err) {
+      req.log.error({ err }, 'admin gender change failed')
+      return reply.status(500).send({ error: 'update_failed' })
+    }
+    if (!row) return reply.status(404).send({ error: 'user_not_found' })
+    return { ok: true, gender }
   })
 
   app.delete('/users/:id', async (req, reply) => {

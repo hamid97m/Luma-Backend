@@ -15,6 +15,7 @@ import { adminBroadcastsRoutes } from './broadcasts.js'
 import { adminReferralRoutes } from './referrals.js'
 import { adminJoinTagRoutes } from './join-tags.js'
 import { adminPhotoChecksRoutes } from './photo-checks.js'
+import { adminTextChecksRoutes } from './text-checks.js'
 import { adminSignupFunnelRoutes } from './signup-funnel.js'
 import { adminDeletionReasonsRoutes } from './deletion-reasons.js'
 
@@ -58,6 +59,7 @@ export async function adminRoutes(app: FastifyInstance) {
   await app.register(adminReferralRoutes)
   await app.register(adminJoinTagRoutes)
   await app.register(adminPhotoChecksRoutes)
+  await app.register(adminTextChecksRoutes)
   await app.register(adminSignupFunnelRoutes)
   await app.register(adminDeletionReasonsRoutes)
 }

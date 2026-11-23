@@ -637,3 +637,15 @@ export async function fetchTelegramProfilePhoto(
     return null
   }
 }
+
+/** One text DM with a single Mini App (web_app) button. Throws on Telegram
+ *  errors (403 = the user blocked or never started the bot). */
+export async function sendWebAppMessage(
+  toTelegramId: number,
+  text: string,
+  buttonLabel: string,
+  url: string,
+): Promise<void> {
+  const bot = getBot()
+  await bot.api.sendMessage(toTelegramId, text, { reply_markup: new InlineKeyboard().webApp(buttonLabel, url) })
+}

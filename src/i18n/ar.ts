@@ -97,4 +97,15 @@ export const ar = {
     ],
     fallbackQuestion: 'وأنت؟',
   },
+  ask: {
+    memberRequest: (name: string) => `${name} تريد رأيك 👀`,
+    memberRequestButton: 'شاهدي وأجيبي',
+    answered: (name: string) => `${name} قالت رأيها`,
+    answeredButton: 'شاهدي',
+    remind: (name: string) => `${name} ما زالت تنتظر رأيك`,
+    remindButton: 'أجيبي',
+    nudge: 'هل تريدين تجربة لوما بنفسك؟ مجاني للنساء 💛',
+    nudgeButton: 'إنشاء ملف شخصي',
+    friendFallbackName: 'صديقتك',
+  },
 } satisfies Messages

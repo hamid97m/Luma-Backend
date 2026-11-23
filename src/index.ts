@@ -7,6 +7,7 @@ import { getLastFakeLikerRunAt } from './jobs/fakeLikerConfig.js'
 import { runPurchaseMessageJob } from './jobs/purchaseMessage.js'
 import { runTonPaysSweepJob } from './jobs/tonpaysSweep.js'
 import { runLikeRevealJob } from './jobs/likeReveal.js'
+import { runAskJob } from './asks/job.js'
 import { trackJob, startMetricsServer, initJobMetrics } from './metrics.js'
 import { msUntilNextTehranHour } from './likes/revealPick.js'
 import { cleanupInterruptedBroadcasts } from './messaging/broadcast.js'
@@ -23,6 +24,8 @@ const PURCHASE_MSG_FIRST_RUN_DELAY_MS = 90_000
 const PURCHASE_MSG_INTERVAL_MS = 15 * 60 * 1000
 const TONPAYS_SWEEP_FIRST_RUN_DELAY_MS = 120_000
 const TONPAYS_SWEEP_INTERVAL_MS = 10 * 60 * 1000
+const ASK_JOB_FIRST_RUN_DELAY_MS = 150_000
+const ASK_JOB_INTERVAL_MS = 15 * 60 * 1000
 
 // The bot's own public base URL — where Telegram POSTs webhook updates.
 // Required in live mode.
@@ -52,7 +55,7 @@ const isLive = process.env.NODE_ENV === 'production' && !isStandby()
 if (isLive) {
   // Route must be registered before app.listen(); initWebhook (below) runs after.
   mountWebhook(app)
-  initJobMetrics(['fake_liker', 'purchase_message', 'tonpays_sweep', 'like_reveal'])
+  initJobMetrics(['fake_liker', 'purchase_message', 'tonpays_sweep', 'like_reveal', 'ask_friend'])
 
   const runFakeLikerSafely = async () => {
     try {
@@ -119,6 +122,20 @@ if (isLive) {
     }, delayMs)
   }
   scheduleTonPaysSweepRun(TONPAYS_SWEEP_FIRST_RUN_DELAY_MS)
+
+  // "Ask a friend": expiry, cleanup, catch-up answer DMs, 3-day nudge.
+  // Idempotent, so re-running right after a deploy is harmless.
+  const scheduleAskJobRun = (delayMs: number) => {
+    setTimeout(async () => {
+      try {
+        await trackJob('ask_friend', () => runAskJob())
+      } catch (err) {
+        app.log.warn({ err }, 'ask-friend job: scheduled run failed')
+      }
+      scheduleAskJobRun(ASK_JOB_INTERVAL_MS)
+    }, delayMs)
+  }
+  scheduleAskJobRun(ASK_JOB_FIRST_RUN_DELAY_MS)
 
   // Re-anchor to 18:00 Tehran after every run (a flat 24h from completion would
   // drift later each day by however long the job took).

@@ -3,6 +3,7 @@ import { getBotUsername } from './bot.js'
 import { getProfileWithPhotos } from './routes/profile.js'
 import { captureReferralAttribution } from './referrals/attribution.js'
 import { captureJoinTag } from './joinTags/attribution.js'
+import { captureAskAttribution } from './asks/service.js'
 import type { TelegramUser } from './types.js'
 
 export type Identity =
@@ -176,6 +177,8 @@ export async function signIn(identity: Identity): Promise<SignInResult> {
     await captureReferralAttribution(created.id, identity.tgUser.id, identity.startParam ?? null)
     // Telegram kind = Mini App and Login Widget; a Google account has no Telegram id.
     await captureJoinTag(created.id, identity.tgUser.id)
+    // A friend who answered an ask link before joining: invited_by = the asker.
+    await captureAskAttribution(created.id, identity.tgUser.id)
   }
 
   return {

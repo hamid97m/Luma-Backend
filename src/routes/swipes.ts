@@ -5,6 +5,7 @@ import { checkAndCountSwipe } from '../premium/swipeLimit.js'
 import { seedIcebreakers } from '../icebreakers/seed.js'
 import { ownerQuestion } from '../icebreakers/question.js'
 import type { Locale } from '../i18n/index.js'
+import { closeAsksOnDecision } from '../asks/service.js'
 
 export async function swipesRoutes(app: FastifyInstance) {
   app.post('/swipes', {
@@ -54,6 +55,9 @@ export async function swipesRoutes(app: FastifyInstance) {
       // e.g. an invalid direction (enum cast).
       return reply.status(500).send({ error: 'swipe_failed' })
     }
+
+    // Her decision closes any open "ask a friend" about this person (never throws).
+    await closeAsksOnDecision(req.userId, targetUserId, direction === 'like' ? 'liked' : 'passed')
 
     if (direction === 'pass') return { matched: false, ...swipeLimit }
 

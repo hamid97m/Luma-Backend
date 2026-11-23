@@ -6,6 +6,7 @@ import { getDirectChatStatus } from '../premium/directChatLimit.js'
 import { isPremiumActive } from '../premium/service.js'
 import { hiddenIncomingLikerIds } from '../likes/reveal.js'
 import { effectiveLocale } from '../i18n/index.js'
+import { openAsksForCandidates } from '../asks/service.js'
 
 const BATCH_SIZE = 10
 const MAX_LIKER_SLOTS = 4
@@ -256,6 +257,15 @@ export async function discoveryRoutes(app: FastifyInstance) {
       batch = [...batch, ...shuffle(seeds)]
     }
 
+    // The viewer's own open "ask a friend" on a card (badge). Only her asks —
+    // nothing about asks ever reaches the person being asked about.
+    const asks = viewer.gender === 'woman'
+      ? await openAsksForCandidates(userId, batch.map((p) => p.id)).catch((err) => {
+          req.log.warn({ err }, 'discovery: ask badges failed')
+          return new Map()
+        })
+      : new Map()
+
     const formatted = batch.map((p) => ({
       id: p.id,
       name: p.name,
@@ -270,6 +280,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
       photos: [...p.user_photos]
         .sort((a, b) => a.position - b.position)
         .map((ph) => ph.url),
+      ...(asks.has(p.id) ? { ask: asks.get(p.id) } : {}),
     }))
 
     return { profiles: formatted, exhausted: formatted.length === 0, swipeLimit, directChat }

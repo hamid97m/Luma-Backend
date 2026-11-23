@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { sql, isUuid } from '../db.js'
+import { closeAsksOnBlock } from '../asks/service.js'
 
 export async function blockRoutes(app: FastifyInstance) {
   app.post('/block', async (req, reply) => {
@@ -23,6 +24,7 @@ export async function blockRoutes(app: FastifyInstance) {
     await sql`
       insert into blocks (blocker_id, blocked_id) values (${req.userId}, ${userId})
       on conflict (blocker_id, blocked_id) do nothing`
+    await closeAsksOnBlock(req.userId, userId)
 
     return { ok: true }
   })

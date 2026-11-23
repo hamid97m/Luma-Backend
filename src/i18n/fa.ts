@@ -99,4 +99,16 @@ export const fa = {
     ],
     fallbackQuestion: 'تو چطور؟',
   },
+  // "Ask a friend" bot DMs (asks/notify.ts).
+  ask: {
+    memberRequest: (name: string) => `${name} نظرت رو می‌خواد 👀`,
+    memberRequestButton: 'ببین و جواب بده',
+    answered: (name: string) => `${name} نظرش رو گفت`,
+    answeredButton: 'ببین',
+    remind: (name: string) => `${name} هنوز منتظر نظرته`,
+    remindButton: 'جواب بده',
+    nudge: 'خودت هم لوما رو امتحان کن؟ برای خانم‌ها رایگانه 💛',
+    nudgeButton: 'ساخت پروفایل',
+    friendFallbackName: 'دوستت',
+  },
 };

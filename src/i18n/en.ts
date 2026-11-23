@@ -97,4 +97,15 @@ export const en = {
     ],
     fallbackQuestion: 'What about you?',
   },
+  ask: {
+    memberRequest: (name: string) => `${name} wants your opinion 👀`,
+    memberRequestButton: 'See and answer',
+    answered: (name: string) => `${name} gave her opinion`,
+    answeredButton: 'See',
+    remind: (name: string) => `${name} is still waiting for your opinion`,
+    remindButton: 'Answer',
+    nudge: "Want to try Luma yourself? It's free for women 💛",
+    nudgeButton: 'Create a profile',
+    friendFallbackName: 'Your friend',
+  },
 } satisfies Messages

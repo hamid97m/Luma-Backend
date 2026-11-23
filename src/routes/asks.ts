@@ -1,0 +1,127 @@
+import { FastifyInstance, FastifyRequest } from 'fastify'
+import { verifyInitData } from '../auth.js'
+import {
+  askConfigFor, listFriends, createAsk, listMyAsks, getAskDetail, remindRecipient,
+  getRecipientViewForMember, answerAsMember, openLink, answerByLink, parseClientEvent,
+  recordAskEvent, requestIdForToken, type CreateAskInput, type LinkCaller,
+} from '../asks/service.js'
+
+/** Link routes authenticate themselves: raw Telegram initData in Authorization
+ *  (a non-member advisor has no users row, so the global preHandler skips
+ *  `/asks/link/`). undefined = a header was sent but isn't valid initData. */
+function linkCaller(req: FastifyRequest): LinkCaller | undefined {
+  const auth = req.headers.authorization
+  if (!auth) return null
+  if (auth.startsWith('Bearer ')) return undefined
+  const tg = verifyInitData(auth, process.env.BOT_TOKEN ?? '')
+  return tg ? { tg } : undefined
+}
+
+const LINK_RATE_LIMIT = { rateLimit: { max: 60, timeWindow: '1 minute' } }
+
+export async function asksRoutes(app: FastifyInstance) {
+  // ── Requester ──
+  app.get('/asks/config', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+    return askConfigFor(req.userId)
+  })
+
+  app.get('/asks/friends', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+    return { friends: await listFriends(req.userId) }
+  })
+
+  app.post('/asks', { config: { rateLimit: { max: 30, timeWindow: '1 hour' } } }, async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+    const result = await createAsk(req.userId, (req.body ?? {}) as CreateAskInput)
+    if (!result.ok) return reply.status(result.status).send(result.body)
+    return { ask: result.ask, links: result.links }
+  })
+
+  app.get('/asks', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+    return { asks: await listMyAsks(req.userId) }
+  })
+
+  app.post('/asks/events', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+    const e = parseClientEvent(req.body)
+    if (!e) return reply.status(400).send({ error: 'invalid_event' })
+    await recordAskEvent({ ...e, userId: req.userId, telegramId: req.telegramUser?.id ?? null })
+    return reply.status(204).send()
+  })
+
+  // ── Member recipient ──
+  app.get('/asks/for-me/:recipientId', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+    const { recipientId } = req.params as { recipientId: string }
+    const result = await getRecipientViewForMember(req.userId, recipientId)
+    if (!result.ok) return reply.status(result.status).send(result.body)
+    return result.view
+  })
+
+  app.post('/asks/for-me/:recipientId/answer', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+    const { recipientId } = req.params as { recipientId: string }
+    const result = await answerAsMember(req.userId, recipientId, req.body)
+    if (!result.ok) return reply.status(result.status).send(result.body)
+    return { ok: true }
+  })
+
+  app.get('/asks/:id', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+    const { id } = req.params as { id: string }
+    const detail = await getAskDetail(req.userId, id)
+    if (!detail) return reply.status(404).send({ error: 'ask_not_found' })
+    return detail
+  })
+
+  app.post('/asks/:id/remind/:recipientId', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+    const { id, recipientId } = req.params as { id: string; recipientId: string }
+    const result = await remindRecipient(req.userId, id, recipientId)
+    if (!result.ok) return reply.status(result.status).send(result.body)
+    return { ok: true }
+  })
+
+  // ── Public by token (no users row needed) ──
+  app.get('/asks/link/:token', { config: LINK_RATE_LIMIT }, async (req, reply) => {
+    const caller = linkCaller(req)
+    if (caller === undefined) return reply.status(401).send({ error: 'invalid_init_data' })
+    const { token } = req.params as { token: string }
+    return openLink(token, caller)
+  })
+
+  app.post('/asks/link/:token/gender', { config: LINK_RATE_LIMIT }, async (req, reply) => {
+    const caller = linkCaller(req)
+    if (!caller) return reply.status(401).send({ error: caller === null ? 'missing_auth' : 'invalid_init_data' })
+    const gender = ((req.body ?? {}) as { gender?: unknown }).gender
+    if (gender !== 'female' && gender !== 'male') return reply.status(400).send({ error: 'invalid_gender' })
+    const { token } = req.params as { token: string }
+    return openLink(token, caller, { gender })
+  })
+
+  app.post('/asks/link/:token/answer', { config: LINK_RATE_LIMIT }, async (req, reply) => {
+    const caller = linkCaller(req)
+    if (!caller) return reply.status(401).send({ error: caller === null ? 'missing_auth' : 'invalid_init_data' })
+    const { token } = req.params as { token: string }
+    const result = await answerByLink(token, caller, req.body)
+    if (!result.ok) return reply.status(result.status).send(result.body)
+    return { ok: true }
+  })
+
+  app.post('/asks/link/:token/events', { config: LINK_RATE_LIMIT }, async (req, reply) => {
+    const caller = linkCaller(req)
+    const e = parseClientEvent(req.body)
+    if (!e) return reply.status(400).send({ error: 'invalid_event' })
+    const { token } = req.params as { token: string }
+    await recordAskEvent({
+      ...e,
+      // The token decides the request, never the body.
+      requestId: await requestIdForToken(token, caller ?? null),
+      recipientKind: 'link',
+      telegramId: caller ? caller.tg.id : null,
+    })
+    return reply.status(204).send()
+  })
+}

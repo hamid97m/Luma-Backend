@@ -8,6 +8,7 @@ import { scheduleUserGeo } from '../geo/resolveCity.js'
 import { scheduleMainPhotoCheck } from '../moderation/photoAiCheck.js'
 import { markActiveIfSignupComplete } from '../users/accountStatus.js'
 import { recordDeletionReason } from '../users/deletionReasons.js'
+import { onAccountDeleted } from '../asks/service.js'
 
 type Photo = { id: string; url: string; position: number }
 
@@ -274,6 +275,7 @@ export async function profileRoutes(app: FastifyInstance) {
     // doesn't count twice. The snapshot columns (gender, premium_until,
     // created_at) are not touched by the wipe.
     await recordDeletionReason(req.userId, req.body, req.log)
+    await onAccountDeleted(req.userId)
 
     return { ok: true }
   }

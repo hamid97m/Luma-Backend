@@ -25,6 +25,7 @@ import { blockRoutes } from './routes/block.js'
 import { devicesRoutes } from './routes/devices.js'
 import { supportRoutes } from './routes/support.js'
 import { referralRoutes } from './routes/referrals.js'
+import { asksRoutes } from './routes/asks.js'
 import { signupEventsRoutes } from './routes/signupEvents.js'
 import { adminRoutes } from './routes/admin/index.js'
 import { tonpaysWebhookRoutes } from './routes/tonpaysWebhook.js'
@@ -145,6 +146,8 @@ export async function buildApp(): Promise<FastifyInstance> {
       req.url.startsWith('/admin') ||
       req.url.startsWith(`${WEBHOOK_ROUTE_PREFIX}/`) ||
       req.url.startsWith('/payments/tonpays/') ||
+      // Ask-a-friend links: a non-member advisor has no users row; the routes check initData themselves.
+      req.url.startsWith('/asks/link/') ||
       req.url.startsWith('/media-upload/') ||
       req.url.startsWith('/media-private/') ||
       req.url.startsWith('/media/')
@@ -214,6 +217,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(devicesRoutes)
   await app.register(supportRoutes)
   await app.register(referralRoutes)
+  await app.register(asksRoutes)
   await app.register(signupEventsRoutes)
   await app.register(adminRoutes, { prefix: '/admin' })
   await app.register(tonpaysWebhookRoutes)

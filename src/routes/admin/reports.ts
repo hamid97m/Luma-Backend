@@ -24,11 +24,11 @@ export async function adminReportsRoutes(app: FastifyInstance) {
                    u.id as reported_user_id, u.name as reported_name
             from reports r
             left join users u on u.id = r.reported_id
-            where r.status in ('resolved_banned', 'dismissed')
+            where r.status in ('resolved_banned', 'resolved_suspended', 'dismissed')
             order by r.resolved_at desc
             limit ${PAGE_SIZE} offset ${from}`,
           sql<{ count: number }[]>`
-            select count(*)::int as count from reports where status in ('resolved_banned', 'dismissed')`,
+            select count(*)::int as count from reports where status in ('resolved_banned', 'resolved_suspended', 'dismissed')`,
         ])
         data = rows
         total = count
@@ -67,7 +67,7 @@ export async function adminReportsRoutes(app: FastifyInstance) {
       const ids = rows.map((r: any) => r.reported_id)
       if (ids.length) {
         const users = await sql`
-          select u.id, u.name, u.banned_at, u.deleted_at,
+          select u.id, u.name, u.banned_at, u.deleted_at, u.suspended_until,
                  coalesce((select json_agg(json_build_object('url', p.url, 'position', p.position))
                            from user_photos p where p.user_id = u.id), '[]') as user_photos
           from users u where u.id = any(${ids}::uuid[])`
@@ -88,6 +88,7 @@ export async function adminReportsRoutes(app: FastifyInstance) {
             photo: primaryPhoto(u),
             bannedAt: u?.banned_at ?? null,
             deletedAt: u?.deleted_at ?? null,
+            suspendedUntil: u?.suspended_until ?? null,
           },
           reportCount: r.report_count,
           reasons: r.reasons ?? [],
@@ -121,9 +122,18 @@ export async function adminReportsRoutes(app: FastifyInstance) {
     try {
       reports = await sql`
         select r.id, r.reporter_id, r.context, r.reason, r.note, r.match_id, r.status, r.created_at,
-               rep.name as reporter_name
+               rep.name as reporter_name,
+               ai.verdict as ai_verdict, ai.category as ai_category, ai.quote as ai_quote,
+               ai.explanation as ai_explanation, ai.created_at as ai_created_at,
+               ai.reporter_notified_at as ai_reporter_notified_at
         from reports r
         left join users rep on rep.id = r.reporter_id
+        -- Latest AI review of each report (null when never reviewed).
+        left join lateral (
+          select c.verdict, c.category, c.quote, c.explanation, c.created_at, c.reporter_notified_at
+          from report_ai_checks c where c.report_id = r.id
+          order by c.created_at desc limit 1
+        ) ai on true
         where r.reported_id = ${userId}
         order by r.status asc, r.created_at desc` // enum order: 'pending' sorts first
     } catch (err) {
@@ -138,7 +148,7 @@ export async function adminReportsRoutes(app: FastifyInstance) {
       reportedUser: {
         id: user.id, name: user.name, age: user.age, gender: user.gender,
         bio: user.bio, username: user.username, telegramId: user.telegram_id,
-        bannedAt: user.banned_at, deletedAt: user.deleted_at, photos,
+        bannedAt: user.banned_at, deletedAt: user.deleted_at, suspendedUntil: user.suspended_until ?? null, photos,
       },
       reports: reports.map((r: any) => ({
         id: r.id,
@@ -146,6 +156,13 @@ export async function adminReportsRoutes(app: FastifyInstance) {
         reporterName: r.reporter_name ?? '',
         context: r.context, reason: r.reason, note: r.note,
         matchId: r.match_id, status: r.status, createdAt: r.created_at,
+        ai: r.ai_verdict
+          ? {
+              verdict: r.ai_verdict, category: r.ai_category ?? null, quote: r.ai_quote ?? null,
+              explanation: r.ai_explanation ?? null, createdAt: r.ai_created_at,
+              reporterNotifiedAt: r.ai_reporter_notified_at ?? null,
+            }
+          : null,
       })),
     }
   })

@@ -144,6 +144,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
           where u.is_active = true
             and u.account_status = 'active'
             and u.banned_at is null
+            and (u.suspended_until is null or u.suspended_until <= now())
             and u.paused_at is null
             and u.deleted_at is null
             and u.age > 0

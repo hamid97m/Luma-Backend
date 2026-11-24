@@ -5,6 +5,7 @@ import rateLimit, { type errorResponseBuilderContext } from '@fastify/rate-limit
 import { verifyInitData } from './auth.js'
 import { verifySessionToken } from './session.js'
 import { getBotUsername } from './bot.js'
+import { suspendedBody } from './moderation/suspension.js'
 import { WEBHOOK_ROUTE_PREFIX } from './webhookRoute.js'
 import { sql } from './db.js'
 import type { TelegramUser } from './types.js'
@@ -177,13 +178,19 @@ export async function buildApp(): Promise<FastifyInstance> {
     const [data] = await sql<{
       id: string; deleted_at: string | null; banned_at: string | null
       paused_at: string | null; last_active: string | null
+      suspended_until: Date | null; suspended: boolean
     }[]>`
-      select id, deleted_at, banned_at, paused_at, last_active
+      select id, deleted_at, banned_at, paused_at, last_active,
+             suspended_until, coalesce(suspended_until > now(), false) as suspended
       from users where ${where}`
 
     if (!data) return reply.status(401).send({ error: 'user_not_found' })
     if (data.deleted_at) return reply.status(401).send({ error: 'account_deleted' })
     if (data.banned_at) return reply.status(401).send({ error: 'account_banned', botUsername: getBotUsername() })
+    // Temporary suspension (AI report review): like a ban, until the date passes.
+    if (data.suspended && data.suspended_until) {
+      return reply.status(401).send(suspendedBody(data.suspended_until))
+    }
     req.userId = data.id
     req.isPaused = Boolean(data.paused_at)
     recordDevice(data.id, parseClientInfo(req.headers, authKind), req.log)

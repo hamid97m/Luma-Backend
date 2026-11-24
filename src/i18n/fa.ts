@@ -54,6 +54,9 @@ export const fa = {
       accountPaused: 'پروفایلت پنهان شد',
       photoWarning: 'عکست را بررسی کن',
       supportReply: 'پشتیبانی پاسخ داد',
+      reportThanks: 'ممنون از گزارشت 🙏',
+      accountBanned: 'حسابت مسدود شد',
+      accountSuspended: 'حسابت موقتاً تعلیق شد',
     },
   },
   referral: {
@@ -77,6 +80,16 @@ export const fa = {
     checkoutPriceMismatch: 'قیمت همخوانی ندارد.',
     purchased: (days: number) =>
       `تبریک! 🌟 اشتراک پریمیوم ${days} روزه‌ات فعال شد.\nحالا می‌تونی ببینی کی لایکت کرده و بدون محدودیت گفتگو کنی. لوما رو باز کن ✨`,
+  },
+  // AI report review (moderation/reportAiReview.ts). Never name the reported user.
+  moderation: {
+    reportThanksBanned: 'ممنون که گزارش دادی 🙏 بررسی کردیم و حق با تو بود؛ حساب این کاربر برای همیشه مسدود شد.',
+    reportThanksSuspended: (days: number) =>
+      `ممنون که گزارش دادی 🙏 بررسی کردیم و حق با تو بود؛ حساب این کاربر به مدت ${days} روز تعلیق شد.`,
+    accountBanned:
+      'حساب لومای تو به خاطر نقض قوانین (رفتار توهین‌آمیز یا آزاردهنده با کاربران دیگر) مسدود شد. اگر فکر می‌کنی اشتباهی رخ داده، به پشتیبانی پیام بده.',
+    accountSuspended: (until: string) =>
+      `به خاطر گزارش کاربران و نقض قوانین لوما، حسابت تا ${until} موقتاً تعلیق شد. لطفاً با بقیه محترمانه رفتار کن 🙏`,
   },
   chat: {
     seedGreeting: 'سلام',

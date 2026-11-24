@@ -61,6 +61,7 @@ function likerQuery(userId: string, swiperId: string | null, limit: number) {
       and s.direction = 'like'
       ${swiperId !== null ? sql`and s.swiper_id = ${swiperId}` : sql``}
       and u.deleted_at is null and u.banned_at is null and u.paused_at is null
+      and (u.suspended_until is null or u.suspended_until <= now())
       -- A deleted account that reopens the app gets deleted_at cleared but keeps
       -- its wiped profile (blank name, age 0) — still gone as far as Likes goes.
       and u.age > 0 and btrim(u.name) <> ''

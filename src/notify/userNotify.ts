@@ -322,3 +322,19 @@ export async function notifyUserText(
     () => sendText(tg(u), m.text, m.button),
   )
 }
+
+/**
+ * Moderation notices from the AI report review: the reported user's ban /
+ * suspension notice and the reporter's thank-you. Plain text, no button.
+ * Push first, bot DM fallback. Rethrows bot errors.
+ */
+export async function notifyUserModerationText(
+  u: NotifyUser,
+  m: { type: 'account_banned' | 'account_suspended' | 'report_thanks'; title: string; text: string },
+): Promise<'push' | 'bot' | 'none'> {
+  return deliverToUser(
+    u,
+    () => ({ type: m.type, title: m.title, body: m.text, ...homeLink() }),
+    () => sendBroadcastMessage(tg(u), m.text),
+  )
+}

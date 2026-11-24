@@ -44,6 +44,7 @@ export function toListItem(u: any) {
     isSeed: u.is_seed,
     bannedAt: u.banned_at,
     pausedAt: u.paused_at,
+    suspendedUntil: (u.suspended_until ?? null) as string | null,
     deletedAt: u.deleted_at,
     accountStatus: u.account_status === 'active' ? 'active' : 'preparing',
     createdAt: u.created_at,
@@ -67,6 +68,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
       status === 'active' ? sql`and account_status = 'active' and deleted_at is null and banned_at is null`
       : status === 'preparing' ? sql`and account_status = 'preparing' and deleted_at is null and banned_at is null`
       : status === 'banned' ? sql`and banned_at is not null`
+      : status === 'suspended' ? sql`and suspended_until > now()`
       : status === 'deleted' ? sql`and deleted_at is not null`
       : status === 'seed' ? sql`and is_seed = true`
       : sql``
@@ -96,7 +98,7 @@ export async function adminUsersRoutes(app: FastifyInstance) {
       ;[data, [{ count }]] = await Promise.all([
         sql`
           select id, telegram_id, email, google_sub, phone, username, name, age, gender, looking_for, is_active, is_seed,
-                 banned_at, paused_at, deleted_at, created_at, last_active, geo_city, geo_country,
+                 banned_at, paused_at, suspended_until, deleted_at, created_at, last_active, geo_city, geo_country,
                  locale, account_status, join_tag, bot_status, bot_status_at
           from users
           where true ${statusFilter} ${genderFilter} ${tagFilter} ${searchFilter}
@@ -490,6 +492,22 @@ export async function adminUsersRoutes(app: FastifyInstance) {
   app.post('/users/:id/unban', async (req, reply) => {
     const { id } = req.params as { id: string }
     return setBanned(id, null, reply)
+  })
+
+  // Lift a temporary suspension (AI report review) early.
+  app.post('/users/:id/unsuspend', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    let data: { id: string } | undefined
+    try {
+      ;[data] = isUuid(id)
+        ? await sql<{ id: string }[]>`update users set suspended_until = null where id = ${id} returning id`
+        : []
+    } catch (err) {
+      req.log.error({ err }, 'unsuspend failed')
+      return reply.status(500).send({ error: 'unsuspend_failed' })
+    }
+    if (!data) return reply.status(404).send({ error: 'user_not_found' })
+    return { ok: true }
   })
 
   const setPaused = async (id: string, pausedAt: string | null, reply: any) => {

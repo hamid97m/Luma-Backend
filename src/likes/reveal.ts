@@ -47,7 +47,8 @@ async function loadViewerState(userId: string): Promise<ViewerState | null> {
              exists (
                select 1 from users l
                where l.id = r.swiper_id
-                 and l.deleted_at is null and l.banned_at is null and l.paused_at is null)
+                 and l.deleted_at is null and l.banned_at is null and l.paused_at is null
+                 and (l.suspended_until is null or l.suspended_until <= now()))
              and not exists (
                select 1 from blocks b
                where (b.blocker_id = v.id and b.blocked_id = r.swiper_id)

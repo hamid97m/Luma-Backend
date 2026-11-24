@@ -101,6 +101,25 @@ describe('GET /asks/friends', () => {
   })
 })
 
+describe('friends from share links', () => {
+  it('whoever opened her link is a friend both ways — existing account or signed up later', async () => {
+    const { tokens } = await createWithLink(2)
+    // Already has an account.
+    const leila = await createProfile({ name: 'Leila', gender: 'woman', looking_for: 'men' })
+    expect((await openLink(tokens[0], tgAccount(leila.telegram_id, 'Leila'))).json().state).toBe('ready')
+    // No account yet: opens, declares, signs up afterwards.
+    const tg = tgAccount(777_123, 'Mina')
+    await openLink(tokens[1], tg)
+    await declare(tokens[1], tg, 'female')
+    const mina = await createProfile({ name: 'Mina', gender: 'woman', looking_for: 'men', telegram_id: tg })
+
+    const mine = (await app.inject({ method: 'GET', url: '/asks/friends', headers: asUser(sara) })).json().friends
+    expect(mine.map((f: any) => f.name).sort()).toEqual(['Leila', 'Mina', 'Negar'])
+    const hers = (await app.inject({ method: 'GET', url: '/asks/friends', headers: asUser(mina) })).json().friends
+    expect(hers.map((f: any) => f.name)).toEqual(['Sara'])
+  })
+})
+
 describe('POST /asks — create rules', () => {
   it('a man cannot ask', async () => {
     const res = await create({ targetId: sara.id, question: 'reply', linkCount: 1 }, amir)

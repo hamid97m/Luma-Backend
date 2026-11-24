@@ -143,6 +143,19 @@ export async function listFriends(userId: string, limit = 20): Promise<AskFriend
       where ar.recipient_id = ${userId}
       union all
       select u.id, u.created_at from users u where u.invited_by = ${userId}
+      union all
+      -- Whoever opened her share link (by Telegram id): friends whether they
+      -- already had an account or signed up afterwards.
+      select u.id, coalesce(ar.answered_at, ar.seen_at, r.created_at)
+      from ask_requests r join ask_recipients ar on ar.request_id = r.id
+      join users u on u.telegram_id = ar.advisor_tg_id
+      where r.requester_id = ${userId} and ar.kind = 'link' and ar.advisor_tg_id is not null
+      union all
+      -- …and the other way round: she opened someone else's share link.
+      select r.requester_id, coalesce(ar.answered_at, ar.seen_at, r.created_at)
+      from ask_recipients ar join ask_requests r on r.id = ar.request_id
+      join users me on me.id = ${userId}
+      where ar.kind = 'link' and ar.advisor_tg_id = me.telegram_id
     )
     select u.id, u.name, ${primaryPhoto(sql`u.id`)} as photo_url, max(i.at) as last_at
     from interactions i join users u on u.id = i.friend_id

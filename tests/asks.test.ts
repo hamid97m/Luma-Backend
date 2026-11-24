@@ -512,15 +512,34 @@ describe('closing on chat', () => {
   })
 })
 
-describe('discovery badge', () => {
-  it('her open ask rides on the candidate; the target never sees asks', async () => {
-    const { ask } = await createWithLink(2)
+describe('discovery & coming back to an asked profile', () => {
+  it('a profile she sent to friends leaves her feed while the ask is open; the target never sees asks', async () => {
+    const before = await app.inject({ method: 'GET', url: '/discovery', headers: asUser(sara) })
+    expect(before.json().profiles.some((p: any) => p.id === amir.id)).toBe(true)
+    await createWithLink(2)
     const res = await app.inject({ method: 'GET', url: '/discovery', headers: asUser(sara) })
-    const card = res.json().profiles.find((p: any) => p.id === amir.id)
-    expect(card.ask).toEqual({ id: ask.id, status: 'open', answered: 0, total: 2, yes: 0, question: 'reply' })
+    expect(res.json().profiles.some((p: any) => p.id === amir.id)).toBe(false)
 
     const his = await app.inject({ method: 'GET', url: '/discovery', headers: asUser(amir) })
     expect(JSON.stringify(his.json())).not.toContain('"ask"')
+  })
+
+  it('GET /asks/:id/profile returns the card with her ask; 404 for others or after she decides', async () => {
+    const { ask } = await createWithLink(2)
+    const res = await app.inject({ method: 'GET', url: `/asks/${ask.id}/profile`, headers: asUser(sara) })
+    expect(res.statusCode).toBe(200)
+    const p = res.json().profile
+    expect(p).toMatchObject({ id: amir.id, name: 'Amir', bio: 'Hiker', interests: ['music'] })
+    expect(p.photos.length).toBe(2)
+    expect(p.ask).toEqual({ id: ask.id, status: 'open', answered: 0, total: 2, yes: 0, question: 'reply' })
+    expect(JSON.stringify(p)).not.toContain('amir_secret')
+
+    const other = await app.inject({ method: 'GET', url: `/asks/${ask.id}/profile`, headers: asUser(negar) })
+    expect(other.statusCode).toBe(404)
+
+    await app.inject({ method: 'POST', url: '/swipes', headers: asUser(sara), payload: { targetUserId: amir.id, direction: 'pass' } })
+    const after = await app.inject({ method: 'GET', url: `/asks/${ask.id}/profile`, headers: asUser(sara) })
+    expect(after.statusCode).toBe(404)
   })
 })
 

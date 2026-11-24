@@ -8,6 +8,7 @@ import {
   askConfigFor, listFriends, createAsk, listMyAsks, getAskDetail, remindRecipient,
   getRecipientViewForMember, answerAsMember, openLink, answerByLink, parseClientEvent,
   recordAskEvent, requestIdForToken, askPhotoObject, type CreateAskInput, type LinkCaller,
+  getAskTargetCard,
 } from '../asks/service.js'
 
 /** Link routes authenticate themselves: raw Telegram initData in Authorization
@@ -86,6 +87,14 @@ export async function asksRoutes(app: FastifyInstance) {
     const result = await answerAsMember(req.userId, recipientId, req.body)
     if (!result.ok) return reply.status(result.status).send(result.body)
     return { ok: true }
+  })
+
+  // Her ask's person as a Discovery card — "back to this profile" from her asks list.
+  app.get('/asks/:id/profile', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+    const card = await getAskTargetCard(req.userId, (req.params as { id: string }).id)
+    if (!card) return reply.status(404).send({ error: 'not_found' })
+    return { profile: card }
   })
 
   app.get('/asks/:id', async (req, reply) => {

@@ -266,7 +266,9 @@ export async function discoveryRoutes(app: FastifyInstance) {
         })
       : new Map()
 
-    const formatted = batch.map((p) => ({
+    // Profiles she sent to friends wait in her asks list until she decides (or
+    // the ask expires) — they don't come back around in the feed meanwhile.
+    const formatted = batch.filter((p) => !asks.has(p.id)).map((p) => ({
       id: p.id,
       name: p.name,
       age: p.age,
@@ -280,7 +282,6 @@ export async function discoveryRoutes(app: FastifyInstance) {
       photos: [...p.user_photos]
         .sort((a, b) => a.position - b.position)
         .map((ph) => ph.url),
-      ...(asks.has(p.id) ? { ask: asks.get(p.id) } : {}),
     }))
 
     return { profiles: formatted, exhausted: formatted.length === 0, swipeLimit, directChat }

@@ -7,6 +7,7 @@ import {
 import { newAskToken, hashAskToken, isAskTokenShape, askLink } from './tokens.js'
 import { notifyAskMember, notifyAskAnswered, notifyAskRemind } from './notify.js'
 import { askPhotoUrl } from './photoUrl.js'
+import { isPremiumActive } from '../premium/service.js'
 
 /**
  * "Ask a friend": a woman shows one profile (the target) to 1-3 friends and
@@ -848,4 +849,36 @@ export async function askPhotoObject(recipientId: string, index: number): Promis
     select url from user_photos where user_id = ${rec.target_id}
     order by position asc offset ${index} limit 1`
   return photo ?? null
+}
+
+/** The asked-about person as a Discovery card, so she can come back to them from her asks list.
+ *  Null when the ask isn't hers, the person is gone/blocked, or she already liked/passed them. */
+export async function getAskTargetCard(requesterId: string, askId: string) {
+  if (!isUuid(askId)) return null
+  const [row] = await sql<{
+    id: string; name: string; age: number; bio: string | null; interests: string[] | null
+    location: string | null; premium_until: string | null; photos: string[] | null
+  }[]>`
+    select u.id, u.name, u.age, u.bio, u.interests, u.location, u.premium_until,
+           (select array_agg(p.url order by p.position) from user_photos p where p.user_id = u.id) as photos
+    from ask_requests r join users u on u.id = r.target_id
+    where r.id = ${askId} and r.requester_id = ${requesterId}`
+  if (!row || !(await targetIsAskable(requesterId, row.id))) return null
+  const [swiped] = await sql`
+    select 1 from swipes where swiper_id = ${requesterId} and swiped_id = ${row.id}
+      and (direction = 'like' or (direction = 'pass' and created_at > now() - interval '9 days'))`
+  if (swiped) return null
+  const asks = await openAsksForCandidates(requesterId, [row.id])
+  return {
+    id: row.id,
+    name: row.name,
+    age: row.age,
+    bio: row.bio,
+    interests: row.interests ?? [],
+    location: row.location ?? null,
+    premium: isPremiumActive(row.premium_until),
+    nearby: false,
+    photos: row.photos ?? [],
+    ...(asks.has(row.id) ? { ask: asks.get(row.id) } : {}),
+  }
 }

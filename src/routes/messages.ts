@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify'
 import { sql, isUuid } from '../db.js'
+import { closeAsksOnDecision } from '../asks/service.js'
 import { deliverMessageNotification } from '../messaging/deliver.js'
 import { chatSendBlocked } from '../premium/chatLimit.js'
 import { messageColumns, messageJson } from '../messaging/messageJson.js'
@@ -235,6 +236,10 @@ export async function messagesRoutes(app: FastifyInstance) {
 
     const other = match.user1_id === req.userId ? match.user2 : match.user1
     const me = match.user1_id === req.userId ? match.user1 : match.user2
+
+    // Writing to them is her decision: an open "ask a friend" on them closes
+    // (one indexed no-op update when there is none).
+    await closeAsksOnDecision(req.userId, other.id, 'messaged')
 
     void deliverMessageNotification(
       { id: other.id, telegram_id: other.telegram_id, last_active: other.last_active, notified_offline_at: other.notified_offline_at, allows_write_to_pm: other.allows_write_to_pm, locale: other.locale ?? null, gender: other.gender ?? null },

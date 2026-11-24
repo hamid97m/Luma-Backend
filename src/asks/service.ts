@@ -6,6 +6,7 @@ import {
 } from './config.js'
 import { newAskToken, hashAskToken, isAskTokenShape, askLink } from './tokens.js'
 import { notifyAskMember, notifyAskAnswered, notifyAskRemind } from './notify.js'
+import { askPhotoUrl } from './photoUrl.js'
 
 /**
  * "Ask a friend": a woman shows one profile (the target) to 1-3 friends and
@@ -382,16 +383,16 @@ export async function remindRecipient(userId: string, askId: string, recipientId
   return { ok: true }
 }
 
-/** The requester liked/passed the target: her open asks on them close.
+/** The requester liked/passed/messaged the target: her open asks on them close.
  *  Never throws (a swipe must not fail over this). */
-export async function closeAsksOnDecision(requesterId: string, targetId: string, reason: 'liked' | 'passed'): Promise<void> {
+export async function closeAsksOnDecision(requesterId: string, targetId: string, reason: 'liked' | 'passed' | 'messaged'): Promise<void> {
   try {
     const closed = await sql<{ id: string }[]>`
       update ask_requests set status = 'closed', closed_at = now(), closed_reason = ${reason}
       where requester_id = ${requesterId} and target_id = ${targetId} and status = 'open'
       returning id`
     for (const c of closed) {
-      void recordAskEvent({ name: 'ask_requester_decision', requestId: c.id, userId: requesterId, props: { decision: reason === 'liked' ? 'like' : 'pass', source: 'swipe' } })
+      void recordAskEvent({ name: 'ask_requester_decision', requestId: c.id, userId: requesterId, props: { decision: reason === 'liked' ? 'like' : reason === 'passed' ? 'pass' : 'message', source: reason === 'messaged' ? 'chat' : 'swipe' } })
     }
   } catch (err) {
     console.error('[asks] close on decision failed:', (err as Error)?.message ?? err)
@@ -455,14 +456,26 @@ async function loadRecipient(where: ReturnType<typeof sql>): Promise<RecRow | nu
 }
 
 /** The viewing person: a users row (member, possibly unfinished) and/or a Telegram id. */
-type Viewer = { userId: string | null; gender: string | null; age: number; telegramId: number | null }
+type Viewer = {
+  userId: string | null; gender: string | null; age: number; telegramId: number | null
+  /** Gender we trust from a users row: a finished profile, or a deleted account
+   *  (its gender snapshot survives the wipe). null = must self-declare. */
+  knownGender: string | null
+}
 
 async function viewerByTelegram(tgId: number): Promise<Viewer & { banned: boolean }> {
-  const [u] = await sql<{ id: string; gender: string; age: number; banned_at: string | null }[]>`
-    select id, gender, age, banned_at from users where telegram_id = ${tgId} and deleted_at is null`
-  return u
-    ? { userId: u.id, gender: u.gender, age: u.age, telegramId: tgId, banned: Boolean(u.banned_at) }
-    : { userId: null, gender: null, age: 0, telegramId: tgId, banned: false }
+  const [u] = await sql<{ id: string; gender: string; age: number; banned_at: string | null; deleted_at: string | null }[]>`
+    select id, gender, age, banned_at, deleted_at from users where telegram_id = ${tgId}
+    order by (deleted_at is null) desc limit 1`
+  if (!u) return { userId: null, gender: null, age: 0, telegramId: tgId, banned: false, knownGender: null }
+  if (u.deleted_at) {
+    // Not a member any more, but the account's gender still decides.
+    return { userId: null, gender: null, age: 0, telegramId: tgId, banned: Boolean(u.banned_at), knownGender: u.gender }
+  }
+  return {
+    userId: u.id, gender: u.gender, age: u.age, telegramId: tgId, banned: Boolean(u.banned_at),
+    knownGender: u.age > 0 ? u.gender : null,
+  }
 }
 
 type Gate = 'closed' | 'not_for_you' | 'need_gender' | 'ready'
@@ -472,8 +485,8 @@ type Gate = 'closed' | 'not_for_you' | 'need_gender' | 'ready'
 async function gate(rec: RecRow, v: Viewer): Promise<Gate> {
   if (rec.status !== 'open' || rec.target_gone) return 'closed'
   if (v.userId && (v.userId === rec.requester_id || v.userId === rec.target_id)) return 'not_for_you'
-  if (v.userId && v.age > 0) {
-    if (v.gender !== 'woman') return 'not_for_you'
+  if (v.knownGender !== null) {
+    if (v.knownGender !== 'woman') return 'not_for_you'
   } else if (rec.advisor_gender === null) {
     return 'need_gender'
   } else if (rec.advisor_gender !== 'female') {
@@ -509,7 +522,7 @@ async function buildView(rec: RecRow, v: Viewer): Promise<RecipientView> {
     // Deliberately no id, telegram id, username or distance.
     profile: {
       name: target.name, age: target.age, location: target.location ?? null, bio: target.bio ?? null,
-      interests: target.interests ?? [], photos: photos.map((p) => p.url),
+      interests: target.interests ?? [], photos: photos.map((_, i) => askPhotoUrl(rec.id, i)),
     },
     myAnswer: rec.answered_at && rec.verdict
       ? {
@@ -549,7 +562,7 @@ async function memberRecipient(userId: string, recipientId: string): Promise<{ r
   if (!u) return null
   const mine = rec.recipient_id === u.id || (rec.advisor_tg_id !== null && rec.advisor_tg_id === u.telegram_id)
   if (!mine) return null
-  return { rec, viewer: { userId: u.id, gender: u.gender, age: u.age, telegramId: u.telegram_id } }
+  return { rec, viewer: { userId: u.id, gender: u.gender, age: u.age, telegramId: u.telegram_id, knownGender: u.age > 0 ? u.gender : null } }
 }
 
 export async function getRecipientViewForMember(userId: string, recipientId: string): Promise<{ ok: true; view: RecipientView } | Fail> {
@@ -695,7 +708,7 @@ export async function resolveLink(
 
   // Never claim for someone who'd be turned away: a finished member who isn't
   // a woman, or an account that already declared male on this link.
-  if (viewer.userId && viewer.age > 0 && viewer.gender !== 'woman') return none({ state: 'not_for_you' })
+  if (viewer.knownGender !== null && viewer.knownGender !== 'woman') return none({ state: 'not_for_you' })
   const [rejected] = await sql`
     select 1 from ask_recipients where id = ${rec.id} and ${tg.id}::bigint = any(rejected_tg_ids)`
   if (rejected) return none({ state: 'not_for_you' })
@@ -715,7 +728,7 @@ export async function resolveLink(
     return none({ state: 'taken' })
   }
 
-  const finishedMember = Boolean(viewer.userId) && viewer.age > 0
+  const finishedMember = viewer.knownGender !== null
   if (opts.gender === 'male' && !finishedMember && rec.advisor_gender === null) {
     // Release the claim so the real friend can still open the link; remember him.
     await sql`
@@ -813,4 +826,26 @@ export async function onAccountDeleted(userId: string): Promise<void> {
   } catch (err) {
     console.error('[asks] account-deleted cleanup failed:', (err as Error)?.message ?? err)
   }
+}
+
+/** The photo proxy (`GET /asks/photo/:recipientId/:index`): the storage path of
+ *  the target's index-th photo, only while this recipient could see the ask. */
+export async function askPhotoObject(recipientId: string, index: number): Promise<{ url: string } | null> {
+  if (!isUuid(recipientId) || !Number.isInteger(index) || index < 0) return null
+  const rec = await loadRecipient(sql`ar.id = ${recipientId}`)
+  if (!rec) return null
+  let viewer: Viewer = { userId: null, gender: null, age: 0, telegramId: rec.advisor_tg_id, knownGender: null }
+  if (rec.recipient_id) {
+    const [u] = await sql<{ id: string; gender: string; age: number }[]>`
+      select id, gender, age from users where id = ${rec.recipient_id} and deleted_at is null and banned_at is null`
+    if (!u) return null
+    viewer = { userId: u.id, gender: u.gender, age: u.age, telegramId: rec.advisor_tg_id, knownGender: u.age > 0 ? u.gender : null }
+  } else if (rec.kind === 'member' || rec.advisor_tg_id === null) {
+    return null
+  }
+  if ((await gate(rec, viewer)) !== 'ready') return null
+  const [photo] = await sql<{ url: string }[]>`
+    select url from user_photos where user_id = ${rec.target_id}
+    order by position asc offset ${index} limit 1`
+  return photo ?? null
 }

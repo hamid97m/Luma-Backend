@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify'
 import { sql, isUuid } from '../db.js'
 import { checkAndCountDirectChat } from '../premium/directChatLimit.js'
 import { seedIcebreakers } from '../icebreakers/seed.js'
+import { closeAsksOnDecision } from '../asks/service.js'
 
 // Create (or fetch the existing) match between two users without a mutual like.
 // Mirrors the acceptIntro pattern: normalized pair, 23505 = already matched.
@@ -86,7 +87,10 @@ export async function directChatRoutes(app: FastifyInstance) {
 
     // Already matched → open the existing chat; no gate, no quota consumed.
     const existing = await findExistingMatch(req.userId, targetUserId)
-    if (existing) return buildResponse(existing, false)
+    if (existing) {
+      await closeAsksOnDecision(req.userId, targetUserId, 'messaged')
+      return buildResponse(existing, false)
+    }
 
     const check = await checkAndCountDirectChat(req.userId)
     if (check.gate === 'paywall') return reply.status(403).send({ error: 'premium_required' })
@@ -95,6 +99,8 @@ export async function directChatRoutes(app: FastifyInstance) {
     const match = await ensureMatch(req.userId, targetUserId)
     if (!match) return reply.status(500).send({ error: 'match_failed' })
     if (match.created) await seedIcebreakers(match.matchId, [targetUserId, req.userId])
+    // Chatting is her decision: any open "ask a friend" on this person closes.
+    await closeAsksOnDecision(req.userId, targetUserId, 'messaged')
     // For quota users, return the post-consume window so the client keeps an
     // accurate remaining + resetAt (drives the 3/day limit sheet countdown).
     // Absent for the existing-match short-circuit above, so re-chatting the same

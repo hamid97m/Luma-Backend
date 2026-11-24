@@ -1,9 +1,13 @@
+import { createReadStream } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { FastifyInstance, FastifyRequest } from 'fastify'
+import { resolveObjectFile, isSafeObjectPath } from '../storage.js'
+import { verifyAskPhotoSig } from '../asks/photoUrl.js'
 import { verifyInitData } from '../auth.js'
 import {
   askConfigFor, listFriends, createAsk, listMyAsks, getAskDetail, remindRecipient,
   getRecipientViewForMember, answerAsMember, openLink, answerByLink, parseClientEvent,
-  recordAskEvent, requestIdForToken, type CreateAskInput, type LinkCaller,
+  recordAskEvent, requestIdForToken, askPhotoObject, type CreateAskInput, type LinkCaller,
 } from '../asks/service.js'
 
 /** Link routes authenticate themselves: raw Telegram initData in Authorization
@@ -18,6 +22,22 @@ function linkCaller(req: FastifyRequest): LinkCaller | undefined {
 }
 
 const LINK_RATE_LIMIT = { rateLimit: { max: 60, timeWindow: '1 minute' } }
+
+/** `.../profile-photos/<userId>/<photoId>` (any host: migrated files kept
+ *  their paths) → the object path on local disk; null for anything else. */
+export function profilePhotoObjectPath(url: string): string | null {
+  let pathname: string
+  try {
+    pathname = new URL(url).pathname
+  } catch {
+    return null
+  }
+  const marker = '/profile-photos/'
+  const at = pathname.indexOf(marker)
+  if (at < 0) return null
+  const objectPath = decodeURIComponent(pathname.slice(at + marker.length))
+  return isSafeObjectPath(objectPath) ? objectPath : null
+}
 
 export async function asksRoutes(app: FastifyInstance) {
   // ── Requester ──
@@ -82,6 +102,29 @@ export async function asksRoutes(app: FastifyInstance) {
     const result = await remindRecipient(req.userId, id, recipientId)
     if (!result.ok) return reply.status(result.status).send(result.body)
     return { ok: true }
+  })
+
+  // ── Photo proxy (img tags send no headers; the signature is the credential) ──
+  app.get('/asks/photo/:recipientId/:index', { config: { rateLimit: { max: 300, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const { recipientId, index } = req.params as { recipientId: string; index: string }
+    const { exp, sig } = req.query as { exp?: string; sig?: string }
+    const i = /^\d{1,2}$/.test(index) ? Number(index) : -1
+    const notFound = () => reply.status(404).send({ error: 'not_found' })
+    if (i < 0 || !verifyAskPhotoSig(recipientId, i, exp, sig)) return notFound()
+    const photo = await askPhotoObject(recipientId, i)
+    const objectPath = photo && profilePhotoObjectPath(photo.url)
+    if (!objectPath) return notFound()
+    let file: string
+    try {
+      file = resolveObjectFile('profile-photos', objectPath)
+      if (!(await stat(file)).isFile()) return notFound()
+    } catch {
+      return notFound()
+    }
+    return reply
+      .header('Content-Type', 'image/jpeg')
+      .header('Cache-Control', 'private, max-age=3600')
+      .send(createReadStream(file))
   })
 
   // ── Public by token (no users row needed) ──

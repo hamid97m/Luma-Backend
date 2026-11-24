@@ -148,6 +148,7 @@ export async function buildApp(): Promise<FastifyInstance> {
       req.url.startsWith('/payments/tonpays/') ||
       // Ask-a-friend links: a non-member advisor has no users row; the routes check initData themselves.
       req.url.startsWith('/asks/link/') ||
+      req.url.startsWith('/asks/photo/') ||
       req.url.startsWith('/media-upload/') ||
       req.url.startsWith('/media-private/') ||
       req.url.startsWith('/media/')

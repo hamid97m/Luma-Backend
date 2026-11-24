@@ -15,7 +15,8 @@ import { signIn } from '../src/accounts.js'
 import { runAskJob } from '../src/asks/job.js'
 import { hashAskToken } from '../src/asks/tokens.js'
 import { notifyAskMember, notifyAskAnswered, notifyAskRemind, notifyAskNudge } from '../src/asks/notify.js'
-import { resetDb, sql } from './helpers/db.js'
+import { resetDb, sql, createMatch } from './helpers/db.js'
+import * as storage from '../src/storage.js'
 import { createProfile, block } from './helpers/discovery.js'
 
 type App = Awaited<ReturnType<typeof buildApp>>
@@ -204,7 +205,7 @@ describe('link: landing, claim, lock', () => {
     expect(body.view.watermark).toHaveLength(6)
     const text = JSON.stringify(body)
     expect(Object.keys(body.view.profile).sort()).toEqual(['age', 'bio', 'interests', 'location', 'name', 'photos'])
-    // (Photo URLs keep their storage path, which includes the owner's uuid.)
+    expect(text).not.toContain(amir.id)
     expect(text).not.toContain('amir_secret')
     expect(text).not.toContain(String(amir.telegram_id))
 
@@ -340,6 +341,64 @@ describe('link by recipient id (r_<id>, remind button)', () => {
   })
 })
 
+describe('photo proxy', () => {
+  const path = (url: string) => new URL(url).pathname + new URL(url).search
+
+  async function readyView() {
+    await storage.upload('profile-photos', `${amir.id}/0.jpg`, Buffer.from('JPEGDATA'))
+    const { tokens } = await createWithLink()
+    const m = tgAccount(555_050, 'Maryam')
+    const body = (await declare(tokens[0], m, 'female')).json()
+    return { view: body.view, tokens }
+  }
+
+  it('serves the target photo by signed URL; the URL carries no target id', async () => {
+    const { view } = await readyView()
+    const url = view.profile.photos[0] as string
+    expect(url).toMatch(/\/asks\/photo\/[0-9a-f-]{36}\/0\?exp=\d+&sig=/)
+    expect(url).not.toContain(amir.id)
+    const res = await app.inject({ method: 'GET', url: path(url) })
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toBe('JPEGDATA')
+    expect(res.headers['cache-control']).toBe('private, max-age=3600')
+    expect(res.headers['content-type']).toBe('image/jpeg')
+  })
+
+  it('404 for a bad signature, a missing file, or once the ask is closed', async () => {
+    const { view } = await readyView()
+    const url = path(view.profile.photos[0])
+    expect((await app.inject({ method: 'GET', url: url.replace(/sig=.*/, 'sig=AAAA') })).statusCode).toBe(404)
+    expect((await app.inject({ method: 'GET', url: path(view.profile.photos[1]) })).statusCode).toBe(404) // no file on disk
+    await sql`update ask_requests set status = 'closed', closed_at = now()`
+    expect((await app.inject({ method: 'GET', url })).statusCode).toBe(404)
+  })
+
+  it('404 for an unclaimed link even with a valid signature', async () => {
+    await storage.upload('profile-photos', `${amir.id}/0.jpg`, Buffer.from('JPEGDATA'))
+    await createWithLink()
+    const [rec] = await sql`select id from ask_recipients`
+    const { askPhotoUrl } = await import('../src/asks/photoUrl.js')
+    expect((await app.inject({ method: 'GET', url: path(askPhotoUrl(rec.id, 0)) })).statusCode).toBe(404)
+  })
+})
+
+describe('known gender from an existing users row', () => {
+  it('a soft-deleted man cannot self-declare and never claims', async () => {
+    const { tokens } = await createWithLink()
+    const gone = await createProfile({ gender: 'man', looking_for: 'women', age: 0, deleted_at: new Date().toISOString() })
+    expect((await declare(tokens[0], gone.telegram_id, 'female')).json()).toEqual({ state: 'not_for_you' })
+    expect((await sql`select advisor_tg_id from ask_recipients`)[0].advisor_tg_id).toBeNull()
+  })
+
+  it('a soft-deleted woman goes straight to ready', async () => {
+    const { tokens } = await createWithLink()
+    const gone = await createProfile({ gender: 'woman', age: 0, deleted_at: new Date().toISOString() })
+    const res = (await openLink(tokens[0], gone.telegram_id)).json()
+    expect(res.state).toBe('ready')
+    expect(res.view.isMember).toBe(false)
+  })
+})
+
 describe('answers', () => {
   it('link answer, edit within 10 min, locked after', async () => {
     const { ask, tokens } = await createWithLink()
@@ -433,6 +492,23 @@ describe('closing', () => {
     const res = await app.inject({ method: 'DELETE', url: '/profile/me', headers: asUser(amir), payload: {} })
     expect(res.statusCode).toBe(200)
     expect(await sql`select id from ask_requests`).toHaveLength(0)
+  })
+})
+
+describe('closing on chat', () => {
+  it('her message to the target closes the ask (messaged)', async () => {
+    const { ask } = await createWithLink()
+    const match = await createMatch(sara.id, amir.id)
+    const res = await app.inject({ method: 'POST', url: `/matches/${match.id}/messages`, headers: asUser(sara), payload: { body: 'hi' } })
+    expect(res.statusCode).toBe(200)
+    expect((await sql`select status, closed_reason from ask_requests where id = ${ask.id}`)[0]).toEqual({ status: 'closed', closed_reason: 'messaged' })
+  })
+
+  it('starting a direct chat with the target closes it', async () => {
+    const { ask } = await createWithLink()
+    const res = await app.inject({ method: 'POST', url: '/discovery/direct-chat', headers: asUser(sara), payload: { targetUserId: amir.id } })
+    expect(res.statusCode).toBe(200)
+    expect((await sql`select status, closed_reason from ask_requests where id = ${ask.id}`)[0]).toEqual({ status: 'closed', closed_reason: 'messaged' })
   })
 })
 

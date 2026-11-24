@@ -6,6 +6,7 @@ import { maybeQualifyReferral } from '../referrals/rewards.js'
 import { isLocale } from '../i18n/index.js'
 import { scheduleUserGeo } from '../geo/resolveCity.js'
 import { scheduleMainPhotoCheck } from '../moderation/photoAiCheck.js'
+import { checkProfileTexts, isTextField, TEXT_FIELDS, type TextField } from '../moderation/profileTextCheck.js'
 import { markActiveIfSignupComplete } from '../users/accountStatus.js'
 import { recordDeletionReason } from '../users/deletionReasons.js'
 import { onAccountDeleted } from '../asks/service.js'
@@ -142,6 +143,27 @@ export async function profileRoutes(app: FastifyInstance) {
       updates.geo_country = null
     }
 
+    // User-written text is reviewed (regex + DeepSeek) before anything is saved;
+    // only values that actually change are checked.
+    const textValues: Partial<Record<TextField, string>> = {}
+    for (const f of TEXT_FIELDS) {
+      const v = updates[f]
+      if (typeof v === 'string' && v.trim()) textValues[f] = v
+    }
+    if (Object.keys(textValues).length) {
+      let stored: Record<string, string | null> | undefined
+      try {
+        ;[stored] = await sql`select name, bio, icebreaker_answer from users where id = ${req.userId}`
+      } catch {
+        stored = undefined
+      }
+      for (const f of Object.keys(textValues) as TextField[]) {
+        if (stored && (stored[f] ?? '').trim() === textValues[f]!.trim()) delete textValues[f]
+      }
+      const outcome = await checkProfileTexts(req.userId, textValues, req.log)
+      if (!outcome.ok) return reply.status(outcome.status).send(outcome.body)
+    }
+
     let user
     try {
       ;[user] = await sql`
@@ -172,6 +194,20 @@ export async function profileRoutes(app: FastifyInstance) {
       photos,
       setupComplete: user.age > 0,
     }
+  })
+
+  // Validates one text value without saving it (onboarding checks the name
+  // at the name step, before the final profile save).
+  app.post('/profile/me/check-text', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+
+    const { field, text } = (req.body ?? {}) as { field?: unknown; text?: unknown }
+    if (!isTextField(field) || typeof text !== 'string' || !text.trim() || text.length > 1000) {
+      return reply.status(400).send({ error: 'invalid_text_check' })
+    }
+    const outcome = await checkProfileTexts(req.userId, { [field]: text }, req.log)
+    if (!outcome.ok) return reply.status(outcome.status).send(outcome.body)
+    return { ok: true }
   })
 
   // Recorded when the user answers the in-app requestWriteAccess() popup —

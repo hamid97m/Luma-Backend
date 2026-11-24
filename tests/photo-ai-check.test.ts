@@ -61,7 +61,7 @@ describe('askDeepSeekPhoto', () => {
     })))
 
     await expect(askDeepSeekPhoto(nextUser(), MAIN.url)).resolves.toEqual({
-      approved: true, reason: null, promptTokens: 612, completionTokens: 11,
+      approved: true, reason: null, apparentGender: null, promptTokens: 612, completionTokens: 11,
     })
 
     const [url, init] = fetchMock.mock.calls[0]

@@ -135,6 +135,69 @@ describe('friends from share links', () => {
   })
 })
 
+describe('permanent friends', () => {
+  const friendsOf = async (u: any) =>
+    (await app.inject({ method: 'GET', url: '/asks/friends', headers: asUser(u) })).json().friends.map((f: any) => f.name).sort()
+  const ageAndPurge = async () => {
+    await sql`update ask_requests set status = 'closed', closed_at = now() - interval '31 days'`
+    await runAskJob()
+    expect(await sql`select 1 from ask_requests`).toHaveLength(0)
+  }
+
+  it('someone who answered a link stays a friend, both ways, after the ask is purged', async () => {
+    const leila = await createProfile({ name: 'Leila', gender: 'woman', looking_for: 'men' })
+    const { tokens, ask } = await createWithLink(2)
+    await openLink(tokens[0], tgAccount(leila.telegram_id, 'Leila'))
+    await answerLink(tokens[0], leila.telegram_id, { verdict: 'yes', note: 'secret note' })
+    const roya = await createProfile({ name: 'Roya', gender: 'woman', looking_for: 'men' })
+    await openLink(tokens[1], tgAccount(roya.telegram_id, 'Roya')) // looked, never answered
+    await ageAndPurge()
+    expect(await friendsOf(sara)).toEqual(['Leila', 'Negar'])
+    expect(await friendsOf(leila)).toEqual(['Sara'])
+    expect(await friendsOf(roya)).toEqual([])
+    // Only the pair is kept, and she can be asked directly.
+    const rows = await sql`select * from ask_friends`
+    expect(Object.keys(rows[0]).sort()).toEqual(['last_at', 'user_a', 'user_b'])
+    expect(JSON.stringify(rows)).not.toContain(ask.id)
+    const res = await create({ targetId: amir.id, question: 'reply', memberIds: [leila.id], linkCount: 0 })
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('an account created after answering is saved too', async () => {
+    const { tokens } = await createWithLink()
+    const tg = tgAccount(777_200, 'Mina')
+    await declare(tokens[0], tg, 'female')
+    await answerLink(tokens[0], tg, { verdict: 'no' })
+    await runAskJob()
+    expect(await sql`select 1 from ask_friends`).toHaveLength(0) // no account yet: nothing stored
+    await createProfile({ name: 'Mina', gender: 'woman', looking_for: 'men', telegram_id: tg })
+    await ageAndPurge()
+    expect(await friendsOf(sara)).toEqual(['Mina', 'Negar'])
+  })
+
+  it('a block hides a saved friend, and deleting the account erases it', async () => {
+    const leila = await createProfile({ name: 'Leila', gender: 'woman', looking_for: 'men' })
+    const { tokens } = await createWithLink()
+    await openLink(tokens[0], tgAccount(leila.telegram_id, 'Leila'))
+    await answerLink(tokens[0], leila.telegram_id, { verdict: 'yes' })
+    await ageAndPurge()
+    await block(leila, sara)
+    expect(await friendsOf(sara)).toEqual(['Negar'])
+    const { onAccountDeleted } = await import('../src/asks/service.js')
+    await onAccountDeleted(leila.id)
+    expect(await sql`select 1 from ask_friends`).toHaveLength(0)
+  })
+
+  it('running the job again changes nothing', async () => {
+    await create({ targetId: amir.id, question: 'reply', memberIds: [negar.id], linkCount: 0 })
+    await runAskJob()
+    const one = await sql`select * from ask_friends`
+    await runAskJob()
+    expect(await sql`select * from ask_friends`).toEqual(one)
+    expect(one).toHaveLength(1)
+  })
+})
+
 describe('POST /asks — create rules', () => {
   it('a man cannot ask', async () => {
     const res = await create({ targetId: sara.id, question: 'reply', linkCount: 1 }, amir)

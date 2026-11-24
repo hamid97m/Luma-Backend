@@ -14,6 +14,8 @@ export const REQUEST_MESSAGE_MAX = 500
 /** Waiting requests (as the sender sees them) at which sending stops. */
 export const MAX_PENDING_REQUESTS = 10
 export const REQUEST_TTL_DAYS = 7
+/** At most one request push / bot DM per recipient in this window, whoever sends. */
+export const REQUEST_NOTIFY_WINDOW_HOURS = 4
 
 /** Not older than the TTL. Expiry is lazy: nothing sweeps old pending rows. */
 const alive = () => sql`mr.created_at > now() - make_interval(days => ${REQUEST_TTL_DAYS})`
@@ -21,6 +23,7 @@ const alive = () => sql`mr.created_at > now() - make_interval(days => ${REQUEST_
 /** The other person (`s`) can be shown to `me`: not deleted/banned/paused, no block either way. */
 const visibleTo = (me: string) => sql`
   s.deleted_at is null and s.banned_at is null and s.paused_at is null
+  and (s.suspended_until is null or s.suspended_until <= now())
   and not exists (
     select 1 from blocks b
     where (b.blocker_id = ${me} and b.blocked_id = s.id) or (b.blocker_id = s.id and b.blocked_id = ${me}))`
@@ -63,6 +66,21 @@ export async function createRequest(
   return { id: existing, created: false }
 }
 
+/** Race-safe claim of the recipient's notification slot. */
+async function claimNotifySlot(requestId: string, recipientId: string): Promise<boolean> {
+  return sql.begin(async (tx) => {
+    await tx`select pg_advisory_xact_lock(hashtext('message_request_notify'), hashtext(${recipientId}))`
+    const claimed = await tx`
+      update message_requests set notified_at = now()
+      where id = ${requestId} and not exists (
+        select 1 from message_requests o
+        where o.recipient_id = ${recipientId}
+          and o.notified_at > now() - make_interval(hours => ${REQUEST_NOTIFY_WINDOW_HOURS}))
+      returning id`
+    return claimed.length > 0
+  }) as Promise<boolean>
+}
+
 /** Fire-and-forget: live event for an open app + push / bot DM. Never throws. */
 export function announceRequest(requestId: string, senderId: string, recipient: NotifyUser): void {
   void trackMessageWork((async () => {
@@ -72,6 +90,7 @@ export function announceRequest(requestId: string, senderId: string, recipient: 
       console.error('[requests] publish failed:', (err as Error)?.message ?? err)
     }
     try {
+      if (!(await claimNotifySlot(requestId, recipient.id))) return
       const [sender] = await sql<{ name: string | null }[]>`select name from users where id = ${senderId}`
       const name = sender?.name || tFor(recipient.locale as Locale | null).notify.fallbackName
       await notifyUserMessageRequest(recipient, name)

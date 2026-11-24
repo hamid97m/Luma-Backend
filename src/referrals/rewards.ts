@@ -2,6 +2,7 @@ import { sql } from '../db.js'
 import { getReferralConfig } from './config.js'
 import { extendPremiumUntil } from '../premium/service.js'
 import { notifyUserReferralQualified, notifyUserReferralReward } from '../notify/userNotify.js'
+import { grantFriendLikeDays } from '../likes/unlock.js'
 import type { Locale } from '../i18n/index.js'
 
 export interface Milestone {
@@ -66,6 +67,13 @@ export async function evaluateReferralRewards(referrerId: string): Promise<void>
     const config = await getReferralConfig()
     if (!config?.enabled) return
 
+    // A woman's invites pay in "see who liked you" days instead of milestones.
+    const [who] = await sql<{ gender: string }[]>`select gender from users where id = ${referrerId}`
+    if (who?.gender === 'woman') {
+      await grantFriendLikeDays(referrerId)
+      return
+    }
+
     const [{ count: qualifiedCount }] = await sql<{ count: number }[]>`
       select count(*)::int as count from referrals
       where referrer_id = ${referrerId} and qualified_at is not null`
@@ -109,8 +117,8 @@ export async function evaluateReferralRewards(referrerId: string): Promise<void>
 
 export async function maybeQualifyReferral(userId: string): Promise<void> {
   try {
-    const [user] = await sql<{ age: number | null; name: string; referred_by: string | null }[]>`
-      select age, name, referred_by from users where id = ${userId}`
+    const [user] = await sql<{ age: number | null; name: string; gender: string; referred_by: string | null }[]>`
+      select age, name, gender, referred_by from users where id = ${userId}`
     if (!user?.referred_by || !((user.age ?? 0) > 0)) return
 
     const [{ count: photoCount }] = await sql<{ count: number }[]>`
@@ -124,10 +132,12 @@ export async function maybeQualifyReferral(userId: string): Promise<void> {
       returning referrer_id`
     if (!qualified) return
 
-    const [referrer] = await sql<{ id: string; telegram_id: number | null; allows_write_to_pm: boolean | null; locale: Locale | null }[]>`
-      select id, telegram_id, allows_write_to_pm, locale from users where id = ${qualified.referrer_id}`
+    const [referrer] = await sql<{ id: string; gender: string; telegram_id: number | null; allows_write_to_pm: boolean | null; locale: Locale | null }[]>`
+      select id, gender, telegram_id, allows_write_to_pm, locale from users where id = ${qualified.referrer_id}`
     // Push first; bot DM only if allowed (telegram_id > 0, DMs not declined).
-    if (referrer) await notifyUserReferralQualified(referrer, user.name)
+    // A woman's woman friend: the "likes are open" message says it (one message, not two).
+    const oneMessage = user.gender === 'woman' && referrer?.gender === 'woman' && (await getReferralConfig())?.enabled
+    if (referrer && !oneMessage) await notifyUserReferralQualified(referrer, user.name)
     await evaluateReferralRewards(qualified.referrer_id)
   } catch (err) {
     console.error('maybeQualifyReferral failed', err)

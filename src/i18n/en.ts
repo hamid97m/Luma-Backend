@@ -57,12 +57,16 @@ export const en = {
       accountPaused: 'Profile hidden',
       photoWarning: 'Check your photo',
       supportReply: 'Support replied',
+      reportThanks: 'Thanks for your report 🙏',
+      accountBanned: 'Your account was banned',
+      accountSuspended: 'Your account is suspended',
     },
   },
   referral: {
     qualified: (name: string) => `${name} joined Luma with your invite link 🎉 Thanks for spreading the word!`,
     rewardSwipes: (n: number) => `Referral reward: you got ${n} extra discovery swipes! 🔥`,
     rewardPremium: (days: number) => `Referral reward: you got ${days} days of Premium! 🌟`,
+    likesUnlocked: (days: number) => `Your friend joined Luma 🎉 You can see everyone who liked you for ${days} more days 💛`,
   },
   gifts: {
     invoiceTitle: (emoji: string) => `Gift ${emoji}`,
@@ -80,6 +84,15 @@ export const en = {
     checkoutPriceMismatch: "The price doesn't match.",
     purchased: (days: number) =>
       `Congrats! 🌟 Your ${days}-day Premium is active.\nNow you can see who liked you and chat without limits. Open Luma ✨`,
+  },
+  moderation: {
+    reportThanksBanned: "Thanks for reporting 🙏 We checked and you were right; this user's account has been permanently banned.",
+    reportThanksSuspended: (days: number) =>
+      `Thanks for reporting 🙏 We checked and you were right; this user's account has been suspended for ${days} days.`,
+    accountBanned:
+      "Your Luma account has been banned for breaking the rules (insulting or harassing other users). If you think this is a mistake, contact support.",
+    accountSuspended: (until: string) =>
+      `Because of user reports and breaking Luma's rules, your account is suspended until ${until}. Please be respectful to others 🙏`,
   },
   chat: {
     seedGreeting: 'Hi',

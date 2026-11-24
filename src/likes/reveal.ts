@@ -1,5 +1,6 @@
 import { sql } from '../db.js'
 import { notifyUserLike } from '../notify/userNotify.js'
+import { getLikesAccess } from './unlock.js'
 import { isEligibleRevealLiker, pickRevealCandidate, tehranDate, type RevealCandidate } from './revealPick.js'
 
 export type RevealResult = { applies: false } | { applies: true; swiperId: string | null }
@@ -47,7 +48,8 @@ async function loadViewerState(userId: string): Promise<ViewerState | null> {
              exists (
                select 1 from users l
                where l.id = r.swiper_id
-                 and l.deleted_at is null and l.banned_at is null and l.paused_at is null)
+                 and l.deleted_at is null and l.banned_at is null and l.paused_at is null
+                 and (l.suspended_until is null or l.suspended_until <= now()))
              and not exists (
                select 1 from blocks b
                where (b.blocker_id = v.id and b.blocked_id = r.swiper_id)
@@ -110,6 +112,7 @@ async function loadCandidates(userId: string): Promise<{ candidates: RevealCandi
     join users u on u.id = s.swiper_id
     where s.swiped_id = ${userId}
       and s.direction = 'like'
+      and (u.suspended_until is null or u.suspended_until <= now())
       and not exists (
         select 1 from swipes mine where mine.swiper_id = ${userId} and mine.swiped_id = s.swiper_id)
       and not exists (
@@ -203,6 +206,8 @@ export async function ensureDailyReveal(
 }
 
 export async function hiddenIncomingLikerIds(userId: string, now = new Date()): Promise<string[]> {
+  // Invite unlock / premium: nobody is hidden from her.
+  if ((await getLikesAccess(userId, now.getTime())).unlocked) return []
   const reveal = await ensureDailyReveal(userId, now, { waitForNotify: false })
   if (!reveal.applies) return []
   const likes = await loadLikeSwipes(userId)

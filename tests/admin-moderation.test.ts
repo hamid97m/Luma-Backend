@@ -20,7 +20,7 @@ describe('admin moderation config', () => {
     await sql`update moderation_config set photo_report_threshold = 4`
     const res = await app.inject({ method: 'GET', url: '/admin/moderation/config', headers })
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ photoReportThreshold: 4 })
+    expect(res.json()).toEqual({ photoReportThreshold: 4, reportAiMode: 'auto', reportSuspendDays: 3 })
   })
 
   it('500s when the config row is missing', async () => {
@@ -37,7 +37,7 @@ describe('admin moderation config', () => {
       payload: { photoReportThreshold: 5 },
     })
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ photoReportThreshold: 5 })
+    expect(res.json()).toEqual({ photoReportThreshold: 5, reportAiMode: 'auto', reportSuspendDays: 3 })
     const [row] = await sql`select photo_report_threshold, updated_at from moderation_config`
     expect(row.photo_report_threshold).toBe(5)
     expect(Date.now() - Date.parse(row.updated_at)).toBeLessThan(5_000)

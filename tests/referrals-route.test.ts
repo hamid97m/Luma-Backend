@@ -56,6 +56,7 @@ describe('GET /referrals/me', () => {
       link: 'https://t.me/LumaBot?start=ref_x9km2pqr',
       qualifiedCount: 2,
       totalCount: 4,
+      likesReward: null,
       milestones: [
         { count: 1, rewardType: 'swipes', rewardAmount: 20, achieved: true, granted: true },
         { count: 3, rewardType: 'premium_days', rewardAmount: 3, achieved: false, granted: false },
@@ -82,6 +83,7 @@ describe('GET /referrals/me', () => {
       link: `https://t.me/LumaBot?start=ref_${referral_code}`,
       qualifiedCount: 0,
       totalCount: 1,
+      likesReward: null,
       milestones: [
         { count: 1, rewardType: 'swipes', rewardAmount: 20, achieved: false, granted: false },
         { count: 3, rewardType: 'premium_days', rewardAmount: 3, achieved: false, granted: false },

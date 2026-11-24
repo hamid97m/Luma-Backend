@@ -33,6 +33,7 @@ type Candidate = {
   bio: string | null
   telegram_id: number
   is_woman: boolean
+  is_seed: boolean
   interests: string[] | null
   location: string | null
   // Ranking-only: deliberately left out of the response below.
@@ -146,11 +147,17 @@ export async function discoveryRoutes(app: FastifyInstance) {
           where u.is_active = true
             and u.account_status = 'active'
             and u.banned_at is null
+            and (u.suspended_until is null or u.suspended_until <= now())
             and u.paused_at is null
             and u.deleted_at is null
             and u.age > 0
             and exists (select 1 from user_photos ph where ph.user_id = u.id)
             ${genderFilter ? sql`and u.gender = ${genderFilter}` : sql``}
+            -- Set aside while her friends weigh in on them ("ask a friend").
+            and not exists (
+              select 1 from ask_requests ak
+              where ak.requester_id = ${userId} and ak.target_id = u.id
+                and ak.status = 'open' and ak.expires_at > now())
             ${interestedIn ? sql`and u.looking_for = any(${interestedIn}::looking_type[])` : sql``}
             and u.id <> ${userId}
             and not exists (
@@ -223,7 +230,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
                     from seeds
         )
         select t.tier, t.seed_rank, t.id, t.name, t.age, t.bio, t.telegram_id, t.interests,
-               t.location, t.geo_city, t.geo_country, t.locale, t.premium_until, t.is_woman,
+               t.location, t.geo_city, t.geo_country, t.locale, t.premium_until, t.is_woman, t.is_seed,
                coalesce((
                  select json_agg(json_build_object('id', ph.id, 'url', ph.url, 'position', ph.position))
                  from user_photos ph where ph.user_id = t.id
@@ -284,9 +291,10 @@ export async function discoveryRoutes(app: FastifyInstance) {
       premium: isPremiumActive(p.premium_until ?? null),
       // "همین نزدیکی" badge only when both resolve to the same normalized city.
       nearby: isSameCity(viewer, p),
-      // A direct chat needs an opener (it becomes a message request). Seeds
-      // answer the same as real women, so this never gives them away.
+      // A direct chat needs an opener (it becomes a message request).
       messageRequest: p.is_woman === true,
+      // Seed profiles can't be direct-chatted (see routes/directChat.ts).
+      canDirectChat: p.is_seed !== true,
       photos: [...p.user_photos]
         .sort((a, b) => a.position - b.position)
         .map((ph) => ph.url),

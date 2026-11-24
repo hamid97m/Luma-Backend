@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify'
 import { sql, isUuid } from '../db.js'
 import { maybeAutoPauseForReports, maybeWarnFakePhoto } from '../moderation/autoPause.js'
+import { startReportReview } from '../moderation/reportAiReview.js'
 
 const REASONS = ['fake', 'inappropriate', 'harassment', 'spam', 'other'] as const
 const CONTEXTS = ['discovery', 'chat'] as const
@@ -51,10 +52,13 @@ export async function reportsRoutes(app: FastifyInstance) {
     }
 
     let duplicate = false
+    let reportId: string | null = null
     try {
-      await sql`
+      const [row] = await sql<{ id: string }[]>`
         insert into reports (reporter_id, reported_id, context, reason, note, match_id, status)
-        values (${req.userId}, ${reportedUserId}, ${context}, ${reason}, ${note}, ${matchId}, 'pending')`
+        values (${req.userId}, ${reportedUserId}, ${context}, ${reason}, ${note}, ${matchId}, 'pending')
+        returning id`
+      reportId = row?.id ?? null
     } catch (err) {
       // 23505 = unique_violation on the pending index → already reported, treat as success.
       if ((err as { code?: string })?.code !== '23505') {
@@ -63,6 +67,10 @@ export async function reportsRoutes(app: FastifyInstance) {
       }
       duplicate = true
     }
+
+    // AI review of a new report (DeepSeek): fire-and-forget — never delays or
+    // fails this response. A duplicate pending report is not re-reviewed.
+    if (!duplicate && reportId) startReportReview(reportId)
 
     // Auto-hide: reporter blocks reported. Ignore duplicates; a failure here
     // never failed the report.

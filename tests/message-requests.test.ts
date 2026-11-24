@@ -11,6 +11,7 @@ vi.mock('../src/bot.js', () => ({
 import { buildApp } from '../src/server.js'
 import { notifyMessageRequest, notifyNewMessage, notifyRequestAccepted } from '../src/bot.js'
 import { createChatHub } from '../src/realtime/hub.js'
+import { acceptRequest } from '../src/requests/service.js'
 import { settleMessageWork } from '../src/messaging/inflight.js'
 import { AUTH, authAs } from './helpers/auth.js'
 import { resetDb, createUser, createMatch, createPhoto, insertRow, sql } from './helpers/db.js'
@@ -221,15 +222,35 @@ describe('POST /discovery/direct-chat to a woman', () => {
 })
 
 describe('POST /discovery/direct-chat — instant targets', () => {
-  it('a seed woman auto-accepts; his message follows the icebreakers', async () => {
-    const seed = await woman({ name: 'Fake', is_seed: true, telegram_id: -5, icebreaker_prompt: 'Q', icebreaker_answer: 'A' })
-    const res = await send(ali, seed, 'hi fake')
-    expect(res.json()).toMatchObject({ created: true, match: { user: { id: seed.id, name: 'Fake' } }, directChat: { remaining: 2 } })
-    expect(await texts(res.json().match.id)).toEqual([
-      ['other', 'icebreaker', 'Q'], ['ali', 'icebreaker', 'Ali asks'], ['ali', 'text', 'hi fake'],
-    ])
+  it('a seed profile of any gender is refused: no match, no request, no slot', async () => {
+    const seed = await woman({ name: 'Fake', is_seed: true, telegram_id: -5 })
+    const seedMan = await createUser({ gender: 'man', is_seed: true, telegram_id: -6 })
+    for (const target of [seed, seedMan]) {
+      const res = await send(ali, target, 'hi fake')
+      expect(res.statusCode).toBe(403)
+      expect(res.json()).toEqual({ error: 'direct_chat_unavailable' })
+    }
     expect(await requests()).toHaveLength(0)
-    expect((await send(ali, await woman({ is_seed: true, telegram_id: -6 }))).json().created).toBe(true)
+    expect(await sql`select id from matches`).toHaveLength(0)
+    expect((await send(ali, sara, 'hi')).json().directChat).toMatchObject({ remaining: 2 })
+  })
+
+  it('she gets one request notification per 4 hours, whoever sends; each request still arrives', async () => {
+    const senders = [ali, await createUser({ gender: 'man', looking_for: 'women', premium_until: ago(-DAY) }), await createUser({ gender: 'man', looking_for: 'women', premium_until: ago(-DAY) })]
+    for (const u of senders.slice(0, 2)) await send(u, sara, 'hi')
+    await settleMessageWork()
+    expect(notifyMessageRequest).toHaveBeenCalledTimes(1)
+    await sql`update message_requests set notified_at = now() - interval '5 hours' where notified_at is not null`
+    await send(senders[2], sara, 'hi')
+    await settleMessageWork()
+    expect(notifyMessageRequest).toHaveBeenCalledTimes(2)
+    expect(await requests()).toHaveLength(3)
+  })
+
+  it('a suspended sender is hidden from her inbox and cannot be accepted', async () => {
+    const { request } = (await send(ali, sara, 'hi')).json()
+    await sql`update users set suspended_until = now() + interval '1 day' where id = ${ali.id}`
+    expect(await acceptRequest(request.id, sara.id)).toEqual({ error: 'not_available' })
   })
 
   it('woman → man stays instant, with or without a message; he is notified of the message', async () => {
@@ -450,13 +471,13 @@ describe('GET /discovery', () => {
     }
   })
 
-  it('messageRequest: true for women (seeds too — it must not reveal them), false for men', async () => {
+  it('messageRequest: true for women; canDirectChat: false for seeds only', async () => {
     await sql`update users set looking_for = 'both' where id = ${ali.id}`
     const seed = await woman({ is_seed: true, telegram_id: -7, locale: null })
     const bob = await createUser({ looking_for: 'both' })
     for (const u of [sara, seed, bob]) await createPhoto(u.id)
-    const flags = Object.fromEntries((await seen()).map((p) => [p.id, p.messageRequest]))
-    expect(flags).toEqual({ [sara.id]: true, [seed.id]: true, [bob.id]: false })
+    const flags = Object.fromEntries((await seen()).map((p) => [p.id, [p.messageRequest, p.canDirectChat]]))
+    expect(flags).toEqual({ [sara.id]: [true, true], [seed.id]: [true, false], [bob.id]: [false, true] })
   })
 })
 

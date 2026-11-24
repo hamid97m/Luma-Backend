@@ -328,6 +328,17 @@ export async function notifyReferralQualified(toTelegramId: number, referredName
   }
 }
 
+/** DM a woman that a friend she invited unlocked her whole likes list. Opens Likes. */
+export async function notifyLikesUnlocked(toTelegramId: number, days: number, locale: Locale | null): Promise<void> {
+  try {
+    const t = tFor(locale)
+    const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, `${process.env.WEB_URL!}?screen=likes`)
+    await getBot().api.sendMessage(toTelegramId, t.referral.likesUnlocked(days), { reply_markup: keyboard })
+  } catch (err) {
+    console.error('notifyLikesUnlocked failed', err)
+  }
+}
+
 /** Text of the referral-reward DM (also the push body). */
 export function referralRewardText(
   milestone: { rewardType: string; rewardAmount: number },

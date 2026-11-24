@@ -1,7 +1,7 @@
 import {
   notifyMatch, notifyNewLike, notifyNewMessage, notifyGiftIntro, notifyReferralQualified, notifyReferralReward,
   notifyPremiumPurchased, notifyPaused, notifyFakePhotoWarning, notifyTicketReply, sendBroadcastMessage,
-  notifyMessageRequest, notifyRequestAccepted,
+  notifyMessageRequest, notifyRequestAccepted, notifyLikesUnlocked,
   referralRewardText, fakePhotoWarningText, ticketReplyText,
 } from '../bot.js'
 import { sendPushToUser, isPushConfigured, type PushPayload } from '../push/fcm.js'
@@ -265,6 +265,19 @@ export async function notifyUserReferralReward(
   )
 }
 
+/** A friend she invited joined: her whole likes list is open for `days` more days. */
+export async function notifyUserLikesUnlocked(u: NotifyUser, days: number): Promise<'push' | 'bot' | 'none'> {
+  const t = tFor(localeOf(u))
+  return deliverToUser(
+    u,
+    () => ({
+      type: 'referral_reward', title: t.push.title.referralReward,
+      body: stripHtml(t.referral.likesUnlocked(days)), ...safeLinkFields({ screen: 'likes' }),
+    }),
+    () => notifyLikesUnlocked(tg(u), days, localeOf(u)),
+  )
+}
+
 /** Premium purchase is active. Bot fallback ignores allows_write_to_pm, as
  * before (Stars + TonPays). Rethrows bot errors. */
 export async function notifyUserPremiumPurchased(u: NotifyUser, durationDays: number): Promise<'push' | 'bot' | 'none'> {
@@ -351,5 +364,21 @@ export async function notifyUserText(
       ...safeLinkFromButton(m.button),
     }),
     () => sendText(tg(u), m.text, m.button),
+  )
+}
+
+/**
+ * Moderation notices from the AI report review: the reported user's ban /
+ * suspension notice and the reporter's thank-you. Plain text, no button.
+ * Push first, bot DM fallback. Rethrows bot errors.
+ */
+export async function notifyUserModerationText(
+  u: NotifyUser,
+  m: { type: 'account_banned' | 'account_suspended' | 'report_thanks'; title: string; text: string },
+): Promise<'push' | 'bot' | 'none'> {
+  return deliverToUser(
+    u,
+    () => ({ type: m.type, title: m.title, body: m.text, ...homeLink() }),
+    () => sendBroadcastMessage(tg(u), m.text),
   )
 }

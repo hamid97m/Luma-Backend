@@ -50,6 +50,7 @@ export async function directChatRoutes(app: FastifyInstance) {
           where id = ${targetUserId}
             and deleted_at is null
             and banned_at is null
+            and (suspended_until is null or suspended_until <= now())
             and paused_at is null
             and is_active = true
             and account_status = 'active'
@@ -88,9 +89,11 @@ export async function directChatRoutes(app: FastifyInstance) {
 
     if (opener.length > REQUEST_MESSAGE_MAX) return reply.status(400).send({ error: 'message_too_long' })
 
-    // A direct chat to a woman is a request she accepts or ignores. Seed
-    // profiles have nobody behind them to accept, so they match right away.
-    const asRequest = found.gender === 'woman' && !found.is_seed
+    // Nobody is behind a seed profile — never let anyone spend a slot on one.
+    if (found.is_seed) return reply.status(403).send({ error: 'direct_chat_unavailable' })
+
+    // A direct chat to a woman is a request she accepts or ignores.
+    const asRequest = found.gender === 'woman'
     if (asRequest) {
       if (!opener) return reply.status(400).send({ error: 'message_required' })
       // One request per pair, ever. Pending, ignored or expired all answer the

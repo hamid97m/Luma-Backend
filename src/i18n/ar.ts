@@ -57,12 +57,16 @@ export const ar = {
       accountPaused: 'ملفك مخفي',
       photoWarning: 'تحقق من صورتك',
       supportReply: 'رد فريق الدعم',
+      reportThanks: 'شكراً على بلاغك 🙏',
+      accountBanned: 'تم حظر حسابك',
+      accountSuspended: 'تم تعليق حسابك مؤقتاً',
     },
   },
   referral: {
     qualified: (name: string) => `${name} انضم إلى لوما عبر رابط دعوتك 🎉 شكرًا لأنك تعرّف الناس على لوما!`,
     rewardSwipes: (n: number) => `مكافأة الدعوة: حصلت على ${n} سحبة اكتشاف إضافية! 🔥`,
     rewardPremium: (days: number) => `مكافأة الدعوة: حصلت على ${days} يومًا من بريميوم! 🌟`,
+    likesUnlocked: (days: number) => `انضمت صديقتك إلى لوما 🎉 يمكنك رؤية كل من أُعجب بك لمدة ${days} يومًا إضافيًا 💛`,
   },
   gifts: {
     invoiceTitle: (emoji: string) => `هدية ${emoji}`,
@@ -80,6 +84,15 @@ export const ar = {
     checkoutPriceMismatch: 'السعر غير متطابق.',
     purchased: (days: number) =>
       `مبروك! 🌟 تم تفعيل اشتراك بريميوم لمدة ${days} يومًا.\nالآن يمكنك رؤية من أعجب بك والدردشة بلا حدود. افتح لوما ✨`,
+  },
+  moderation: {
+    reportThanksBanned: 'شكراً على بلاغك 🙏 راجعنا الأمر وكنت على حق؛ تم حظر حساب هذا المستخدم نهائياً.',
+    reportThanksSuspended: (days: number) =>
+      `شكراً على بلاغك 🙏 راجعنا الأمر وكنت على حق؛ تم تعليق حساب هذا المستخدم لمدة ${days} أيام.`,
+    accountBanned:
+      'تم حظر حسابك في لوما بسبب مخالفة القواعد (إهانة المستخدمين الآخرين أو مضايقتهم). إذا كنت تعتقد أن هذا خطأ، تواصل مع الدعم.',
+    accountSuspended: (until: string) =>
+      `بسبب بلاغات المستخدمين ومخالفة قواعد لوما، تم تعليق حسابك مؤقتاً حتى ${until}. يرجى احترام الآخرين 🙏`,
   },
   chat: {
     seedGreeting: 'مرحبًا',

@@ -1,6 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify'
 import { sql } from '../db.js'
 import * as storage from '../storage.js'
+import { grantAfterPhotoCheck } from '../likes/unlock.js'
 import { pauseForPhotoReview } from './autoPause.js'
 
 export type PhotoVerdict = { approved: boolean; reason: string | null }
@@ -242,6 +243,8 @@ export function scheduleMainPhotoCheck(userId: string, log: FastifyBaseLogger): 
   checkMainPhoto(userId)
     .then((verdict) => {
       if (verdict && !verdict.approved) log.info({ userId, reason: verdict.reason }, 'main photo rejected by AI check')
+      // An invited friend only counts once her photo is checked.
+      return grantAfterPhotoCheck(userId)
     })
     .catch((err) => log.warn({ err, userId }, 'main photo AI check failed'))
 }

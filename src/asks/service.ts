@@ -137,30 +137,37 @@ export async function listFriends(userId: string, limit = 20): Promise<AskFriend
       select ar.recipient_id as friend_id, coalesce(ar.answered_at, r.created_at) as at
       from ask_requests r join ask_recipients ar on ar.request_id = r.id
       where r.requester_id = ${userId} and ar.recipient_id is not null
+        and (ar.kind = 'member' or ar.answered_at is not null)
       union all
       select r.requester_id, coalesce(ar.answered_at, r.created_at)
       from ask_recipients ar join ask_requests r on r.id = ar.request_id
-      where ar.recipient_id = ${userId}
+      where ar.recipient_id = ${userId} and (ar.kind = 'member' or ar.answered_at is not null)
       union all
       select u.id, u.created_at from users u where u.invited_by = ${userId}
       union all
-      -- Whoever opened her share link (by Telegram id): friends whether they
-      -- already had an account or signed up afterwards.
+      -- Whoever answered her share link (by Telegram id): friends whether they
+      -- already had an account or signed up afterwards. Answered, not just opened,
+      -- so a stranger tapping a link posted in a group doesn't become a friend.
       select u.id, coalesce(ar.answered_at, ar.seen_at, r.created_at)
       from ask_requests r join ask_recipients ar on ar.request_id = r.id
       join users u on u.telegram_id = ar.advisor_tg_id
       where r.requester_id = ${userId} and ar.kind = 'link' and ar.advisor_tg_id is not null
+        and ar.answered_at is not null
       union all
-      -- …and the other way round: she opened someone else's share link.
+      -- …and the other way round: she answered someone else's share link.
       select r.requester_id, coalesce(ar.answered_at, ar.seen_at, r.created_at)
       from ask_recipients ar join ask_requests r on r.id = ar.request_id
       join users me on me.id = ${userId}
-      where ar.kind = 'link' and ar.advisor_tg_id = me.telegram_id
+      where ar.kind = 'link' and ar.advisor_tg_id = me.telegram_id and ar.answered_at is not null
     )
     select u.id, u.name, ${primaryPhoto(sql`u.id`)} as photo_url, max(i.at) as last_at
     from interactions i join users u on u.id = i.friend_id
     where u.id <> ${userId} and u.gender = 'woman' and u.age > 0
       and u.deleted_at is null and u.banned_at is null
+      and not exists (
+        select 1 from blocks b
+        where (b.blocker_id = u.id and b.blocked_id = ${userId})
+           or (b.blocker_id = ${userId} and b.blocked_id = u.id))
     group by u.id
     order by last_at desc
     limit ${limit}`
@@ -211,7 +218,7 @@ async function targetIsAskable(requesterId: string, targetId: string): Promise<b
     select 1 from users u
     where u.id = ${targetId} and u.id <> ${requesterId}
       and u.deleted_at is null and u.banned_at is null and u.is_active = true
-      and u.account_status = 'active' and u.age > 0
+      and u.account_status = 'active' and u.age > 0 and u.paused_at is null
       and not exists (
         select 1 from blocks b
         where (b.blocker_id = ${requesterId} and b.blocked_id = u.id)
@@ -319,12 +326,15 @@ type DetailRecipientRow = {
   verdict: AskVerdict | null; note: string | null; answered_at: string | null
   reminded_at: string | null; foreign_open_at: string | null; created_at: string
   advisor_gender: 'female' | 'male' | null; claimer_gender: string | null; claimer_age: number | null
+  claimer_gone?: boolean | null
 }
 
 function canRemind(r: DetailRecipientRow, ask: { status: AskStatus; createdAt: string }, now = Date.now()): boolean {
   return ask.status === 'open' && !r.answered_at && !r.reminded_at &&
     now - new Date(ask.createdAt).getTime() >= ASK_REMIND_AFTER_MS &&
     (r.kind === 'member' ? Boolean(r.recipient_id) : r.advisor_tg_id !== null) &&
+    // A member who has since deleted (or been banned) gets no more DMs.
+    !r.claimer_gone &&
     // Never remind a man: a finished member's own gender decides, else the declared one.
     (r.claimer_age && r.claimer_age > 0 ? r.claimer_gender === 'woman' : r.advisor_gender !== 'male')
 }
@@ -340,7 +350,8 @@ export async function getAskDetail(userId: string, askId: string): Promise<AskDe
     sql<DetailRecipientRow[]>`
       select ar.id, ar.kind, ar.recipient_id, ar.advisor_tg_id, ar.advisor_name, m.name as member_name,
              ar.seen_at, ar.verdict, ar.note, ar.answered_at, ar.reminded_at, ar.foreign_open_at, ar.created_at,
-             ar.advisor_gender, m.gender::text as claimer_gender, m.age as claimer_age
+             ar.advisor_gender, m.gender::text as claimer_gender, m.age as claimer_age,
+             (m.deleted_at is not null or m.banned_at is not null) as claimer_gone
       from ask_recipients ar left join users m on m.id = ar.recipient_id
       where ar.request_id = ${askId}
       order by ar.created_at asc, ar.id asc`,
@@ -368,6 +379,7 @@ export async function remindRecipient(userId: string, askId: string, recipientId
     select ar.id, ar.kind, ar.recipient_id, ar.advisor_tg_id, ar.advisor_name, null as member_name,
            ar.seen_at, ar.verdict, ar.note, ar.answered_at, ar.reminded_at, ar.foreign_open_at, ar.created_at,
            ar.advisor_gender, m.gender::text as claimer_gender, m.age as claimer_age,
+           (m.deleted_at is not null or m.banned_at is not null) as claimer_gone,
            ${effStatus()} as status, r.created_at as ask_created_at, rq.name as requester_name
     from ask_recipients ar
     join ask_requests r on r.id = ar.request_id
@@ -460,7 +472,9 @@ async function loadRecipient(where: ReturnType<typeof sql>): Promise<RecRow | nu
     select ar.id, ar.request_id, ar.kind, ar.recipient_id, ar.advisor_tg_id, ar.advisor_name, ar.advisor_gender,
            ar.seen_at, ar.verdict, ar.note, ar.answered_at,
            r.requester_id, r.target_id, r.question, ${effStatus()} as status, rq.name as requester_name,
-           (t.deleted_at is not null or t.banned_at is not null) as target_gone
+           (t.deleted_at is not null or t.banned_at is not null or t.paused_at is not null
+            or t.is_active = false
+            or rq.deleted_at is not null or rq.banned_at is not null) as target_gone
     from ask_recipients ar
     join ask_requests r on r.id = ar.request_id
     join users rq on rq.id = r.requester_id
@@ -510,8 +524,8 @@ async function gate(rec: RecRow, v: Viewer): Promise<Gate> {
   if (blockerId) {
     const [b] = await sql`
       select 1 from blocks
-      where (blocker_id = ${blockerId} and blocked_id = ${rec.target_id})
-         or (blocker_id = ${rec.target_id} and blocked_id = ${blockerId})
+      where blocker_id = ${blockerId} and blocked_id in (${rec.target_id}, ${rec.requester_id})
+         or blocked_id = ${blockerId} and blocker_id in (${rec.target_id}, ${rec.requester_id})
       limit 1`
     if (b) return 'closed'
   }
@@ -727,6 +741,17 @@ export async function resolveLink(
     select 1 from ask_recipients where id = ${rec.id} and ${tg.id}::bigint = any(rejected_tg_ids)`
   if (rejected) return none({ state: 'not_for_you' })
 
+  // Unknown gender: nothing is claimed until she declares female, so someone who
+  // stops at the gender step (or a man) can't lock the link for the real friend.
+  if (rec.advisor_tg_id === null && viewer.knownGender === null) {
+    if (!opts.gender) return none({ state: 'need_gender', requesterName: rec.requester_name, question: rec.question })
+    if (opts.gender === 'male') {
+      await sql`
+        update ask_recipients set rejected_tg_ids = array_append(rejected_tg_ids, ${tg.id}::bigint)
+        where id = ${rec.id} and not (${tg.id}::bigint = any(rejected_tg_ids))`
+      return none({ state: 'not_for_you' })
+    }
+  }
   if (rec.advisor_tg_id === null) {
     const claimed = await sql`
       update ask_recipients set
@@ -817,6 +842,15 @@ export async function captureAskAttribution(newUserId: string, telegramId: numbe
       limit 1`
     if (!first) return
     await sql`update users set invited_by = ${first.requester_id} where id = ${newUserId} and invited_by is null`
+    // The same friend also counts as her invite, unless an invite link already won.
+    const credited = await sql`
+      update users set referred_by = ${first.requester_id}
+      where id = ${newUserId} and referred_by is null returning id`
+    if (credited.length > 0) {
+      await sql`
+        insert into referrals (referrer_id, referred_id) values (${first.requester_id}, ${newUserId})
+        on conflict (referred_id) do nothing`
+    }
     const days = first.answered_at
       ? Math.floor((Date.now() - new Date(first.answered_at).getTime()) / 86_400_000)
       : null
@@ -849,7 +883,7 @@ export async function askPhotoObject(recipientId: string, index: number): Promis
   const rec = await loadRecipient(sql`ar.id = ${recipientId}`)
   if (!rec) return null
   let viewer: Viewer = { userId: null, gender: null, age: 0, telegramId: rec.advisor_tg_id, knownGender: null }
-  if (rec.recipient_id) {
+  if (rec.recipient_id && rec.kind === 'member') {
     const [u] = await sql<{ id: string; gender: string; age: number }[]>`
       select id, gender, age from users where id = ${rec.recipient_id} and deleted_at is null and banned_at is null`
     if (!u) return null

@@ -14,6 +14,8 @@ CREATE TABLE message_requests (
   match_id uuid REFERENCES matches(id) ON DELETE SET NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   decided_at timestamptz,
+  -- The push / bot DM for this request went out; caps them per recipient.
+  notified_at timestamptz,
   CHECK (sender_id <> recipient_id)
 );
 

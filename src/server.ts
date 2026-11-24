@@ -5,6 +5,7 @@ import rateLimit, { type errorResponseBuilderContext } from '@fastify/rate-limit
 import { verifyInitData } from './auth.js'
 import { verifySessionToken } from './session.js'
 import { getBotUsername } from './bot.js'
+import { suspendedBody } from './moderation/suspension.js'
 import { WEBHOOK_ROUTE_PREFIX } from './webhookRoute.js'
 import { sql } from './db.js'
 import type { TelegramUser } from './types.js'
@@ -117,6 +118,10 @@ export async function buildApp(): Promise<FastifyInstance> {
       // a made-up Authorization value can't mint a fresh bucket per attempt.
       if (WEB_SIGN_IN_PATHS.has(req.url.split('?')[0])) return req.ip
       const auth = req.headers.authorization
+      // Ask share links: callers may have no account (initData only) — key by IP
+      // so made-up headers can't mint fresh buckets for these public routes.
+      if (req.url.startsWith('/asks/link/') || req.url.startsWith('/asks/photo/') ||
+          req.url.startsWith('/likes/blurred/')) return req.ip
       // Hash the full header: raw slicing gave all Bearer JWTs one shared bucket
       // (constant "Bearer eyJ..." prefix) and let attackers mint fresh buckets.
       return auth ? createHash('sha256').update(auth).digest('hex') : req.ip
@@ -150,6 +155,8 @@ export async function buildApp(): Promise<FastifyInstance> {
       // Ask-a-friend links: a non-member advisor has no users row; the routes check initData themselves.
       req.url.startsWith('/asks/link/') ||
       req.url.startsWith('/asks/photo/') ||
+      // Blurred teaser photos: <img> can't send auth; the encrypted token is the credential.
+      req.url.startsWith('/likes/blurred/') ||
       req.url.startsWith('/media-upload/') ||
       req.url.startsWith('/media-private/') ||
       req.url.startsWith('/media/')
@@ -175,13 +182,19 @@ export async function buildApp(): Promise<FastifyInstance> {
     const [data] = await sql<{
       id: string; deleted_at: string | null; banned_at: string | null
       paused_at: string | null; last_active: string | null
+      suspended_until: Date | null; suspended: boolean
     }[]>`
-      select id, deleted_at, banned_at, paused_at, last_active
+      select id, deleted_at, banned_at, paused_at, last_active,
+             suspended_until, coalesce(suspended_until > now(), false) as suspended
       from users where ${where}`
 
     if (!data) return reply.status(401).send({ error: 'user_not_found' })
     if (data.deleted_at) return reply.status(401).send({ error: 'account_deleted' })
     if (data.banned_at) return reply.status(401).send({ error: 'account_banned', botUsername: getBotUsername() })
+    // Temporary suspension (AI report review): like a ban, until the date passes.
+    if (data.suspended && data.suspended_until) {
+      return reply.status(401).send(suspendedBody(data.suspended_until))
+    }
     req.userId = data.id
     req.isPaused = Boolean(data.paused_at)
     recordDevice(data.id, parseClientInfo(req.headers, authKind), req.log)

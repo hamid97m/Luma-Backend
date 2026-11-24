@@ -74,6 +74,7 @@ describe('GET /discovery', () => {
       location: null,
       nearby: false,
       messageRequest: true,
+      canDirectChat: true,
       premium: true,
       photos: ['https://img1.jpg', 'https://img2.jpg'],
     }])

@@ -149,6 +149,11 @@ export async function discoveryRoutes(app: FastifyInstance) {
             and u.age > 0
             and exists (select 1 from user_photos ph where ph.user_id = u.id)
             ${genderFilter ? sql`and u.gender = ${genderFilter}` : sql``}
+            -- Set aside while her friends weigh in on them ("ask a friend").
+            and not exists (
+              select 1 from ask_requests ak
+              where ak.requester_id = ${userId} and ak.target_id = u.id
+                and ak.status = 'open' and ak.expires_at > now())
             ${interestedIn ? sql`and u.looking_for = any(${interestedIn}::looking_type[])` : sql``}
             and u.id <> ${userId}
             and not exists (

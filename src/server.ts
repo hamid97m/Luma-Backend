@@ -116,6 +116,9 @@ export async function buildApp(): Promise<FastifyInstance> {
       // a made-up Authorization value can't mint a fresh bucket per attempt.
       if (WEB_SIGN_IN_PATHS.has(req.url.split('?')[0])) return req.ip
       const auth = req.headers.authorization
+      // Ask share links: callers may have no account (initData only) — key by IP
+      // so made-up headers can't mint fresh buckets for these public routes.
+      if (req.url.startsWith('/asks/link/') || req.url.startsWith('/asks/photo/')) return req.ip
       // Hash the full header: raw slicing gave all Bearer JWTs one shared bucket
       // (constant "Bearer eyJ..." prefix) and let attackers mint fresh buckets.
       return auth ? createHash('sha256').update(auth).digest('hex') : req.ip

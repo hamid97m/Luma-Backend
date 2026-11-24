@@ -102,21 +102,36 @@ describe('GET /asks/friends', () => {
 })
 
 describe('friends from share links', () => {
-  it('whoever opened her link is a friend both ways — existing account or signed up later', async () => {
-    const { tokens } = await createWithLink(2)
+  it('whoever answered her link is a friend both ways — existing account or signed up later', async () => {
+    const { tokens } = await createWithLink(3)
     // Already has an account.
     const leila = await createProfile({ name: 'Leila', gender: 'woman', looking_for: 'men' })
     expect((await openLink(tokens[0], tgAccount(leila.telegram_id, 'Leila'))).json().state).toBe('ready')
-    // No account yet: opens, declares, signs up afterwards.
+    await answerLink(tokens[0], leila.telegram_id, { verdict: 'yes' })
+    // No account yet: opens, declares, answers, signs up afterwards.
     const tg = tgAccount(777_123, 'Mina')
-    await openLink(tokens[1], tg)
     await declare(tokens[1], tg, 'female')
+    await answerLink(tokens[1], tg, { verdict: 'unsure' })
     const mina = await createProfile({ name: 'Mina', gender: 'woman', looking_for: 'men', telegram_id: tg })
+    // Opened but never answered: not a friend.
+    const roya = await createProfile({ name: 'Roya', gender: 'woman', looking_for: 'men' })
+    expect((await openLink(tokens[2], tgAccount(roya.telegram_id, 'Roya'))).json().state).toBe('ready')
 
     const mine = (await app.inject({ method: 'GET', url: '/asks/friends', headers: asUser(sara) })).json().friends
     expect(mine.map((f: any) => f.name).sort()).toEqual(['Leila', 'Mina', 'Negar'])
     const hers = (await app.inject({ method: 'GET', url: '/asks/friends', headers: asUser(mina) })).json().friends
     expect(hers.map((f: any) => f.name)).toEqual(['Sara'])
+  })
+
+  it('a block between her and a friend removes the friend and stops asks/links for that pair', async () => {
+    await block(negar, sara)
+    const mine = (await app.inject({ method: 'GET', url: '/asks/friends', headers: asUser(sara) })).json().friends
+    expect(mine).toEqual([])
+    const res = await create({ targetId: amir.id, question: 'reply', memberIds: [negar.id], linkCount: 0 })
+    expect(res.statusCode).toBe(400)
+    // Negar opening Sara's share link sees it as closed.
+    const { tokens } = await createWithLink()
+    expect((await openLink(tokens[0], tgAccount(negar.telegram_id, 'Negar'))).json().state).toBe('closed')
   })
 })
 
@@ -239,13 +254,25 @@ describe('link: landing, claim, lock', () => {
   it('a second Telegram account gets taken and the open is recorded', async () => {
     const { tokens } = await createWithLink()
     await openLink(tokens[0], tgAccount(555_001))
+    await declare(tokens[0], 555_001, 'female')
     const res = await openLink(tokens[0], tgAccount(555_002))
     expect(res.json()).toEqual({ state: 'taken' })
     const [rec] = await sql`select advisor_tg_id, foreign_open_at from ask_recipients`
     expect(rec.advisor_tg_id).toBe(555_001)
     expect(rec.foreign_open_at).not.toBeNull()
     // The original account still gets in.
-    expect((await openLink(tokens[0], 555_001)).json().state).toBe('need_gender')
+    expect((await openLink(tokens[0], 555_001)).json().state).toBe('ready')
+  })
+
+  it('nothing is claimed until gender is declared — stopping at the gender step never locks the link', async () => {
+    const { tokens } = await createWithLink()
+    expect((await openLink(tokens[0], tgAccount(555_011))).json().state).toBe('need_gender')
+    const [rec] = await sql`select advisor_tg_id from ask_recipients`
+    expect(rec.advisor_tg_id).toBeNull()
+    // The real friend opens later and gets in.
+    const f = tgAccount(555_012)
+    expect((await declare(tokens[0], f, 'female')).json().state).toBe('ready')
+    expect((await openLink(tokens[0], 555_011)).json()).toEqual({ state: 'taken' })
   })
 
   it('declaring male releases the claim; he stays out, the friend gets in', async () => {

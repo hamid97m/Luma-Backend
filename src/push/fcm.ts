@@ -8,7 +8,7 @@ export type PushType =
   | 'message' | 'gift_message' | 'gift_intro' | 'match' | 'like' | 'like_reveal'
   | 'referral_qualified' | 'referral_reward' | 'premium_purchased' | 'account_paused'
   | 'photo_warning' | 'support_reply' | 'admin_message' | 'purchase_reminder'
-  | 'broadcast' | 'test' | 'message_read'
+  | 'broadcast' | 'test' | 'message_read' | 'message_request' | 'request_accepted'
 
 export interface PushPayload {
   type: PushType

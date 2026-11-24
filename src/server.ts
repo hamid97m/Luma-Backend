@@ -15,6 +15,7 @@ import { photosRoutes } from './routes/photos.js'
 import { discoveryRoutes } from './routes/discovery.js'
 import { swipesRoutes } from './routes/swipes.js'
 import { directChatRoutes } from './routes/directChat.js'
+import { requestsRoutes } from './routes/requests.js'
 import { matchesRoutes } from './routes/matches.js'
 import { likesRoutes } from './routes/likes.js'
 import { messagesRoutes } from './routes/messages.js'
@@ -208,6 +209,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(discoveryRoutes)
   await app.register(swipesRoutes)
   await app.register(directChatRoutes)
+  await app.register(requestsRoutes)
   await app.register(matchesRoutes)
   await app.register(likesRoutes)
   await app.register(messagesRoutes)

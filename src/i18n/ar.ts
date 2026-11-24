@@ -6,6 +6,8 @@ export const ar = {
   bot: {
     openAppButton: 'افتح لوما ❤️',
     replyButton: 'رد',
+    seeRequestButton: 'عرض الطلب',
+    openChatButton: 'فتح المحادثة',
     start:
       'تفضّل بالدخول → مطابقاتك في انتظارك 💫 يمكنك إيقاف حسابك مؤقتًا أو حذفه في أي وقت.',
     description: [
@@ -35,6 +37,8 @@ export const ar = {
     newMessage: (name: string, body: string) => `رسالة جديدة من ${name}\n${body}`,
     giftIntro: (name: string, emoji: string) =>
       `${name} أرسل لك هدية ${emoji} — افتح لوما لترى من!`,
+    messageRequest: (name: string) => `📩 ${name} أرسل لك طلب مراسلة`,
+    requestAccepted: (name: string) => `تم قبول طلب مراسلتك من ${name} 🎉 يمكنكما الدردشة الآن`,
     paused: 'راجعنا صورة ملفك ويبدو أنها غير حقيقية أو بها مشكلة، لذلك تم إخفاء ملفك مؤقتًا. من فضلك ارفع صورة حقيقية وواضحة لنفسك في لوما ليظهر ملفك من جديد ✨',
     fakePhotoWarningWoman:
       'أُبلغ عن صورة ملفك على أنها ليست لكِ. أنتِ جميلة، ولا حاجة لصورة شخص آخر. من تعرفينهم لن يروكِ هنا. ضعي صورة حقيقية لكِ.',

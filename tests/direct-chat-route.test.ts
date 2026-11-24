@@ -19,8 +19,10 @@ let target: Record<string, any>
 beforeEach(async () => {
   await resetDb()
   app = await buildApp()
-  me = await createUser({ name: 'Ali' })
-  target = await createUser({ name: 'Sara', username: 'sara', gender: 'woman', looking_for: 'men' })
+  // The target is a man: these chats open right away. A woman gets a message
+  // request instead (message-requests.test.ts).
+  me = await createUser({ name: 'Ali', looking_for: 'men' })
+  target = await createUser({ name: 'Sam', username: 'sam', looking_for: 'men' })
   authAs(me)
 })
 
@@ -30,9 +32,9 @@ function post(targetUserId: unknown = target.id) {
 
 const matchesBetween = () => {
   const [u1, u2] = [me.id, target.id].sort()
-  return sql`select id from matches where user1_id = ${u1} and user2_id = ${u2}`
+  return sql`select id, created_at from matches where user1_id = ${u1} and user2_id = ${u2}`
 }
-const userPayload = () => ({ id: target.id, name: 'Sara' })
+const userPayload = () => ({ id: target.id, name: 'Sam' })
 
 describe('POST /discovery/direct-chat', () => {
   it('returns 401 when unauthenticated', async () => {
@@ -40,13 +42,13 @@ describe('POST /discovery/direct-chat', () => {
     expect(res.statusCode).toBe(401)
   })
 
-  it('creates a match (normalized pair) for a free woman and returns created:true', async () => {
+  it('creates a match (normalized pair) for a free caller and returns created:true', async () => {
     vi.mocked(checkAndCountDirectChat).mockResolvedValue({ gate: 'free' } as any)
     const res = await post()
     expect(res.statusCode).toBe(200)
     const rows = await matchesBetween()
     expect(rows).toHaveLength(1)
-    expect(res.json()).toEqual({ created: true, match: { id: rows[0].id, user: userPayload() } })
+    expect(res.json()).toEqual({ created: true, match: { id: rows[0].id, matchedAt: rows[0].created_at, user: userPayload() } })
   })
 
   it('seeds icebreakers (target first, then caller) for a newly created match', async () => {
@@ -66,7 +68,7 @@ describe('POST /discovery/direct-chat', () => {
     })
     const res = await post()
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ created: false, match: { id: raced!.id, user: userPayload() } })
+    expect(res.json()).toEqual({ created: false, match: { id: raced!.id, matchedAt: raced!.created_at, user: userPayload() } })
     expect(seedIcebreakers).not.toHaveBeenCalled()
     expect(await matchesBetween()).toHaveLength(1)
   })
@@ -76,7 +78,7 @@ describe('POST /discovery/direct-chat', () => {
     const existing = await createMatch(u1, u2)
     const res = await post()
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ created: false, match: { id: existing.id, user: userPayload() } })
+    expect(res.json()).toEqual({ created: false, match: { id: existing.id, matchedAt: existing.created_at, user: userPayload() } })
     expect(checkAndCountDirectChat).not.toHaveBeenCalled()
     expect(seedIcebreakers).not.toHaveBeenCalled()
   })
@@ -102,7 +104,7 @@ describe('POST /discovery/direct-chat', () => {
     const res = await post()
     expect(res.statusCode).toBe(200)
     const [row] = await matchesBetween()
-    expect(res.json()).toEqual({ created: true, match: { id: row.id, user: userPayload() }, directChat: { remaining: 2, resetAt: RESET_AT } })
+    expect(res.json()).toEqual({ created: true, match: { id: row.id, matchedAt: row.created_at, user: userPayload() }, directChat: { remaining: 2, resetAt: RESET_AT } })
   })
 
   it('404 when the target is missing/deleted', async () => {

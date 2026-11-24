@@ -122,6 +122,17 @@ async function guardedWindowUpdate(userId: string, expectedCount: number, w: Dir
   }
 }
 
+/** Give back a slot consumed for a request that turned out not to be created. Best effort. */
+export async function refundDirectChat(userId: string): Promise<void> {
+  try {
+    await sql`
+      update users set direct_chat_window_count = greatest(direct_chat_window_count - 1, 0)
+      where id = ${userId}`
+  } catch (err) {
+    console.error('[directChat] refund failed:', (err as Error)?.message ?? err)
+  }
+}
+
 /** Gate + counter for POST /discovery/direct-chat. Consumes a slot only for gate 'quota'. */
 export async function checkAndCountDirectChat(userId: string, nowMs = Date.now()): Promise<DirectChatCheck> {
   const me = await readWindowRow(userId)

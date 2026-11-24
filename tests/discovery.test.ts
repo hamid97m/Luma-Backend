@@ -73,6 +73,7 @@ describe('GET /discovery', () => {
       interests: [],
       location: null,
       nearby: false,
+      messageRequest: true,
       premium: true,
       photos: ['https://img1.jpg', 'https://img2.jpg'],
     }])

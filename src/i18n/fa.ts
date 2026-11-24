@@ -7,6 +7,8 @@ export const fa = {
     openAppButton: 'باز کردن لوما ❤️',
     // New-message notification button — deep-links straight into the chat.
     replyButton: 'پاسخ دادن',
+    seeRequestButton: 'دیدن درخواست',
+    openChatButton: 'باز کردن چت',
     start:
       'بیا داخل اپ → مچ‌ها منتظرتن 💫 هر وقت بخواهی می‌توانی حسابت را متوقف یا حذف کنی.',
     description: [
@@ -36,6 +38,8 @@ export const fa = {
     newMessage: (name: string, body: string) => `پیام جدید از ${name}\n${body}`,
     giftIntro: (name: string, emoji: string) =>
       `${name} برایت هدیه فرستاده ${emoji} — لوما را باز کن و ببین کی!`,
+    messageRequest: (name: string) => `📩 ${name} برایت درخواست پیام فرستاده`,
+    requestAccepted: (name: string) => `${name} درخواست پیامت را قبول کرد 🎉 حالا می‌توانید چت کنید`,
     paused: 'عکس پروفایلت را بررسی کردیم و به نظر می‌رسد غیرواقعی است یا مشکلی دارد، برای همین پروفایلت موقتاً از نمایش خارج شد. لطفاً یک عکس واقعی و استاندارد از خودت در لوما بارگذاری کن تا پروفایلت دوباره نمایش داده شود ✨',
     fakePhotoWarningWoman:
       'عکس پروفایلت غیرواقعی گزارش شده. خودت زیبایی و لازم نیست عکس شخص دیگری را بگذاری. کسانی که می‌شناسی اینجا تو را نمی‌بینند. یک عکس واقعی از خودت بگذار.',

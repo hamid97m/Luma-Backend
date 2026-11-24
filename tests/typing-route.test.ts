@@ -155,18 +155,20 @@ describe('global rate limit', () => {
 })
 
 describe('listener', () => {
-  it('routes luma_typing to hub.handleTyping and luma_chat to hub.handleNotify', async () => {
-    const hub = { handleNotify: vi.fn(), handleTyping: vi.fn(), resyncAll: vi.fn() }
+  it('routes luma_typing, luma_request and luma_chat to their hub handlers', async () => {
+    const hub = { handleNotify: vi.fn(), handleTyping: vi.fn(), handleRequest: vi.fn(), resyncAll: vi.fn() }
     const info = vi.fn()
     startChatListener({ info, warn: () => {} }, hub as unknown as ChatHub)
-    // Both onlisten callbacks fired.
-    await until(() => info.mock.calls.length >= 2)
-    expect(info.mock.calls.map((c) => c[1]).sort()).toEqual(['luma_chat', 'luma_typing'])
+    // Every onlisten callback fired.
+    await until(() => info.mock.calls.length >= 3)
+    expect(info.mock.calls.map((c) => c[1]).sort()).toEqual(['luma_chat', 'luma_request', 'luma_typing'])
 
     await sql`select pg_notify('luma_typing', 'typing-payload')`
+    await sql`select pg_notify('luma_request', 'request-payload')`
     await sql`select pg_notify('luma_chat', 'chat-payload')`
-    await until(() => hub.handleTyping.mock.calls.length > 0 && hub.handleNotify.mock.calls.length > 0)
+    await until(() => hub.handleTyping.mock.calls.length > 0 && hub.handleRequest.mock.calls.length > 0 && hub.handleNotify.mock.calls.length > 0)
     expect(hub.handleTyping.mock.calls).toEqual([['typing-payload']])
+    expect(hub.handleRequest.mock.calls).toEqual([['request-payload']])
     expect(hub.handleNotify.mock.calls).toEqual([['chat-payload']])
     expect(hub.resyncAll).toHaveBeenCalledTimes(1) // typing listen doesn't resync
   })

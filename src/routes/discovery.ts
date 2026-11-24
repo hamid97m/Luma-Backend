@@ -32,6 +32,7 @@ type Candidate = {
   age: number
   bio: string | null
   telegram_id: number
+  is_woman: boolean
   interests: string[] | null
   location: string | null
   // Ranking-only: deliberately left out of the response below.
@@ -126,8 +127,8 @@ export async function discoveryRoutes(app: FastifyInstance) {
     //             depend on that coincidence). age > 0 backstop. At least one photo
     //             (was the user_photos!inner embed): a photo-less profile must never
     //             surface as a blank card. Excludes the viewer, everyone she liked or
-    //             passed within 9 days (older passes recycle), blocks either way, and
-    //             hidden likers.
+    //             passed within 9 days (older passes recycle), everyone the viewer ever sent a message request
+    //             (any status), blocks either way, and hidden likers.
     //  likers   — tier 1: people who already liked the viewer; top LIKER_POOL by
     //             last_active, MAX_LIKER_SLOTS of them at random.
     //  city / country / language / rest — tiers 2-5, each the FILLER_POOL most
@@ -139,7 +140,8 @@ export async function discoveryRoutes(app: FastifyInstance) {
       rows = await sql<Candidate[]>`
         with pool as (
           select u.id, u.name, u.age, u.bio, u.telegram_id, u.interests, u.location,
-                 u.geo_city, u.geo_country, u.locale, u.premium_until, u.last_active, u.is_seed
+                 u.geo_city, u.geo_country, u.locale, u.premium_until, u.last_active, u.is_seed,
+                 u.gender = 'woman' as is_woman
           from users u
           where u.is_active = true
             and u.account_status = 'active'
@@ -159,6 +161,9 @@ export async function discoveryRoutes(app: FastifyInstance) {
               select 1 from blocks b
               where (b.blocker_id = ${userId} and b.blocked_id = u.id)
                  or (b.blocker_id = u.id and b.blocked_id = ${userId}))
+            and not exists (
+              select 1 from message_requests mr
+              where mr.sender_id = ${userId} and mr.recipient_id = u.id)
             and u.id <> all(${hiddenLikers}::uuid[])
             ${hideAllLikers
               ? sql`and not exists (
@@ -214,11 +219,11 @@ export async function discoveryRoutes(app: FastifyInstance) {
           union all select 'language', null, * from language
           union all select 'rest', null, * from rest
           union all select 'seed', seed_rank, id, name, age, bio, telegram_id, interests, location,
-                           geo_city, geo_country, locale, premium_until, last_active, is_seed
+                           geo_city, geo_country, locale, premium_until, last_active, is_seed, is_woman
                     from seeds
         )
         select t.tier, t.seed_rank, t.id, t.name, t.age, t.bio, t.telegram_id, t.interests,
-               t.location, t.geo_city, t.geo_country, t.locale, t.premium_until,
+               t.location, t.geo_city, t.geo_country, t.locale, t.premium_until, t.is_woman,
                coalesce((
                  select json_agg(json_build_object('id', ph.id, 'url', ph.url, 'position', ph.position))
                  from user_photos ph where ph.user_id = t.id
@@ -279,6 +284,9 @@ export async function discoveryRoutes(app: FastifyInstance) {
       premium: isPremiumActive(p.premium_until ?? null),
       // "همین نزدیکی" badge only when both resolve to the same normalized city.
       nearby: isSameCity(viewer, p),
+      // A direct chat needs an opener (it becomes a message request). Seeds
+      // answer the same as real women, so this never gives them away.
+      messageRequest: p.is_woman === true,
       photos: [...p.user_photos]
         .sort((a, b) => a.position - b.position)
         .map((ph) => ph.url),

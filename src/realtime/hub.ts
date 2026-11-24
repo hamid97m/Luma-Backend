@@ -1,6 +1,7 @@
 import { sql } from '../db.js'
 import { loadMessagesByIds, type MessageJson } from '../messaging/messageJson.js'
 import { parseTypingNotify } from './typing.js'
+import { parseRequestNotify } from './requests.js'
 
 /**
  * Real-time chat hub: userId → that user's open SSE streams.
@@ -272,6 +273,14 @@ export function createChatHub(deps: HubDeps) {
     sendTo(n.to, formatSse('typing', { matchId: n.matchId, userId: n.from }))
   }
 
+  /** A `luma_request` payload → `request` to the recipient's streams. Missed
+   *  ones need no recovery: the client refetches its requests on (re)connect. */
+  function handleRequest(payload: string): void {
+    const n = parseRequestNotify(payload)
+    if (!n) return
+    sendTo(n.to, formatSse('request', { requestId: n.requestId }))
+  }
+
   /** Every stream: "you may have missed events — refetch". */
   function resyncAll(): void {
     const chunk = formatSse('resync', {})
@@ -282,6 +291,7 @@ export function createChatHub(deps: HubDeps) {
     addStream,
     handleNotify,
     handleTyping,
+    handleRequest,
     resyncAll,
     isConnected,
     isOnline,

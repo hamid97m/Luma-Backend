@@ -263,6 +263,11 @@ export function chatUrl(matchId: string): string {
   return `${process.env.WEB_URL!}?screen=matches&chat=${encodeURIComponent(matchId)}`
 }
 
+/** Deep link to the Requests inbox on the Matches screen. */
+export function requestsUrl(): string {
+  return `${process.env.WEB_URL!}?screen=matches&tab=requests`
+}
+
 export interface MatchNotifyRecipient {
   telegramId: number
   matchName: string
@@ -520,6 +525,27 @@ export async function notifyGiftIntro(toTelegramId: number, senderName: string, 
   const bot = getBot()
   const keyboard = new InlineKeyboard().webApp(t.bot.openAppButton, process.env.WEB_URL!)
   await bot.api.sendMessage(toTelegramId, t.notify.giftIntro(senderName, emoji), { reply_markup: keyboard })
+}
+
+/** DM a woman that a message request is waiting (text only: no photo, no body). */
+export async function notifyMessageRequest(toTelegramId: number, senderName: string, locale: Locale | null): Promise<void> {
+  const t = tFor(locale)
+  const bot = getBot()
+  const keyboard = new InlineKeyboard().webApp(t.bot.seeRequestButton, requestsUrl())
+  await bot.api.sendMessage(toTelegramId, t.notify.messageRequest(senderName), { reply_markup: keyboard })
+}
+
+/** DM the sender that their message request was accepted; opens the chat. */
+export async function notifyRequestAccepted(
+  toTelegramId: number,
+  accepterName: string,
+  matchId: string,
+  locale: Locale | null,
+): Promise<void> {
+  const t = tFor(locale)
+  const bot = getBot()
+  const keyboard = new InlineKeyboard().webApp(t.bot.openChatButton, chatUrl(matchId))
+  await bot.api.sendMessage(toTelegramId, t.notify.requestAccepted(accepterName), { reply_markup: keyboard })
 }
 
 /** Text of the support-reply DM (also the push body): preview capped at 200

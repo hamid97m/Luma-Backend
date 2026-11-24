@@ -1,6 +1,7 @@
 import {
   notifyMatch, notifyNewLike, notifyNewMessage, notifyGiftIntro, notifyReferralQualified, notifyReferralReward,
   notifyPremiumPurchased, notifyPaused, notifyFakePhotoWarning, notifyTicketReply, sendBroadcastMessage,
+  notifyMessageRequest, notifyRequestAccepted,
   referralRewardText, fakePhotoWarningText, ticketReplyText,
 } from '../bot.js'
 import { sendPushToUser, isPushConfigured, type PushPayload } from '../push/fcm.js'
@@ -74,7 +75,7 @@ export async function deliverToUser(
 
 /** linkFields that never throws: with WEB_URL unset (tests, misconfig) the
  * link is empty but screen/chatId still let the app route. */
-export function safeLinkFields(opts: { screen?: string; chat?: string } = {}): ReturnType<typeof linkFields> {
+export function safeLinkFields(opts: { screen?: string; tab?: string; chat?: string } = {}): ReturnType<typeof linkFields> {
   try {
     return linkFields(opts)
   } catch {
@@ -202,6 +203,36 @@ export async function notifyUserGiftIntro(
     () => ({ type: 'gift_intro', title: t.push.title.gift, body: stripHtml(t.notify.giftIntro(senderName, emoji)), ...homeLink() }),
     () => notifyGiftIntro(tg(u), senderName, emoji, localeOf(u)),
     { ignoreBotOptOut: true },
+  )
+}
+
+/** A message request is waiting in her Requests inbox. Rethrows bot errors. */
+export async function notifyUserMessageRequest(u: NotifyUser, senderName: string): Promise<'push' | 'bot' | 'none'> {
+  const t = tFor(localeOf(u))
+  return deliverToUser(
+    u,
+    () => ({
+      type: 'message_request', title: senderName, body: stripHtml(t.notify.messageRequest(senderName)),
+      ...safeLinkFields({ screen: 'matches', tab: 'requests' }),
+    }),
+    () => notifyMessageRequest(tg(u), senderName, localeOf(u)),
+  )
+}
+
+/** She accepted his message request; opens the new chat. Rethrows bot errors. */
+export async function notifyUserRequestAccepted(
+  u: NotifyUser,
+  accepterName: string,
+  matchId: string,
+): Promise<'push' | 'bot' | 'none'> {
+  const t = tFor(localeOf(u))
+  return deliverToUser(
+    u,
+    () => ({
+      type: 'request_accepted', title: accepterName, body: stripHtml(t.notify.requestAccepted(accepterName)),
+      ...safeLinkFields({ screen: 'matches', chat: matchId }),
+    }),
+    () => notifyRequestAccepted(tg(u), accepterName, matchId, localeOf(u)),
   )
 }
 

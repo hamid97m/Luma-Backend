@@ -1,6 +1,7 @@
 import { sql } from '../db.js'
 import { chatHub, type ChatHub } from './hub.js'
 import { TYPING_CHANNEL } from './typing.js'
+import { REQUEST_CHANNEL } from './requests.js'
 
 export const CHAT_CHANNEL = 'luma_chat'
 export { TYPING_CHANNEL }
@@ -25,7 +26,7 @@ function listenWithRetry(log: Log, channel: string, onNotify: (payload: string) 
 }
 
 /**
- * LISTEN on `luma_chat` and `luma_typing` (one dedicated connection, managed by
+ * LISTEN on `luma_chat`, `luma_typing` and `luma_request` (one dedicated connection, managed by
  * postgres.js) and feed the hub. postgres.js reconnects and re-LISTENs on its
  * own, calling `onlisten` each time; every (re)listen of `luma_chat` sends
  * `resync` to open streams, since notifies during the gap are gone (on the first
@@ -37,4 +38,5 @@ function listenWithRetry(log: Log, channel: string, onNotify: (payload: string) 
 export function startChatListener(log: Log, hub: ChatHub = chatHub): void {
   listenWithRetry(log, CHAT_CHANNEL, (payload) => hub.handleNotify(payload), () => hub.resyncAll())
   listenWithRetry(log, TYPING_CHANNEL, (payload) => hub.handleTyping(payload))
+  listenWithRetry(log, REQUEST_CHANNEL, (payload) => hub.handleRequest(payload))
 }

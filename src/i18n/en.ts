@@ -6,6 +6,8 @@ export const en = {
   bot: {
     openAppButton: 'Open Luma ❤️',
     replyButton: 'Reply',
+    seeRequestButton: 'See request',
+    openChatButton: 'Open chat',
     start:
       'Come on in → your matches are waiting 💫 You can pause or delete your account any time.',
     description: [
@@ -35,6 +37,8 @@ export const en = {
     newMessage: (name: string, body: string) => `New message from ${name}\n${body}`,
     giftIntro: (name: string, emoji: string) =>
       `${name} sent you a gift ${emoji} — open Luma to see who!`,
+    messageRequest: (name: string) => `📩 ${name} sent you a message request`,
+    requestAccepted: (name: string) => `${name} accepted your message request 🎉 You can chat now`,
     paused: 'We reviewed your profile photo and it looks fake or has a problem, so your profile is temporarily hidden. Please upload a real, standard photo of yourself in Luma to be visible again ✨',
     fakePhotoWarningWoman:
       'Your profile photo was reported as fake. You are beautiful, and there is no need for someone else\'s photo. People you know will not see you here. Upload a real photo of yourself.',

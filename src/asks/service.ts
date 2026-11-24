@@ -134,29 +134,50 @@ export type AskFriend = { id: string; name: string; photoUrl: string | null; las
 /** Save the friendships behind current asks, so they survive the 30-day purge.
  *  Same rule as listFriends: a member she asked, or whoever answered a share link
  *  (matched by Telegram id, so an account created later counts too). Only the pair
- *  is stored; gender/ban/block filters stay in listFriends. Returns rows written. */
+ *  is stored; gender/ban/block filters stay in listFriends. A removed friendship is
+ *  revived only by answering a share link made after the removal. Returns rows written. */
 export async function persistFriends(): Promise<number> {
   const rows = await sql`
-    insert into ask_friends (user_a, user_b, last_at)
+    insert into ask_friends as f (user_a, user_b, last_at)
     select least(p.x, p.y), greatest(p.x, p.y), max(p.at)
     from (
-      select r.requester_id as x, ar.recipient_id as y, coalesce(ar.answered_at, r.created_at) as at
+      select r.requester_id as x, ar.recipient_id as y, coalesce(ar.answered_at, r.created_at) as at,
+             case when ar.kind = 'link' then r.created_at end as link_at
       from ask_recipients ar join ask_requests r on r.id = ar.request_id
       where ar.recipient_id is not null and (ar.kind = 'member' or ar.answered_at is not null)
       union all
-      select r.requester_id, u.id, ar.answered_at
+      select r.requester_id, u.id, ar.answered_at, r.created_at
       from ask_recipients ar join ask_requests r on r.id = ar.request_id
       join users u on u.telegram_id = ar.advisor_tg_id
       where ar.kind = 'link' and ar.answered_at is not null
     ) p
     join users a on a.id = p.x and a.deleted_at is null
     join users b on b.id = p.y and b.deleted_at is null
-    where p.x <> p.y
+    left join ask_friends old on old.user_a = least(p.x, p.y) and old.user_b = greatest(p.x, p.y)
+    where p.x <> p.y and (old.removed_at is null or p.link_at > old.removed_at)
     group by 1, 2
-    on conflict (user_a, user_b) do update set last_at = excluded.last_at
-      where ask_friends.last_at < excluded.last_at
+    on conflict (user_a, user_b) do update
+      set last_at = greatest(f.last_at, excluded.last_at), removed_at = null
+      where f.last_at < excluded.last_at or f.removed_at is not null
     returning 1`
   return rows.length
+}
+
+/** SQL: this pair's friendship was removed by either side. */
+const friendRemoved = (x: ReturnType<typeof sql>, y: ReturnType<typeof sql>) => sql`exists (
+  select 1 from ask_friends fr
+  where fr.user_a = least(${x}, ${y}) and fr.user_b = greatest(${x}, ${y}) and fr.removed_at is not null)`
+
+/** Remove a friend, for both sides. Nobody is notified; asks already sent stay as
+ *  they are, but no further reminders go out. False when she isn't a friend. */
+export async function removeFriend(userId: string, friendId: string): Promise<boolean> {
+  if (!isUuid(friendId)) return false
+  if (!(await listFriends(userId, 1000)).some((f) => f.id === friendId)) return false
+  await sql`
+    insert into ask_friends (user_a, user_b, last_at, removed_at)
+    select least(${userId}::uuid, ${friendId}::uuid), greatest(${userId}::uuid, ${friendId}::uuid), now(), now()
+    on conflict (user_a, user_b) do update set removed_at = now()`
+  return true
 }
 
 export async function listFriends(userId: string, limit = 20): Promise<AskFriend[]> {
@@ -190,7 +211,7 @@ export async function listFriends(userId: string, limit = 20): Promise<AskFriend
       union all
       -- Saved friendships: the asks behind them may be purged already.
       select case when f.user_a = ${userId} then f.user_b else f.user_a end, f.last_at
-      from ask_friends f where f.user_a = ${userId} or f.user_b = ${userId}
+      from ask_friends f where (f.user_a = ${userId} or f.user_b = ${userId}) and f.removed_at is null
     )
     select u.id, u.name, ${primaryPhoto(sql`u.id`)} as photo_url, max(i.at) as last_at
     from interactions i join users u on u.id = i.friend_id
@@ -200,6 +221,7 @@ export async function listFriends(userId: string, limit = 20): Promise<AskFriend
         select 1 from blocks b
         where (b.blocker_id = u.id and b.blocked_id = ${userId})
            or (b.blocker_id = ${userId} and b.blocked_id = u.id))
+      and not ${friendRemoved(sql`${userId}::uuid`, sql`u.id`)}
     group by u.id
     order by last_at desc
     limit ${limit}`
@@ -365,7 +387,7 @@ function canRemind(r: DetailRecipientRow, ask: { status: AskStatus; createdAt: s
   return ask.status === 'open' && !r.answered_at && !r.reminded_at &&
     now - new Date(ask.createdAt).getTime() >= ASK_REMIND_AFTER_MS &&
     (r.kind === 'member' ? Boolean(r.recipient_id) : r.advisor_tg_id !== null) &&
-    // A member who has since deleted (or been banned) gets no more DMs.
+    // A member who has since deleted, been banned, or been removed as a friend gets no more DMs.
     !r.claimer_gone &&
     // Never remind a man: a finished member's own gender decides, else the declared one.
     (r.claimer_age && r.claimer_age > 0 ? r.claimer_gender === 'woman' : r.advisor_gender !== 'male')
@@ -383,7 +405,8 @@ export async function getAskDetail(userId: string, askId: string): Promise<AskDe
       select ar.id, ar.kind, ar.recipient_id, ar.advisor_tg_id, ar.advisor_name, m.name as member_name,
              ar.seen_at, ar.verdict, ar.note, ar.answered_at, ar.reminded_at, ar.foreign_open_at, ar.created_at,
              ar.advisor_gender, m.gender::text as claimer_gender, m.age as claimer_age,
-             (m.deleted_at is not null or m.banned_at is not null) as claimer_gone
+             (m.deleted_at is not null or m.banned_at is not null
+               or ${friendRemoved(sql`${userId}::uuid`, sql`ar.recipient_id`)}) as claimer_gone
       from ask_recipients ar left join users m on m.id = ar.recipient_id
       where ar.request_id = ${askId}
       order by ar.created_at asc, ar.id asc`,
@@ -411,7 +434,8 @@ export async function remindRecipient(userId: string, askId: string, recipientId
     select ar.id, ar.kind, ar.recipient_id, ar.advisor_tg_id, ar.advisor_name, null as member_name,
            ar.seen_at, ar.verdict, ar.note, ar.answered_at, ar.reminded_at, ar.foreign_open_at, ar.created_at,
            ar.advisor_gender, m.gender::text as claimer_gender, m.age as claimer_age,
-           (m.deleted_at is not null or m.banned_at is not null) as claimer_gone,
+           (m.deleted_at is not null or m.banned_at is not null
+               or ${friendRemoved(sql`${userId}::uuid`, sql`ar.recipient_id`)}) as claimer_gone,
            ${effStatus()} as status, r.created_at as ask_created_at, rq.name as requester_name
     from ask_recipients ar
     join ask_requests r on r.id = ar.request_id

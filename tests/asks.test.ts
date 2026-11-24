@@ -157,7 +157,7 @@ describe('permanent friends', () => {
     expect(await friendsOf(roya)).toEqual([])
     // Only the pair is kept, and she can be asked directly.
     const rows = await sql`select * from ask_friends`
-    expect(Object.keys(rows[0]).sort()).toEqual(['last_at', 'user_a', 'user_b'])
+    expect(Object.keys(rows[0]).sort()).toEqual(['last_at', 'removed_at', 'user_a', 'user_b'])
     expect(JSON.stringify(rows)).not.toContain(ask.id)
     const res = await create({ targetId: amir.id, question: 'reply', memberIds: [leila.id], linkCount: 0 })
     expect(res.statusCode).toBe(200)
@@ -195,6 +195,71 @@ describe('permanent friends', () => {
     await runAskJob()
     expect(await sql`select * from ask_friends`).toEqual(one)
     expect(one).toHaveLength(1)
+  })
+})
+
+describe('removing a friend', () => {
+  const friendsOf = async (u: any) =>
+    (await app.inject({ method: 'GET', url: '/asks/friends', headers: asUser(u) })).json().friends.map((f: any) => f.name).sort()
+  const remove = (who: any, id: string) =>
+    app.inject({ method: 'DELETE', url: `/asks/friends/${id}`, headers: asUser(who) })
+  const friendByLink = async (name: string) => {
+    const f = await createProfile({ name, gender: 'woman', looking_for: 'men' })
+    const { tokens } = await createWithLink()
+    await openLink(tokens[0], tgAccount(f.telegram_id, name))
+    await answerLink(tokens[0], f.telegram_id, { verdict: 'yes' })
+    return f
+  }
+
+  it('either side removes it for both, and the job does not bring it back', async () => {
+    const leila = await friendByLink('Leila')
+    expect((await remove(leila, sara.id)).statusCode).toBe(200)
+    expect(await friendsOf(sara)).toEqual(['Negar'])
+    expect(await friendsOf(leila)).toEqual([])
+    await runAskJob()
+    await runAskJob()
+    expect(await friendsOf(sara)).toEqual(['Negar'])
+    expect(await friendsOf(leila)).toEqual([])
+  })
+
+  it('works for an invited friend too, and she can no longer be asked directly', async () => {
+    expect((await remove(sara, negar.id)).statusCode).toBe(200)
+    expect(await friendsOf(sara)).toEqual([])
+    expect((await create({ targetId: amir.id, question: 'reply', memberIds: [negar.id], linkCount: 0 })).statusCode).toBe(400)
+  })
+
+  it('an ask already sent stays, but she gets no reminder; answering it does not revive the friendship', async () => {
+    await create({ targetId: amir.id, question: 'reply', memberIds: [negar.id], linkCount: 0 })
+    await sql`update ask_requests set created_at = now() - interval '13 hours'`
+    const [rec] = await sql`select id, request_id from ask_recipients`
+    await remove(negar, sara.id)
+    const detail = (await app.inject({ method: 'GET', url: `/asks/${rec.request_id}`, headers: asUser(sara) })).json()
+    expect(detail.recipients[0].canRemind).toBe(false)
+    expect((await app.inject({ method: 'POST', url: `/asks/${rec.request_id}/remind/${rec.id}`, headers: asUser(sara) })).statusCode).toBe(409)
+    const ans = await app.inject({ method: 'POST', url: `/asks/for-me/${rec.id}/answer`, headers: asUser(negar), payload: { verdict: 'yes' } })
+    expect(ans.statusCode).toBe(200)
+    await runAskJob()
+    expect(await friendsOf(sara)).toEqual([])
+  })
+
+  it('answering a share link made after the removal makes them friends again', async () => {
+    const leila = await friendByLink('Leila')
+    await runAskJob()
+    await remove(sara, leila.id)
+    await sql`update ask_requests set status = 'closed', closed_at = now()`
+    const { tokens } = await createWithLink()
+    await openLink(tokens[0], leila.telegram_id)
+    await answerLink(tokens[0], leila.telegram_id, { verdict: 'no' })
+    await runAskJob()
+    expect(await friendsOf(sara)).toEqual(['Leila', 'Negar'])
+  })
+
+  it('404 for someone who is not a friend or a bad id; 401 without auth; nothing written', async () => {
+    const roya = await createProfile({ name: 'Roya', gender: 'woman', looking_for: 'men' })
+    expect((await remove(sara, roya.id)).statusCode).toBe(404)
+    expect((await remove(sara, 'nope')).statusCode).toBe(404)
+    expect((await app.inject({ method: 'DELETE', url: `/asks/friends/${negar.id}` })).statusCode).toBe(401)
+    expect(await sql`select 1 from ask_friends`).toHaveLength(0)
   })
 })
 

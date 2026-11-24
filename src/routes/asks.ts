@@ -9,7 +9,7 @@ import {
   askConfigFor, listFriends, createAsk, listMyAsks, getAskDetail, remindRecipient,
   getRecipientViewForMember, answerAsMember, openLink, answerByLink, parseClientEvent,
   recordAskEvent, requestIdForToken, askPhotoObject, type CreateAskInput, type LinkCaller,
-  getAskTargetCard,
+  getAskTargetCard, removeFriend,
 } from '../asks/service.js'
 
 /** Link routes authenticate themselves: raw Telegram initData in Authorization
@@ -35,6 +35,12 @@ export async function asksRoutes(app: FastifyInstance) {
   app.get('/asks/friends', async (req, reply) => {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
     return { friends: await listFriends(req.userId) }
+  })
+
+  app.delete('/asks/friends/:id', async (req, reply) => {
+    if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
+    const ok = await removeFriend(req.userId, (req.params as { id: string }).id)
+    return ok ? { ok: true } : reply.status(404).send({ error: 'not_found' })
   })
 
   app.post('/asks', { config: { rateLimit: { max: 30, timeWindow: '1 hour' } } }, async (req, reply) => {

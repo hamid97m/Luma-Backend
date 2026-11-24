@@ -19,6 +19,7 @@ import { adminTextChecksRoutes } from './text-checks.js'
 import { adminGenderFlagsRoutes } from './gender-flags.js'
 import { adminSignupFunnelRoutes } from './signup-funnel.js'
 import { adminDeletionReasonsRoutes } from './deletion-reasons.js'
+import { adminAskFriendRoutes } from './ask-friend.js'
 import { adminReportAiChecksRoutes } from './report-ai-checks.js'
 
 declare module 'fastify' {
@@ -66,4 +67,5 @@ export async function adminRoutes(app: FastifyInstance) {
   await app.register(adminSignupFunnelRoutes)
   await app.register(adminDeletionReasonsRoutes)
   await app.register(adminReportAiChecksRoutes)
+  await app.register(adminAskFriendRoutes)
 }

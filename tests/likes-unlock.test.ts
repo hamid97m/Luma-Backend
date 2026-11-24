@@ -88,6 +88,7 @@ describe('grantFriendLikeDays', () => {
     ['an unfinished signup', {}, false],
     ['a banned friend', { banned_at: '2026-01-01T00:00:00Z' }, true],
     ['a paused friend', { paused_at: '2026-01-01T00:00:00Z' }, true],
+    ['a suspended friend', { suspended_until: '2099-01-01T00:00:00Z' }, true],
     ['a deleted friend', { deleted_at: '2026-01-01T00:00:00Z' }, true],
   ])('does not count %s', async (_n, extra, qualified) => {
     await friend(extra, qualified)
@@ -136,7 +137,17 @@ describe('grantFriendLikeDays', () => {
     const f = await friend()
     await sql`update referrals set qualified_at = now() - interval '11 minutes' where referred_id = ${f.id}`
     await grantFriendLikeDays(her.id)
+    expect(await daysLeft()).toBe(0) // her photo is still fresh
+    await sql`update user_photos set created_at = now() - interval '11 minutes' where user_id = ${f.id}`
+    await grantFriendLikeDays(her.id)
     expect(await daysLeft()).toBe(7)
+  })
+
+  it('does not count a friend without a photo', async () => {
+    const f = await friend()
+    await sql`delete from user_photos where user_id = ${f.id}`
+    await grantFriendLikeDays(her.id)
+    expect(await daysLeft()).toBe(0)
   })
 })
 
@@ -146,6 +157,8 @@ describe('signup paths', () => {
     await maybeQualifyReferral(f.id)
     expect(await daysLeft()).toBe(7)
     expect(await sql`select 1 from referral_rewards`).toHaveLength(0)
+    expect(bot.notifyLikesUnlocked).toHaveBeenCalledTimes(1)
+    expect(bot.notifyReferralQualified).not.toHaveBeenCalled()
     expect((await sql`select bonus_swipes from users where id = ${her.id}`)[0].bonus_swipes).toBe(0)
   })
 

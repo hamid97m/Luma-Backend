@@ -43,7 +43,7 @@ describe('admin reports', () => {
     expect(body.total).toBe(2)
     expect(body.pageCount).toBe(1)
     expect(body.items[0]).toEqual({
-      reportedUser: { id: sara.id, name: 'Sara', photo: 'p.jpg', bannedAt: null, deletedAt: null },
+      reportedUser: { id: sara.id, name: 'Sara', photo: 'p.jpg', bannedAt: null, deletedAt: null, suspendedUntil: null },
       reportCount: 3,
       reasons: ['fake', 'spam'],
       contexts: ['discovery', 'chat'],
@@ -89,12 +89,12 @@ describe('admin reports', () => {
     const body = res.json()
     expect(body.reportedUser).toEqual({
       id: sara.id, name: 'Sara', age: 28, gender: 'woman', bio: 'hi', username: 'sara',
-      telegramId: sara.telegram_id, bannedAt: null, deletedAt: null, photos: ['a.jpg', 'b.jpg'],
+      telegramId: sara.telegram_id, bannedAt: null, deletedAt: null, suspendedUntil: null, photos: ['a.jpg', 'b.jpg'],
     })
     expect(body.reports.map((r: any) => r.id)).toEqual([pending.id, old.id])
     expect(body.reports[0]).toEqual({
       id: pending.id, reporterId: reporter.id, reporterName: 'Reporter', context: 'discovery',
-      reason: 'fake', note: 'n', matchId: null, status: 'pending', createdAt: '2026-08-01T00:00:00.000Z',
+      reason: 'fake', note: 'n', matchId: null, status: 'pending', createdAt: '2026-08-01T00:00:00.000Z', ai: null,
     })
   })
 

@@ -243,8 +243,8 @@ export function scheduleMainPhotoCheck(userId: string, log: FastifyBaseLogger): 
   checkMainPhoto(userId)
     .then((verdict) => {
       if (verdict && !verdict.approved) log.info({ userId, reason: verdict.reason }, 'main photo rejected by AI check')
+      // An invited friend only counts once her photo is checked.
+      return grantAfterPhotoCheck(userId)
     })
     .catch((err) => log.warn({ err, userId }, 'main photo AI check failed'))
-    // An invited friend only counts once her photo is checked.
-    .then(() => grantAfterPhotoCheck(userId))
 }

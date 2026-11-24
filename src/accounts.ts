@@ -1,5 +1,6 @@
 import { sql } from './db.js'
 import { getBotUsername } from './bot.js'
+import { isSuspended, suspendedBody } from './moderation/suspension.js'
 import { getProfileWithPhotos } from './routes/profile.js'
 import { captureReferralAttribution } from './referrals/attribution.js'
 import { captureJoinTag } from './joinTags/attribution.js'
@@ -17,7 +18,7 @@ export type AuthUser = { id: string; name: string; setupComplete: boolean; local
 
 export type SignInResult =
   | { ok: true; userId: string; user: AuthUser; isNewUser: boolean }
-  | { ok: false; status: 401 | 500; body: { error: string; botUsername?: string | null } }
+  | { ok: false; status: 401 | 500; body: { error: string; botUsername?: string | null; suspendedUntil?: string } }
 
 export function normalizeEmail(raw: string): string {
   return raw.trim().toLowerCase()
@@ -26,6 +27,7 @@ export function normalizeEmail(raw: string): string {
 type AccountRow = {
   id: string; name: string; age: number; gender: string; looking_for: string
   bio: string | null; deleted_at: string | null; banned_at: string | null; locale: string | null
+  suspended_until?: Date | string | null
 }
 
 /** The sign-in response for a known user: the full profile once setup is done
@@ -65,22 +67,22 @@ async function findAccount(
   try {
     if (identity.kind === 'telegram') {
       const [row] = await sql<AccountRow[]>`
-        select id, name, age, gender, looking_for, bio, deleted_at, banned_at, locale
+        select id, name, age, gender, looking_for, bio, deleted_at, banned_at, suspended_until, locale
         from users where telegram_id = ${identity.tgUser.id}`
       return { row, attach: {} }
     }
     if (identity.kind === 'phone') {
       const [row] = await sql<AccountRow[]>`
-        select id, name, age, gender, looking_for, bio, deleted_at, banned_at, locale
+        select id, name, age, gender, looking_for, bio, deleted_at, banned_at, suspended_until, locale
         from users where phone = ${identity.phone}`
       return { row, attach: {} }
     }
     const [bySub] = await sql<AccountRow[]>`
-      select id, name, age, gender, looking_for, bio, deleted_at, banned_at, locale
+      select id, name, age, gender, looking_for, bio, deleted_at, banned_at, suspended_until, locale
       from users where google_sub = ${identity.sub}`
     if (bySub) return { row: bySub, attach: {} }
     const [byEmail] = await sql<(AccountRow & { google_sub: string | null })[]>`
-      select id, name, age, gender, looking_for, bio, deleted_at, banned_at, locale, google_sub
+      select id, name, age, gender, looking_for, bio, deleted_at, banned_at, suspended_until, locale, google_sub
       from users where email = ${normalizeEmail(identity.email)}`
     if (!byEmail) return { attach: {} }
     if (byEmail.google_sub !== null) return { attach: {}, mismatch: true }
@@ -136,6 +138,9 @@ export async function signIn(identity: Identity): Promise<SignInResult> {
   if (existing?.banned_at) {
     // botUsername lets the Blocked screen deep-link into the support bot chat.
     return { ok: false, status: 401, body: { error: 'account_banned', botUsername: getBotUsername() } }
+  }
+  if (existing && isSuspended(existing.suspended_until)) {
+    return { ok: false, status: 401, body: suspendedBody(existing.suspended_until!) }
   }
 
   if (existing) {

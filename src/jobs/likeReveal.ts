@@ -13,6 +13,7 @@ export async function runLikeRevealJob(now = new Date()): Promise<{ considered: 
       and not u.is_seed
       and u.deleted_at is null
       and u.banned_at is null
+      and (u.suspended_until is null or u.suspended_until <= now())
     group by s.swiped_id
     order by min(s.swiper_id::text), s.swiped_id`
   const ids = rows.map((r) => r.swiped_id)

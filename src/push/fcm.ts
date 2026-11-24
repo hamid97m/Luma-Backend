@@ -9,6 +9,7 @@ export type PushType =
   | 'referral_qualified' | 'referral_reward' | 'premium_purchased' | 'account_paused'
   | 'photo_warning' | 'support_reply' | 'admin_message' | 'purchase_reminder'
   | 'broadcast' | 'test' | 'message_read'
+  | 'account_banned' | 'account_suspended' | 'report_thanks'
 
 export interface PushPayload {
   type: PushType

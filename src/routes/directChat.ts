@@ -56,6 +56,7 @@ export async function directChatRoutes(app: FastifyInstance) {
           where id = ${targetUserId}
             and deleted_at is null
             and banned_at is null
+            and (suspended_until is null or suspended_until <= now())
             and paused_at is null
             and is_active = true
             and account_status = 'active'

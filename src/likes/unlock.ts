@@ -54,20 +54,23 @@ export async function grantFriendLikeDays(referrerId: string): Promise<void> {
           and f.id = r.referred_id
           and f.gender = 'woman' and not coalesce(f.is_seed, false)
           and f.deleted_at is null and f.banned_at is null and f.paused_at is null
+          and (f.suspended_until is null or f.suspended_until <= now())
           and exists (
             select 1 from users me
             where me.id = ${referrerId} and me.gender = 'woman' and me.deleted_at is null and me.banned_at is null)
           -- Her current main photo must not look like a man's (unless an admin
           -- cleared that flag); wait a little for the check to answer.
+          and exists (select 1 from user_photos p where p.user_id = f.id)
           and not exists (
             select 1 from (
-              select p.id from user_photos p where p.user_id = f.id order by p.position asc limit 1
+              select p.id, p.created_at from user_photos p where p.user_id = f.id order by p.position asc limit 1
             ) mp
             left join photo_ai_checks pc on pc.photo_id = mp.id
             where pc.approved = false
                or (pc.apparent_gender = 'man'
                    and pc.created_at > coalesce(f.gender_review_dismissed_at, '-infinity'::timestamptz))
-               or (${checksOn} and pc.photo_id is null and r.qualified_at > now() - ${PHOTO_CHECK_GRACE}::interval))
+               or (${checksOn} and pc.photo_id is null
+                   and greatest(r.qualified_at, mp.created_at) > now() - ${PHOTO_CHECK_GRACE}::interval))
         returning r.referred_id
       ), n as (select count(*)::int as friends from paid)
       update users u
@@ -77,7 +80,9 @@ export async function grantFriendLikeDays(referrerId: string): Promise<void> {
       where u.id = ${referrerId} and n.friends > 0
       returning u.id, u.telegram_id, u.allows_write_to_pm, u.locale, n.friends`
     if (!row) return
-    await notifyUserLikesUnlocked(row, row.friends * LIKES_DAYS_PER_FRIEND)
+    // Not awaited: GET /likes runs this as a catch-up and must not wait on Telegram.
+    notifyUserLikesUnlocked(row, row.friends * LIKES_DAYS_PER_FRIEND)
+      .catch((err) => console.error('likes-unlocked notify failed', err))
   } catch (err) {
     console.error('grantFriendLikeDays failed', err)
   }

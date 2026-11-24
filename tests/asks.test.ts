@@ -373,6 +373,18 @@ describe('photo proxy', () => {
     expect((await app.inject({ method: 'GET', url })).statusCode).toBe(404)
   })
 
+  it('a deleted account with a stored woman gender (no gender step) still gets photos', async () => {
+    await storage.upload('profile-photos', `${amir.id}/0.jpg`, Buffer.from('JPEGDATA'))
+    const { tokens } = await createWithLink()
+    const jake = await createProfile({ name: 'Jake', gender: 'woman', looking_for: 'men' })
+    await sql`update users set deleted_at = now() where id = ${jake.id}`
+    const body = (await openLink(tokens[0], tgAccount(jake.telegram_id, 'Jake'))).json()
+    expect(body.state).toBe('ready')
+    const res = await app.inject({ method: 'GET', url: path(body.view.profile.photos[0]) })
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toBe('JPEGDATA')
+  })
+
   it('404 for an unclaimed link even with a valid signature', async () => {
     await storage.upload('profile-photos', `${amir.id}/0.jpg`, Buffer.from('JPEGDATA'))
     await createWithLink()

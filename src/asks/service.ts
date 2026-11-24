@@ -843,6 +843,12 @@ export async function askPhotoObject(recipientId: string, index: number): Promis
     viewer = { userId: u.id, gender: u.gender, age: u.age, telegramId: rec.advisor_tg_id, knownGender: u.age > 0 ? u.gender : null }
   } else if (rec.kind === 'member' || rec.advisor_tg_id === null) {
     return null
+  } else {
+    // Non-member link advisor: same viewer the link itself used (a deleted or
+    // unfinished account's stored gender counts, as on the answer screen).
+    const v = await viewerByTelegram(Number(rec.advisor_tg_id))
+    if (v.banned) return null
+    viewer = v
   }
   if ((await gate(rec, viewer)) !== 'ready') return null
   const [photo] = await sql<{ url: string }[]>`

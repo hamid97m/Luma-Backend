@@ -2,7 +2,7 @@ import { sql } from '../db.js'
 import {
   ASK_ANSWER_NOTIFY_GAP_MS, ASK_NUDGE_AFTER_MS, ASK_RETENTION_MS,
 } from './config.js'
-import { notifyRequesterOfAnswer } from './service.js'
+import { notifyRequesterOfAnswer, persistFriends } from './service.js'
 import { notifyAskNudge } from './notify.js'
 
 const NUDGE_BATCH = 200
@@ -13,6 +13,7 @@ export type AskJobResult = {
 
 /**
  * Every 15 min (live mode only — see index.ts):
+ *  0. save the friendships behind current asks (before anything is purged);
  *  1. expire open asks past 48h;
  *  2. close asks whose target was banned / requester or target left, or a
  *     block appeared between them; purge at once when the target deleted;
@@ -23,6 +24,9 @@ export type AskJobResult = {
  */
 export async function runAskJob(now = new Date()): Promise<AskJobResult> {
   const nowIso = now.toISOString()
+
+  // If this throws, nothing below runs: a purge must never outrun the save.
+  await persistFriends()
 
   const expired = await sql`
     update ask_requests set status = 'expired', closed_at = ${nowIso}, closed_reason = 'expired'

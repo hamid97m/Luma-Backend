@@ -131,6 +131,34 @@ export type AskFriend = { id: string; name: string; photoUrl: string | null; las
 
 /** Member friends (deviation 4 of the spec): women who exchanged an ask with
  *  the user either way, or who joined from her link. Last interaction first. */
+/** Save the friendships behind current asks, so they survive the 30-day purge.
+ *  Same rule as listFriends: a member she asked, or whoever answered a share link
+ *  (matched by Telegram id, so an account created later counts too). Only the pair
+ *  is stored; gender/ban/block filters stay in listFriends. Returns rows written. */
+export async function persistFriends(): Promise<number> {
+  const rows = await sql`
+    insert into ask_friends (user_a, user_b, last_at)
+    select least(p.x, p.y), greatest(p.x, p.y), max(p.at)
+    from (
+      select r.requester_id as x, ar.recipient_id as y, coalesce(ar.answered_at, r.created_at) as at
+      from ask_recipients ar join ask_requests r on r.id = ar.request_id
+      where ar.recipient_id is not null and (ar.kind = 'member' or ar.answered_at is not null)
+      union all
+      select r.requester_id, u.id, ar.answered_at
+      from ask_recipients ar join ask_requests r on r.id = ar.request_id
+      join users u on u.telegram_id = ar.advisor_tg_id
+      where ar.kind = 'link' and ar.answered_at is not null
+    ) p
+    join users a on a.id = p.x and a.deleted_at is null
+    join users b on b.id = p.y and b.deleted_at is null
+    where p.x <> p.y
+    group by 1, 2
+    on conflict (user_a, user_b) do update set last_at = excluded.last_at
+      where ask_friends.last_at < excluded.last_at
+    returning 1`
+  return rows.length
+}
+
 export async function listFriends(userId: string, limit = 20): Promise<AskFriend[]> {
   const rows = await sql<{ id: string; name: string; photo_url: string | null; last_at: string }[]>`
     with interactions as (
@@ -159,6 +187,10 @@ export async function listFriends(userId: string, limit = 20): Promise<AskFriend
       from ask_recipients ar join ask_requests r on r.id = ar.request_id
       join users me on me.id = ${userId}
       where ar.kind = 'link' and ar.advisor_tg_id = me.telegram_id and ar.answered_at is not null
+      union all
+      -- Saved friendships: the asks behind them may be purged already.
+      select case when f.user_a = ${userId} then f.user_b else f.user_a end, f.last_at
+      from ask_friends f where f.user_a = ${userId} or f.user_b = ${userId}
     )
     select u.id, u.name, ${primaryPhoto(sql`u.id`)} as photo_url, max(i.at) as last_at
     from interactions i join users u on u.id = i.friend_id
@@ -867,6 +899,7 @@ export async function captureAskAttribution(newUserId: string, telegramId: numbe
  *  close. The 15-min job does the same as a backstop. Never throws. */
 export async function onAccountDeleted(userId: string): Promise<void> {
   try {
+    await sql`delete from ask_friends where user_a = ${userId} or user_b = ${userId}`
     await sql`delete from ask_requests where target_id = ${userId}`
     await sql`
       update ask_requests set status = 'closed', closed_at = now(), closed_reason = 'requester_gone'

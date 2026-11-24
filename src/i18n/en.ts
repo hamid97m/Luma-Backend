@@ -59,6 +59,7 @@ export const en = {
     qualified: (name: string) => `${name} joined Luma with your invite link 🎉 Thanks for spreading the word!`,
     rewardSwipes: (n: number) => `Referral reward: you got ${n} extra discovery swipes! 🔥`,
     rewardPremium: (days: number) => `Referral reward: you got ${days} days of Premium! 🌟`,
+    likesUnlocked: (days: number) => `Your friend joined Luma 🎉 You can see everyone who liked you for ${days} more days 💛`,
   },
   gifts: {
     invoiceTitle: (emoji: string) => `Gift ${emoji}`,

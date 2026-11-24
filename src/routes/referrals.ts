@@ -3,6 +3,7 @@ import { sql } from '../db.js'
 import { getReferralConfig } from '../referrals/config.js'
 import { ensureReferralCode } from '../referrals/attribution.js'
 import { MILESTONES, evaluateReferralRewards } from '../referrals/rewards.js'
+import { likesRewardStatus } from '../likes/unlock.js'
 import { getBotUsername } from '../bot.js'
 
 export async function referralRoutes(app: FastifyInstance) {
@@ -14,13 +15,14 @@ export async function referralRoutes(app: FastifyInstance) {
 
     if (enabled) await evaluateReferralRewards(req.userId) // lazy catch-up for rewards accrued while off
 
-    const [code, totals, rewards] = await Promise.all([
+    const [code, totals, rewards, likesReward] = await Promise.all([
       ensureReferralCode(req.userId),
       // A failed read renders as empty on purpose (never fatal).
       sql<{ qualified_at: string | null }[]>`
         select qualified_at from referrals where referrer_id = ${req.userId} limit 1000`.catch(() => []),
       sql<{ milestone: number }[]>`
         select milestone from referral_rewards where referrer_id = ${req.userId}`.catch(() => []),
+      likesRewardStatus(req.userId),
     ])
     const rows = totals
     const qualifiedCount = rows.filter((r) => r.qualified_at !== null).length
@@ -33,7 +35,9 @@ export async function referralRoutes(app: FastifyInstance) {
       link: code && username ? `https://t.me/${username}?start=ref_${code}` : null,
       qualifiedCount,
       totalCount: rows.length,
-      milestones: MILESTONES.map((m) => ({
+      // Women: days of "see who liked you" per woman friend, no milestones.
+      likesReward,
+      milestones: likesReward ? [] : MILESTONES.map((m) => ({
         ...m,
         achieved: qualifiedCount >= m.count,
         granted: granted.has(m.count),

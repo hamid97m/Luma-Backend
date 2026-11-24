@@ -59,6 +59,7 @@ export const ar = {
     qualified: (name: string) => `${name} انضم إلى لوما عبر رابط دعوتك 🎉 شكرًا لأنك تعرّف الناس على لوما!`,
     rewardSwipes: (n: number) => `مكافأة الدعوة: حصلت على ${n} سحبة اكتشاف إضافية! 🔥`,
     rewardPremium: (days: number) => `مكافأة الدعوة: حصلت على ${days} يومًا من بريميوم! 🌟`,
+    likesUnlocked: (days: number) => `انضمت صديقتك إلى لوما 🎉 يمكنك رؤية كل من أُعجب بك لمدة ${days} يومًا إضافيًا 💛`,
   },
   gifts: {
     invoiceTitle: (emoji: string) => `هدية ${emoji}`,

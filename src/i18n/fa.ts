@@ -60,6 +60,7 @@ export const fa = {
     qualified: (name: string) => `${name} با لینک دعوت تو عضو لوما شد 🎉 مرسی که لوما رو معرفی می‌کنی!`,
     rewardSwipes: (n: number) => `جایزه دعوت از دوستان: ${n} دیسکاوری اضافه گرفتی! 🔥`,
     rewardPremium: (days: number) => `جایزه دعوت از دوستان: ${days} روز اشتراک پریمیوم گرفتی! 🌟`,
+    likesUnlocked: (days: number) => `دوستت عضو لوما شد 🎉 تا ${days} روز دیگه می‌تونی همه‌ی کسایی که لایکت کردن رو ببینی 💛`,
   },
   gifts: {
     invoiceTitle: (emoji: string) => `هدیه ${emoji}`,

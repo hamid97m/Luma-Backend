@@ -49,9 +49,10 @@ function toLiker(r: LikerRow): IncomingLiker {
  * Like-swipes aimed at `userId` whose swiper still qualifies as an incoming liker:
  * not deleted/banned/paused (nor a wiped, re-opened deleted account), not already swiped by me (either direction), not
  * blocked either way, not a matched partner (they belong in Matches, not Likes).
- * `swiperId` narrows to one pair.
+ * `swiperId` narrows to one pair. `realOnly` drops seed and photo-less likers (a
+ * woman's queue: the same people her daily reveal can pick).
  */
-function likerQuery(userId: string, swiperId: string | null, limit: number) {
+function likerQuery(userId: string, swiperId: string | null, limit: number, realOnly = false) {
   return sql<LikerRow[]>`
     select u.id, u.name, u.age, u.bio, u.location, u.interests, u.telegram_id, u.gender,
            u.premium_until, s.created_at as liked_at
@@ -61,6 +62,7 @@ function likerQuery(userId: string, swiperId: string | null, limit: number) {
       and s.direction = 'like'
       ${swiperId !== null ? sql`and s.swiper_id = ${swiperId}` : sql``}
       and u.deleted_at is null and u.banned_at is null and u.paused_at is null
+      ${realOnly ? sql`and not coalesce(u.is_seed, false) and exists (select 1 from user_photos ph where ph.user_id = u.id)` : sql``}
       -- A deleted account that reopens the app gets deleted_at cleared but keeps
       -- its wiped profile (blank name, age 0) — still gone as far as Likes goes.
       and u.age > 0 and btrim(u.name) <> ''
@@ -89,6 +91,12 @@ export async function getIncomingLikers(userId: string): Promise<IncomingLiker[]
     console.error('getIncomingLikers failed', err)
     return []
   }
+}
+
+/** A woman's whole queue (newest first): everyone waiting for her answer, real
+ *  profiles only. Throws on a read error. */
+export async function getLikerQueue(userId: string): Promise<IncomingLiker[]> {
+  return (await likerQuery(userId, null, MAX_LIKERS, true)).map(toLiker)
 }
 
 /**

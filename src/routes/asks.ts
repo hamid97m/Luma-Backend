@@ -1,7 +1,8 @@
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { FastifyInstance, FastifyRequest } from 'fastify'
-import { resolveObjectFile, isSafeObjectPath } from '../storage.js'
+import { resolveObjectFile } from '../storage.js'
+import { profilePhotoObjectPath } from '../likes/photoPath.js'
 import { verifyAskPhotoSig } from '../asks/photoUrl.js'
 import { verifyInitData } from '../auth.js'
 import {
@@ -23,22 +24,6 @@ function linkCaller(req: FastifyRequest): LinkCaller | undefined {
 }
 
 const LINK_RATE_LIMIT = { rateLimit: { max: 60, timeWindow: '1 minute' } }
-
-/** `.../profile-photos/<userId>/<photoId>` (any host: migrated files kept
- *  their paths) → the object path on local disk; null for anything else. */
-export function profilePhotoObjectPath(url: string): string | null {
-  let pathname: string
-  try {
-    pathname = new URL(url).pathname
-  } catch {
-    return null
-  }
-  const marker = '/profile-photos/'
-  const at = pathname.indexOf(marker)
-  if (at < 0) return null
-  const objectPath = decodeURIComponent(pathname.slice(at + marker.length))
-  return isSafeObjectPath(objectPath) ? objectPath : null
-}
 
 export async function asksRoutes(app: FastifyInstance) {
   // ── Requester ──

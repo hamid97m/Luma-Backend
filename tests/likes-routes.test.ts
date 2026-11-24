@@ -5,7 +5,9 @@ vi.mock('../src/auth.js', () => ({ verifyInitData: vi.fn() }))
 // Liker lists and the reveal have their own suites (likes-service, reveal); here
 // they are inputs, and the route's own reads (toggle, premium, photos, watermark)
 // hit the real database.
-vi.mock('../src/likes/service.js', () => ({ getIncomingLikers: vi.fn(), getIncomingLiker: vi.fn() }))
+vi.mock('../src/likes/service.js', () => ({
+  getIncomingLikers: vi.fn(), getIncomingLiker: vi.fn(), getLikerQueue: vi.fn().mockResolvedValue([]),
+}))
 vi.mock('../src/likes/reveal.js', () => ({
   ensureDailyReveal: vi.fn().mockResolvedValue({ applies: false }),
   hiddenIncomingLikerIds: vi.fn().mockResolvedValue([]),

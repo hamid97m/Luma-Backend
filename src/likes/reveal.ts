@@ -1,5 +1,6 @@
 import { sql } from '../db.js'
 import { notifyUserLike } from '../notify/userNotify.js'
+import { getLikesAccess } from './unlock.js'
 import { isEligibleRevealLiker, pickRevealCandidate, tehranDate, type RevealCandidate } from './revealPick.js'
 
 export type RevealResult = { applies: false } | { applies: true; swiperId: string | null }
@@ -203,6 +204,8 @@ export async function ensureDailyReveal(
 }
 
 export async function hiddenIncomingLikerIds(userId: string, now = new Date()): Promise<string[]> {
+  // Invite unlock / premium: nobody is hidden from her.
+  if ((await getLikesAccess(userId, now.getTime())).unlocked) return []
   const reveal = await ensureDailyReveal(userId, now, { waitForNotify: false })
   if (!reveal.applies) return []
   const likes = await loadLikeSwipes(userId)

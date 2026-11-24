@@ -842,6 +842,15 @@ export async function captureAskAttribution(newUserId: string, telegramId: numbe
       limit 1`
     if (!first) return
     await sql`update users set invited_by = ${first.requester_id} where id = ${newUserId} and invited_by is null`
+    // The same friend also counts as her invite, unless an invite link already won.
+    const credited = await sql`
+      update users set referred_by = ${first.requester_id}
+      where id = ${newUserId} and referred_by is null returning id`
+    if (credited.length > 0) {
+      await sql`
+        insert into referrals (referrer_id, referred_id) values (${first.requester_id}, ${newUserId})
+        on conflict (referred_id) do nothing`
+    }
     const days = first.answered_at
       ? Math.floor((Date.now() - new Date(first.answered_at).getTime()) / 86_400_000)
       : null

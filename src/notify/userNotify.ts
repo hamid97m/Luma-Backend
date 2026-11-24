@@ -1,7 +1,7 @@
 import {
   notifyMatch, notifyNewLike, notifyNewMessage, notifyGiftIntro, notifyReferralQualified, notifyReferralReward,
   notifyPremiumPurchased, notifyPaused, notifyFakePhotoWarning, notifyTicketReply, sendBroadcastMessage,
-  referralRewardText, fakePhotoWarningText, ticketReplyText,
+  notifyLikesUnlocked, referralRewardText, fakePhotoWarningText, ticketReplyText,
 } from '../bot.js'
 import { sendPushToUser, isPushConfigured, type PushPayload } from '../push/fcm.js'
 import { isStandby } from '../appMode.js'
@@ -231,6 +231,19 @@ export async function notifyUserReferralReward(
       body: stripHtml(referralRewardText(milestone, localeOf(u))), ...homeLink(),
     }),
     () => notifyReferralReward(tg(u), milestone, localeOf(u)),
+  )
+}
+
+/** A friend she invited joined: her whole likes list is open for `days` more days. */
+export async function notifyUserLikesUnlocked(u: NotifyUser, days: number): Promise<'push' | 'bot' | 'none'> {
+  const t = tFor(localeOf(u))
+  return deliverToUser(
+    u,
+    () => ({
+      type: 'referral_reward', title: t.push.title.referralReward,
+      body: stripHtml(t.referral.likesUnlocked(days)), ...safeLinkFields({ screen: 'likes' }),
+    }),
+    () => notifyLikesUnlocked(tg(u), days, localeOf(u)),
   )
 }
 

@@ -2,6 +2,7 @@ import { sql } from '../db.js'
 import { getReferralConfig } from './config.js'
 import { extendPremiumUntil } from '../premium/service.js'
 import { notifyUserReferralQualified, notifyUserReferralReward } from '../notify/userNotify.js'
+import { grantFriendLikeDays } from '../likes/unlock.js'
 import type { Locale } from '../i18n/index.js'
 
 export interface Milestone {
@@ -65,6 +66,13 @@ export async function evaluateReferralRewards(referrerId: string): Promise<void>
   try {
     const config = await getReferralConfig()
     if (!config?.enabled) return
+
+    // A woman's invites pay in "see who liked you" days instead of milestones.
+    const [who] = await sql<{ gender: string }[]>`select gender from users where id = ${referrerId}`
+    if (who?.gender === 'woman') {
+      await grantFriendLikeDays(referrerId)
+      return
+    }
 
     const [{ count: qualifiedCount }] = await sql<{ count: number }[]>`
       select count(*)::int as count from referrals

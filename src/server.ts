@@ -118,7 +118,8 @@ export async function buildApp(): Promise<FastifyInstance> {
       const auth = req.headers.authorization
       // Ask share links: callers may have no account (initData only) — key by IP
       // so made-up headers can't mint fresh buckets for these public routes.
-      if (req.url.startsWith('/asks/link/') || req.url.startsWith('/asks/photo/')) return req.ip
+      if (req.url.startsWith('/asks/link/') || req.url.startsWith('/asks/photo/') ||
+          req.url.startsWith('/likes/blurred/')) return req.ip
       // Hash the full header: raw slicing gave all Bearer JWTs one shared bucket
       // (constant "Bearer eyJ..." prefix) and let attackers mint fresh buckets.
       return auth ? createHash('sha256').update(auth).digest('hex') : req.ip
@@ -152,6 +153,8 @@ export async function buildApp(): Promise<FastifyInstance> {
       // Ask-a-friend links: a non-member advisor has no users row; the routes check initData themselves.
       req.url.startsWith('/asks/link/') ||
       req.url.startsWith('/asks/photo/') ||
+      // Blurred teaser photos: <img> can't send auth; the encrypted token is the credential.
+      req.url.startsWith('/likes/blurred/') ||
       req.url.startsWith('/media-upload/') ||
       req.url.startsWith('/media-private/') ||
       req.url.startsWith('/media/')

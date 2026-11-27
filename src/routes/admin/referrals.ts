@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { sql } from '../../db.js'
-import { getReferralConfig, updateReferralConfig } from '../../referrals/config.js'
+import { getReferralConfig, updateReferralConfig, REFERRAL_AUDIENCES, type ReferralAudience } from '../../referrals/config.js'
 
 export async function adminReferralRoutes(app: FastifyInstance) {
   app.get('/referrals/config', async (_req, reply) => {
@@ -10,11 +10,18 @@ export async function adminReferralRoutes(app: FastifyInstance) {
   })
 
   app.put('/referrals/config', async (req, reply) => {
-    const body = (req.body ?? {}) as { enabled?: unknown }
+    const body = (req.body ?? {}) as { enabled?: unknown; audience?: unknown }
     if (typeof body.enabled !== 'boolean') {
       return reply.code(400).send({ error: 'invalid_enabled' })
     }
-    const config = await updateReferralConfig({ enabled: body.enabled })
+    // audience is optional (older panel builds send only the toggle).
+    if (body.audience !== undefined && !(REFERRAL_AUDIENCES as unknown[]).includes(body.audience)) {
+      return reply.code(400).send({ error: 'invalid_audience' })
+    }
+    const config = await updateReferralConfig({
+      enabled: body.enabled,
+      audience: body.audience as ReferralAudience | undefined,
+    })
     if (!config) return reply.code(500).send({ error: 'config_update_failed' })
     return config
   })

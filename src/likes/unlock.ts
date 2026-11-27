@@ -1,6 +1,6 @@
 import { sql } from '../db.js'
 import { isPremiumActive } from '../premium/service.js'
-import { getReferralConfig } from '../referrals/config.js'
+import { getReferralConfig, referralOpenTo } from '../referrals/config.js'
 import { notifyUserLikesUnlocked } from '../notify/userNotify.js'
 
 /** Days of "see everyone who liked you" a woman gets per woman friend who joins. */
@@ -40,7 +40,8 @@ export async function getLikesAccess(userId: string, nowMs = Date.now()): Promis
  */
 export async function grantFriendLikeDays(referrerId: string): Promise<void> {
   try {
-    if (!(await getReferralConfig())?.enabled) return
+    // Only women are paid here, so the program must be open to women.
+    if (!referralOpenTo(await getReferralConfig(), 'woman')) return
     const checksOn = Boolean(process.env.DEEPSEEK_API_KEY) && process.env.PHOTO_AI_CHECK !== 'off'
     const [row] = await sql<{
       id: string; telegram_id: number | null; allows_write_to_pm: boolean | null; locale: string | null; friends: number

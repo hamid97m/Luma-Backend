@@ -1,5 +1,5 @@
 import { sql } from '../db.js'
-import { getReferralConfig } from './config.js'
+import { getReferralConfig, referralOpenTo } from './config.js'
 import { extendPremiumUntil } from '../premium/service.js'
 import { notifyUserReferralQualified, notifyUserReferralReward } from '../notify/userNotify.js'
 import { grantFriendLikeDays } from '../likes/unlock.js'
@@ -67,8 +67,11 @@ export async function evaluateReferralRewards(referrerId: string): Promise<void>
     const config = await getReferralConfig()
     if (!config?.enabled) return
 
-    // A woman's invites pay in "see who liked you" days instead of milestones.
     const [who] = await sql<{ gender: string }[]>`select gender from users where id = ${referrerId}`
+    // Outside the audience the admin picked: same as the program being off.
+    if (!referralOpenTo(config, who?.gender)) return
+
+    // A woman's invites pay in "see who liked you" days instead of milestones.
     if (who?.gender === 'woman') {
       await grantFriendLikeDays(referrerId)
       return
@@ -136,7 +139,7 @@ export async function maybeQualifyReferral(userId: string): Promise<void> {
       select id, gender, telegram_id, allows_write_to_pm, locale from users where id = ${qualified.referrer_id}`
     // Push first; bot DM only if allowed (telegram_id > 0, DMs not declined).
     // A woman's woman friend: the "likes are open" message says it (one message, not two).
-    const oneMessage = user.gender === 'woman' && referrer?.gender === 'woman' && (await getReferralConfig())?.enabled
+    const oneMessage = user.gender === 'woman' && referrer?.gender === 'woman' && referralOpenTo(await getReferralConfig(), 'woman')
     if (referrer && !oneMessage) await notifyUserReferralQualified(referrer, user.name)
     await evaluateReferralRewards(qualified.referrer_id)
   } catch (err) {

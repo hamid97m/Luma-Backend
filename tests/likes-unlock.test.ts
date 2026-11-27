@@ -106,6 +106,16 @@ describe('grantFriendLikeDays', () => {
     expect(await daysLeft()).toBe(7)
   })
 
+  it('does nothing while the program is for men only, then catches up', async () => {
+    await sql`update referral_config set audience = 'men'`
+    await friend()
+    await grantFriendLikeDays(her.id)
+    expect(await daysLeft()).toBe(0)
+    await sql`update referral_config set audience = 'women'`
+    await grantFriendLikeDays(her.id)
+    expect(await daysLeft()).toBe(7)
+  })
+
   it('a man inviting a woman gets no like days and the friend stays unpaid', async () => {
     const him = await createUser({ gender: 'man' })
     await friend({}, true, him)

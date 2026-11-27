@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { sql } from '../db.js'
-import { getReferralConfig } from '../referrals/config.js'
+import { getReferralConfig, referralOpenTo } from '../referrals/config.js'
 import { ensureReferralCode } from '../referrals/attribution.js'
 import { MILESTONES, evaluateReferralRewards } from '../referrals/rewards.js'
 import { likesRewardStatus } from '../likes/unlock.js'
@@ -11,7 +11,11 @@ export async function referralRoutes(app: FastifyInstance) {
     if (!req.userId) return reply.status(401).send({ error: 'unauthorized' })
 
     const config = await getReferralConfig()
-    const enabled = config?.enabled === true
+    // On for this user = program on and their gender is in the admin's audience.
+    const [me] = config?.enabled
+      ? await sql<{ gender: string }[]>`select gender from users where id = ${req.userId}`.catch(() => [])
+      : []
+    const enabled = referralOpenTo(config, me?.gender)
 
     if (enabled) await evaluateReferralRewards(req.userId) // lazy catch-up for rewards accrued while off
 

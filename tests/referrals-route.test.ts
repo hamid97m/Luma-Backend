@@ -32,6 +32,24 @@ describe('GET /referrals/me', () => {
     await sql`insert into referrals (referrer_id, referred_id, qualified_at) values (${me.id}, ${u.id}, ${qualifiedAt})`
   }
 
+  it.each([
+    ['women', 'man', false],
+    ['women', 'woman', true],
+    ['men', 'man', true],
+    ['men', 'woman', false],
+    ['all', 'nonbinary', true],
+    ['women', 'nonbinary', false],
+  ])('audience %s: a %s sees enabled=%s (rewards only evaluated when on)', async (audience, gender, on) => {
+    await sql`update referral_config set enabled = true, audience = ${audience}`
+    const u = await createUser({ gender })
+    authAs(u)
+    evaluateReferralRewards.mockClear()
+    const res = await app.inject({ method: 'GET', url: '/referrals/me', headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().enabled).toBe(on)
+    expect(evaluateReferralRewards).toHaveBeenCalledTimes(on ? 1 : 0)
+  })
+
   it('returns 401 when unauthenticated', async () => {
     const res = await app.inject({ method: 'GET', url: '/referrals/me' })
     expect(res.statusCode).toBe(401)

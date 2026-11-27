@@ -26,7 +26,7 @@ describe('admin referrals', () => {
   it('reads the referral config', async () => {
     const res = await app.inject({ method: 'GET', url: '/admin/referrals/config', headers })
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ enabled: false })
+    expect(res.json()).toEqual({ enabled: false, audience: 'all' })
   })
 
   it('500 config_fetch_failed when the config row is missing', async () => {
@@ -39,8 +39,23 @@ describe('admin referrals', () => {
   it('persists and echoes the toggle on PUT', async () => {
     const res = await app.inject({ method: 'PUT', url: '/admin/referrals/config', headers, payload: { enabled: true } })
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ enabled: true })
+    expect(res.json()).toEqual({ enabled: true, audience: 'all' })
     expect((await sql`select enabled from referral_config`)[0].enabled).toBe(true)
+  })
+
+  it('saves the audience, and keeps it when a request sends only the toggle', async () => {
+    let res = await app.inject({ method: 'PUT', url: '/admin/referrals/config', headers, payload: { enabled: true, audience: 'women' } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ enabled: true, audience: 'women' })
+    res = await app.inject({ method: 'PUT', url: '/admin/referrals/config', headers, payload: { enabled: true } })
+    expect(res.json()).toEqual({ enabled: true, audience: 'women' })
+  })
+
+  it('rejects an unknown audience', async () => {
+    const res = await app.inject({ method: 'PUT', url: '/admin/referrals/config', headers, payload: { enabled: true, audience: 'girls' } })
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'invalid_audience' })
+    expect((await sql`select audience from referral_config`)[0].audience).toBe('all')
   })
 
   it('rejects a non-boolean enabled value', async () => {

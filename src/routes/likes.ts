@@ -43,7 +43,7 @@ async function likersForViewer(userId: string): Promise<ViewerLikes> {
 async function unlockPaths(): Promise<{ invite: boolean; premium: boolean }> {
   try {
     const [row] = await sql<{ invite: boolean | null; premium: boolean | null }[]>`
-      select (select enabled from referral_config where id = true) as invite,
+      select (select enabled and audience <> 'men' from referral_config where id = true) as invite,
              (select premium_enabled from premium_config where id = true) as premium`
     return { invite: row?.invite === true, premium: row?.premium === true }
   } catch {

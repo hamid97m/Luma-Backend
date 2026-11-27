@@ -69,6 +69,19 @@ describe('evaluateReferralRewards', () => {
     expect(await userRow(referrer.id)).toEqual({ bonus_swipes: 0, premium_until: null })
   })
 
+  it('women-only audience: a man earns nothing, then catches up when it opens to him', async () => {
+    await sql`update referral_config set enabled = true, audience = 'women'`
+    await referrals(referrer.id, 3)
+    await evaluateReferralRewards(referrer.id)
+    expect(await rewardRows(referrer.id)).toEqual([])
+    expect(await userRow(referrer.id)).toEqual({ bonus_swipes: 0, premium_until: null })
+    expect(notifyReferralReward).not.toHaveBeenCalled()
+
+    await sql`update referral_config set audience = 'all'`
+    await evaluateReferralRewards(referrer.id)
+    expect(await rewardRows(referrer.id)).toEqual([1, 3])
+  })
+
   it('no-ops when the referral config row is missing', async () => {
     await sql`delete from referral_config`
     await referrals(referrer.id, 3)
